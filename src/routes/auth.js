@@ -12,8 +12,8 @@ router.post('/register', async (req, res, next) => {
     }
 
     // Crear usuario en Supabase Auth
-    const { data: authData, error: authError } = await supabase.auth.admin.createUser({
-      email, password, email_confirm: true
+    const { data: authData, error: authError } = await supabase.auth.signUp({
+      email, password
     });
     if (authError) throw { status: 400, message: authError.message };
 
