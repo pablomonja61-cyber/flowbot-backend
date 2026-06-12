@@ -1,0 +1,185 @@
+const express = require('express');
+const router = express.Router();
+const supabase = require('../models/supabase');
+const { executeFlow, saveMessage } = require('../services/flowEngine');
+const { v4: uuidv4 } = require('uuid');
+
+// ── GET /webhook/whatsapp — verificación de Meta ─────────────
+router.get('/whatsapp', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && token === process.env.META_WEBHOOK_VERIFY_TOKEN) {
+    console.log('[Webhook] Verificado por Meta ✓');
+    return res.status(200).send(challenge);
+  }
+  console.warn('[Webhook] Verificación fallida');
+  res.status(403).send('Forbidden');
+});
+
+// ── POST /webhook/whatsapp — mensajes entrantes ──────────────
+router.post('/whatsapp', async (req, res) => {
+  // Responder 200 inmediatamente a Meta (requiere <5s)
+  res.status(200).send('EVENT_RECEIVED');
+
+  try {
+    const body = JSON.parse(req.body.toString());
+    if (body.object !== 'whatsapp_business_account') return;
+
+    for (const entry of body.entry || []) {
+      for (const change of entry.changes || []) {
+        if (change.field !== 'messages') continue;
+
+        const value = change.value;
+        const phoneNumberId = value.metadata?.phone_number_id;
+        if (!phoneNumberId) continue;
+
+        // Procesar cada mensaje
+        for (const msg of value.messages || []) {
+          if (msg.type !== 'text' && msg.type !== 'interactive') continue;
+
+          const contactPhone = msg.from;
+          const userMessage = msg.type === 'text'
+            ? msg.text?.body || ''
+            : msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || '';
+
+          if (!userMessage) continue;
+
+          console.log(`[Webhook] Mensaje de ${contactPhone}: "${userMessage}"`);
+
+          // Procesar en background sin bloquear
+          processIncomingMessage(phoneNumberId, contactPhone, userMessage).catch(err => {
+            console.error('[Webhook] Error procesando mensaje:', err.message);
+          });
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[Webhook] Error parseando body:', err.message);
+  }
+});
+
+// ════════════════════════════════════════════════════════════
+// Lógica principal: recibe msg → busca trigger → ejecuta flujo
+// ════════════════════════════════════════════════════════════
+async function processIncomingMessage(phoneNumberId, contactPhone, userMessage) {
+  // 1. Buscar la conexión por phone_number_id
+  const { data: connection } = await supabase
+    .from('connections')
+    .select('*')
+    .eq('phone_number_id', phoneNumberId)
+    .eq('is_active', true)
+    .single();
+
+  if (!connection) {
+    console.warn(`[Webhook] No se encontró conexión para phoneNumberId: ${phoneNumberId}`);
+    return;
+  }
+
+  const userId = connection.user_id;
+
+  // 2. Obtener o crear conversación
+  let { data: conversation } = await supabase
+    .from('conversations')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('contact_phone', contactPhone)
+    .eq('connection_id', connection.id)
+    .single();
+
+  if (!conversation) {
+    const { data: newConv } = await supabase
+      .from('conversations')
+      .insert({
+        id: uuidv4(),
+        user_id: userId,
+        connection_id: connection.id,
+        contact_phone: contactPhone,
+        contact_name: contactPhone,
+        status: 'active',
+        unread_count: 1,
+        last_message: userMessage.slice(0, 100),
+        last_message_at: new Date().toISOString()
+      })
+      .select()
+      .single();
+    conversation = newConv;
+  }
+
+  // 3. Guardar mensaje entrante
+  await saveMessage(conversation.id, userMessage, 'inbound');
+
+  // 4. Buscar trigger que coincida con el mensaje
+  const normalizedMsg = userMessage.toLowerCase().trim();
+
+  const { data: triggers } = await supabase
+    .from('triggers')
+    .select('*, flows(id, nodes, edges, is_active)')
+    .eq('user_id', userId)
+    .eq('connection_id', connection.id)
+    .eq('is_active', true);
+
+  if (!triggers?.length) {
+    console.log(`[Webhook] No hay triggers activos para user ${userId}`);
+    return;
+  }
+
+  // Buscar trigger que coincida (exact match o contains)
+  const matchedTrigger = triggers.find(t => {
+    const kw = t.keyword.toLowerCase().trim();
+    return normalizedMsg === kw || normalizedMsg.includes(kw);
+  });
+
+  if (!matchedTrigger) {
+    // Buscar si hay algún flujo con Agente IA como respuesta por defecto
+    const defaultTrigger = triggers.find(t => t.keyword === '*' || t.keyword === 'default');
+    if (!defaultTrigger) {
+      console.log(`[Webhook] Sin coincidencia para: "${normalizedMsg}"`);
+      return;
+    }
+    // Ejecutar flujo default
+    await executeFlow(
+      defaultTrigger.flow_id,
+      contactPhone,
+      userMessage,
+      connection,
+      conversation.id
+    );
+    return;
+  }
+
+  // 5. Verificar si es repetible o ya fue ejecutado
+  if (!matchedTrigger.is_repeatable) {
+    const { count } = await supabase
+      .from('trigger_executions')
+      .select('*', { count: 'exact', head: true })
+      .eq('trigger_id', matchedTrigger.id)
+      .eq('contact_phone', contactPhone);
+    if (count > 0) {
+      console.log(`[Webhook] Trigger no repetible ya ejecutado para ${contactPhone}`);
+      return;
+    }
+  }
+
+  // 6. Registrar ejecución del trigger
+  await supabase.from('trigger_executions').insert({
+    id: uuidv4(),
+    trigger_id: matchedTrigger.id,
+    contact_phone: contactPhone,
+    conversation_id: conversation.id,
+    executed_at: new Date().toISOString()
+  });
+
+  // 7. Ejecutar el flujo
+  console.log(`[Webhook] Ejecutando flujo "${matchedTrigger.flows?.id}" para trigger "${matchedTrigger.name}"`);
+  await executeFlow(
+    matchedTrigger.flow_id,
+    contactPhone,
+    userMessage,
+    connection,
+    conversation.id
+  );
+}
+
+module.exports = router;
