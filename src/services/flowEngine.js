@@ -125,7 +125,8 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
     const node = nodeMap[currentNodeId];
     if (!node) break;
 
-    console.log(`[Flow] Ejecutando nodo: ${node.type} (${node.id})`);
+  console.log(`[Flow] Ejecutando nodo: ${node.type} (${node.id})`);
+console.log(`[Flow] Data del nodo:`, JSON.stringify(node.data));
 
     switch (node.type) {
 
