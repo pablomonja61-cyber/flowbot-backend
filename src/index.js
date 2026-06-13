@@ -9,6 +9,7 @@ const flowRoutes = require('./routes/flows');
 const triggerRoutes = require('./routes/triggers');
 const connectionRoutes = require('./routes/connections');
 const conversationRoutes = require('./routes/conversations');
+const aiConfigRoutes = require('./routes/aiConfig');
 const mediaRoutes = require('./routes/media');
 
 const app = express();
@@ -39,6 +40,7 @@ app.use('/api/flows', flowRoutes);
 app.use('/api/triggers', triggerRoutes);
 app.use('/api/connections', connectionRoutes);
 app.use('/api/conversations', conversationRoutes);
+app.use('/api/ai-config', aiConfigRoutes);
 app.use('/api/media', mediaRoutes);
 
 // ── Error handler global ────────────────────────────────────
