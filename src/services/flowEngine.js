@@ -229,8 +229,11 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
       case 'label': {
         const tag = node.data?.tag || '';
         if (tag) {
+          const { data: convData } = await supabase.from('conversations')
+            .select('tags').eq('id', conversationId).single();
+          const currentTags = convData?.tags || [];
           await supabase.from('conversations')
-            .update({ tags: supabase.raw(`array_append(tags, '${tag}')`) })
+            .update({ tags: [...currentTags, tag] })
             .eq('id', conversationId);
         }
         break;
@@ -276,7 +279,7 @@ async function saveMessage(conversationId, content, direction) {
   await supabase.from('conversations').update({
     last_message: content.slice(0, 100),
     last_message_at: new Date().toISOString(),
-    ...(direction === 'inbound' ? { unread_count: supabase.raw('unread_count + 1') } : {})
+    ...(direction === 'inbound' ? { unread_count: 1 } : {})
   }).eq('id', conversationId);
 }
 
