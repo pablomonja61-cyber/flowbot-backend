@@ -1,34 +1,34 @@
 const express = require('express');
 const router = express.Router();
-const multer = require('multer');
 const auth = require('../middleware/auth');
 const supabase = require('../models/supabase');
 const { v4: uuidv4 } = require('uuid');
 
-// Multer en memoria
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024 } // 50MB
-});
-
 router.use(auth);
 
 // ── POST /api/media/upload ────────────────────────────────────
-router.post('/upload', upload.single('file'), async (req, res, next) => {
+// Acepta JSON: { name, type, data (base64) }
+router.post('/upload', async (req, res, next) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No se encontró archivo' });
+    const { name, type, data } = req.body;
+
+    if (!name || !data) {
+      return res.status(400).json({ error: 'Se requiere name y data (base64)' });
     }
 
-    const { originalname, mimetype, buffer } = req.file;
-    const ext = originalname.split('.').pop();
+    // Convertir base64 a buffer
+    const base64Data = data.replace(/^data:[^;]+;base64,/, '');
+    const buffer = Buffer.from(base64Data, 'base64');
+
+    const ext = name.split('.').pop();
+    const mimeType = type || 'application/octet-stream';
     const uniqueName = `${req.user.id}/${uuidv4()}.${ext}`;
 
     // Subir a Supabase Storage
     const { error: uploadError } = await supabase.storage
       .from('media')
       .upload(uniqueName, buffer, {
-        contentType: mimetype,
+        contentType: mimeType,
         upsert: false
       });
 
@@ -42,14 +42,14 @@ router.post('/upload', upload.single('file'), async (req, res, next) => {
     const publicUrl = urlData.publicUrl;
 
     // Guardar en tabla media
-    const { data, error } = await supabase
+    const { data: record, error } = await supabase
       .from('media')
       .insert({
         id: uuidv4(),
         user_id: req.user.id,
-        name: originalname,
+        name,
         url: publicUrl,
-        type: mimetype,
+        type: mimeType,
         size: buffer.length,
         path: uniqueName,
         created_at: new Date().toISOString()
@@ -59,7 +59,7 @@ router.post('/upload', upload.single('file'), async (req, res, next) => {
 
     if (error) throw error;
 
-    res.status(201).json(data);
+    res.status(201).json(record);
   } catch (err) {
     console.error('[Media upload error]', err);
     next(err);
@@ -102,10 +102,8 @@ router.delete('/:id', async (req, res, next) => {
       return res.status(404).json({ error: 'Archivo no encontrado' });
     }
 
-    // Eliminar de Storage
     await supabase.storage.from('media').remove([file.path]);
 
-    // Eliminar de tabla
     const { error } = await supabase
       .from('media')
       .delete()
