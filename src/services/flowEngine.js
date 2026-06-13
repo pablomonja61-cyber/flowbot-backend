@@ -1,7 +1,7 @@
 const axios = require('axios');
 const supabase = require('../models/supabase');
 
-// ── Llamar a Groq con contexto del producto ──────────────────
+// ── IA con Groq ──────────────────────────────────────────────
 async function callGroqAI(systemPrompt, conversationHistory, userMessage) {
   try {
     const messages = [
@@ -35,7 +35,7 @@ async function callGroqAI(systemPrompt, conversationHistory, userMessage) {
   }
 }
 
-// ── Enviar mensaje por WhatsApp ──────────────────────────────
+// ── Enviar mensaje de texto ──────────────────────────────────
 async function sendWhatsAppMessage(phoneNumberId, accessToken, to, message) {
   try {
     await axios.post(
@@ -48,12 +48,44 @@ async function sendWhatsAppMessage(phoneNumberId, accessToken, to, message) {
       },
       { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
     );
+    console.log(`[WhatsApp] Texto enviado a ${to}`);
   } catch (err) {
     console.error('[WhatsApp send error]', err.response?.data || err.message);
   }
 }
 
-// ── Enviar botones interactivos ──────────────────────────────
+// ── Enviar imagen ────────────────────────────────────────────
+async function sendWhatsAppImage(phoneNumberId, accessToken, to, imageUrl, caption) {
+  try {
+    if (!imageUrl || imageUrl.startsWith('data:')) {
+      console.warn('[WhatsApp image] URL base64 no soportada, enviando caption como texto');
+      if (caption) await sendWhatsAppMessage(phoneNumberId, accessToken, to, caption);
+      return;
+    }
+
+    console.log(`[WhatsApp] Enviando imagen: ${imageUrl}`);
+
+    await axios.post(
+      `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`,
+      {
+        messaging_product: 'whatsapp',
+        to,
+        type: 'image',
+        image: {
+          link: imageUrl,
+          ...(caption ? { caption } : {})
+        }
+      },
+      { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
+    );
+    console.log(`[WhatsApp] Imagen enviada a ${to}`);
+  } catch (err) {
+    console.error('[WhatsApp image error]', err.response?.data || err.message);
+    if (caption) await sendWhatsAppMessage(phoneNumberId, accessToken, to, caption);
+  }
+}
+
+// ── Enviar botones ───────────────────────────────────────────
 async function sendWhatsAppButtons(phoneNumberId, accessToken, to, bodyText, buttons) {
   try {
     await axios.post(
@@ -82,13 +114,13 @@ async function sendWhatsAppButtons(phoneNumberId, accessToken, to, bodyText, but
   }
 }
 
-// ── Espera (delay) ───────────────────────────────────────────
+// ── Espera ───────────────────────────────────────────────────
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 // ════════════════════════════════════════════════════════════
-// MOTOR DE FLUJOS — ejecuta nodo por nodo
+// MOTOR DE FLUJOS
 // ════════════════════════════════════════════════════════════
 async function executeFlow(flowId, contactPhone, userMessage, connection, conversationId) {
   const { data: flow } = await supabase
@@ -125,19 +157,108 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
     const node = nodeMap[currentNodeId];
     if (!node) break;
 
-  console.log(`[Flow] Ejecutando nodo: ${node.type} (${node.id})`);
-console.log(`[Flow] Data del nodo:`, JSON.stringify(node.data));
+    console.log(`[Flow] Ejecutando nodo: ${node.type} (${node.id})`);
+    console.log(`[Flow] Data del nodo:`, JSON.stringify(node.data));
 
     switch (node.type) {
 
       case 'message':
       case 'content': {
-        const text = node.data?.text || node.data?.content || '';
-        if (text) {
-          await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, text);
-          await saveMessage(conversationId, text, 'outbound');
+        const items = node.data?.items;
+
+        if (items && Array.isArray(items) && items.length > 0) {
+          for (const item of items) {
+            const itemType = (item.type || '').toLowerCase();
+            console.log(`[Flow] Procesando item tipo: ${itemType}, url: ${item.url}`);
+
+            if (itemType === 'image' || itemType === 'imagen') {
+              await sendWhatsAppImage(
+                connection.phone_number_id,
+                connection.access_token,
+                contactPhone,
+                item.url || '',
+                item.caption || item.description || ''
+              );
+              await saveMessage(conversationId, item.caption || '[Imagen]', 'outbound');
+
+            } else if (itemType === 'text' || itemType === 'texto') {
+              const text = item.text || item.content || item.contenido || '';
+              if (text) {
+                await sendWhatsAppMessage(
+                  connection.phone_number_id,
+                  connection.access_token,
+                  contactPhone,
+                  text
+                );
+                await saveMessage(conversationId, text, 'outbound');
+              }
+
+            } else if (itemType === 'audio') {
+              const url = item.url || '';
+              if (url && !url.startsWith('data:')) {
+                try {
+                  await axios.post(
+                    `https://graph.facebook.com/v19.0/${connection.phone_number_id}/messages`,
+                    { messaging_product: 'whatsapp', to: contactPhone, type: 'audio', audio: { link: url } },
+                    { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } }
+                  );
+                  await saveMessage(conversationId, '[Audio]', 'outbound');
+                } catch (e) {
+                  console.error('[WhatsApp audio error]', e.response?.data || e.message);
+                }
+              }
+
+            } else if (itemType === 'video') {
+              const url = item.url || '';
+              if (url && !url.startsWith('data:')) {
+                try {
+                  await axios.post(
+                    `https://graph.facebook.com/v19.0/${connection.phone_number_id}/messages`,
+                    { messaging_product: 'whatsapp', to: contactPhone, type: 'video', video: { link: url, ...(item.caption ? { caption: item.caption } : {}) } },
+                    { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } }
+                  );
+                  await saveMessage(conversationId, item.caption || '[Video]', 'outbound');
+                } catch (e) {
+                  console.error('[WhatsApp video error]', e.response?.data || e.message);
+                }
+              }
+
+            } else if (itemType === 'document' || itemType === 'doc') {
+              const url = item.url || '';
+              if (url && !url.startsWith('data:')) {
+                try {
+                  await axios.post(
+                    `https://graph.facebook.com/v19.0/${connection.phone_number_id}/messages`,
+                    { messaging_product: 'whatsapp', to: contactPhone, type: 'document', document: { link: url, filename: item.filename || 'documento.pdf' } },
+                    { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } }
+                  );
+                  await saveMessage(conversationId, '[Documento]', 'outbound');
+                } catch (e) {
+                  console.error('[WhatsApp doc error]', e.response?.data || e.message);
+                }
+              }
+            }
+
+            await sleep(500);
+          }
+
+        } else {
+          // Formato antiguo: texto plano
+          const text = node.data?.text || node.data?.content || '';
+          if (text) {
+            await sendWhatsAppMessage(
+              connection.phone_number_id,
+              connection.access_token,
+              contactPhone,
+              text
+            );
+            await saveMessage(conversationId, text, 'outbound');
+          }
         }
-        if (node.data?.delay_seconds) await sleep(node.data.delay_seconds * 1000);
+
+        if (node.data?.delay_seconds) {
+          await sleep(node.data.delay_seconds * 1000);
+        }
         break;
       }
 
@@ -156,7 +277,7 @@ console.log(`[Flow] Data del nodo:`, JSON.stringify(node.data));
 
       case 'ai':
       case 'ai_agent': {
-        const systemPrompt = node.data?.context ||
+        const systemPrompt = node.data?.context || node.data?.prompt ||
           'Eres un asistente de ventas amable y profesional. Responde en español.';
         const aiResponse = await callGroqAI(systemPrompt, history || [], userMessage);
         lastAiResponse = aiResponse;
@@ -180,13 +301,12 @@ console.log(`[Flow] Data del nodo:`, JSON.stringify(node.data));
         const edges = (flow.edges || []).filter(e => e.source === currentNodeId);
         const yesEdge = edges.find(e => e.sourceHandle === 'yes' || e.label === 'sí');
         const noEdge = edges.find(e => e.sourceHandle === 'no' || e.label === 'no');
-        const nextEdge = conditionMet ? yesEdge : noEdge;
-        currentNodeId = nextEdge?.target || null;
+        currentNodeId = (conditionMet ? yesEdge : noEdge)?.target || null;
         continue;
       }
 
       case 'delay': {
-        const seconds = node.data?.seconds || 3;
+        const seconds = node.data?.seconds || node.data?.value || 3;
         await sleep(Math.min(seconds * 1000, 30000));
         break;
       }
@@ -205,10 +325,12 @@ console.log(`[Flow] Data del nodo:`, JSON.stringify(node.data));
         break;
       }
 
-      case 'notification': {
+      case 'notification':
+      case 'notify': {
         const notifyPhone = node.data?.phone || '';
         const msg = (node.data?.message || 'Nueva conversación: {{phone}}')
-          .replace('{{phone}}', contactPhone);
+          .replace('{{phone}}', contactPhone)
+          .replace('{{userNumber}}', contactPhone);
         if (notifyPhone) {
           await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, notifyPhone, msg);
         }
@@ -224,7 +346,7 @@ console.log(`[Flow] Data del nodo:`, JSON.stringify(node.data));
   }
 }
 
-// ── Guardar mensaje en DB ────────────────────────────────────
+// ── Guardar mensaje ──────────────────────────────────────────
 async function saveMessage(conversationId, content, direction) {
   if (!conversationId || !content) return;
   await supabase.from('messages').insert({
