@@ -179,7 +179,13 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
                 item.url || '',
                 item.caption || item.description || ''
               );
-              await saveMessage(conversationId, item.caption || '[Imagen]', 'outbound');
+              await saveMessage(
+                conversationId,
+                item.caption || '[Imagen]',
+                'outbound',
+                'image',
+                item.url || ''
+              );
 
             } else if (itemType === 'text' || itemType === 'texto') {
               const text = item.text || item.content || item.contenido || '';
@@ -190,7 +196,7 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
                   contactPhone,
                   text
                 );
-                await saveMessage(conversationId, text, 'outbound');
+                await saveMessage(conversationId, text, 'outbound', 'text');
               }
 
             } else if (itemType === 'audio') {
@@ -202,7 +208,7 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
                     { messaging_product: 'whatsapp', to: contactPhone, type: 'audio', audio: { link: url } },
                     { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } }
                   );
-                  await saveMessage(conversationId, '[Audio]', 'outbound');
+                  await saveMessage(conversationId, '[Audio]', 'outbound', 'audio', url);
                 } catch (e) {
                   console.error('[WhatsApp audio error]', e.response?.data || e.message);
                 }
@@ -217,7 +223,7 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
                     { messaging_product: 'whatsapp', to: contactPhone, type: 'video', video: { link: url, ...(item.caption ? { caption: item.caption } : {}) } },
                     { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } }
                   );
-                  await saveMessage(conversationId, item.caption || '[Video]', 'outbound');
+                  await saveMessage(conversationId, item.caption || '[Video]', 'outbound', 'video', url);
                 } catch (e) {
                   console.error('[WhatsApp video error]', e.response?.data || e.message);
                 }
@@ -232,7 +238,7 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
                     { messaging_product: 'whatsapp', to: contactPhone, type: 'document', document: { link: url, filename: item.filename || 'documento.pdf' } },
                     { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } }
                   );
-                  await saveMessage(conversationId, '[Documento]', 'outbound');
+                  await saveMessage(conversationId, '[Documento]', 'outbound', 'document', url);
                 } catch (e) {
                   console.error('[WhatsApp doc error]', e.response?.data || e.message);
                 }
@@ -243,7 +249,6 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
           }
 
         } else {
-          // Formato antiguo: texto plano
           const text = node.data?.text || node.data?.content || '';
           if (text) {
             await sendWhatsAppMessage(
@@ -252,7 +257,7 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
               contactPhone,
               text
             );
-            await saveMessage(conversationId, text, 'outbound');
+            await saveMessage(conversationId, text, 'outbound', 'text');
           }
         }
 
@@ -271,7 +276,7 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
         } else if (text) {
           await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, text);
         }
-        await saveMessage(conversationId, text, 'outbound');
+        await saveMessage(conversationId, text, 'outbound', 'text');
         break;
       }
 
@@ -282,7 +287,7 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
         const aiResponse = await callGroqAI(systemPrompt, history || [], userMessage);
         lastAiResponse = aiResponse;
         await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, aiResponse);
-        await saveMessage(conversationId, aiResponse, 'outbound');
+        await saveMessage(conversationId, aiResponse, 'outbound', 'text');
         break;
       }
 
@@ -347,12 +352,14 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
 }
 
 // ── Guardar mensaje ──────────────────────────────────────────
-async function saveMessage(conversationId, content, direction) {
+async function saveMessage(conversationId, content, direction, msgType = 'text', mediaUrl = null) {
   if (!conversationId || !content) return;
   await supabase.from('messages').insert({
     conversation_id: conversationId,
     content,
     direction,
+    msg_type: msgType,
+    media_url: mediaUrl,
     created_at: new Date().toISOString()
   });
   await supabase.from('conversations').update({
