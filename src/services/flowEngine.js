@@ -267,9 +267,9 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
         break;
       }
 
-      case 'buttons':
-      case 'api_message': {
-        const text = node.data?.body || node.data?.text || '';
+case 'api':
+case 'buttons':
+case 'api_message': {        const text = node.data?.body || node.data?.text || '';
         const buttons = node.data?.buttons || [];
         if (buttons.length > 0) {
           await sendWhatsAppButtons(connection.phone_number_id, connection.access_token, contactPhone, text, buttons);
