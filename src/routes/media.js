@@ -1,59 +1,34 @@
 const express = require('express');
 const router = express.Router();
+const multer = require('multer');
 const auth = require('../middleware/auth');
 const supabase = require('../models/supabase');
 const { v4: uuidv4 } = require('uuid');
 
+// Multer en memoria
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 } // 50MB
+});
+
 router.use(auth);
 
 // ── POST /api/media/upload ────────────────────────────────────
-router.post('/upload', async (req, res, next) => {
+router.post('/upload', upload.single('file'), async (req, res, next) => {
   try {
-    const contentType = req.headers['content-type'] || '';
-    
-    if (!contentType.includes('multipart/form-data')) {
-      return res.status(400).json({ error: 'Se requiere multipart/form-data' });
+    if (!req.file) {
+      return res.status(400).json({ error: 'No se encontró archivo' });
     }
 
-    // Leer el body como buffer
-    const chunks = [];
-    for await (const chunk of req) {
-      chunks.push(chunk);
-    }
-    const buffer = Buffer.concat(chunks);
-
-    // Parsear multipart manualmente (boundary)
-    const boundary = contentType.split('boundary=')[1];
-    if (!boundary) return res.status(400).json({ error: 'Boundary no encontrado' });
-
-    const parts = buffer.toString('binary').split('--' + boundary);
-    let fileBuffer = null;
-    let fileName = 'archivo';
-    let mimeType = 'application/octet-stream';
-
-    for (const part of parts) {
-      if (part.includes('Content-Disposition') && part.includes('filename=')) {
-        const nameMatch = part.match(/filename="([^"]+)"/);
-        if (nameMatch) fileName = nameMatch[1];
-        const typeMatch = part.match(/Content-Type: ([^\r\n]+)/);
-        if (typeMatch) mimeType = typeMatch[1].trim();
-        const bodyStart = part.indexOf('\r\n\r\n') + 4;
-        const bodyEnd = part.lastIndexOf('\r\n');
-        if (bodyStart > 4 && bodyEnd > bodyStart) {
-          fileBuffer = Buffer.from(part.slice(bodyStart, bodyEnd), 'binary');
-        }
-      }
-    }
-
-    if (!fileBuffer) return res.status(400).json({ error: 'No se encontró archivo' });
-
-    const ext = fileName.split('.').pop();
+    const { originalname, mimetype, buffer } = req.file;
+    const ext = originalname.split('.').pop();
     const uniqueName = `${req.user.id}/${uuidv4()}.${ext}`;
 
+    // Subir a Supabase Storage
     const { error: uploadError } = await supabase.storage
       .from('media')
-      .upload(uniqueName, fileBuffer, {
-        contentType: mimeType,
+      .upload(uniqueName, buffer, {
+        contentType: mimetype,
         upsert: false
       });
 
@@ -72,10 +47,10 @@ router.post('/upload', async (req, res, next) => {
       .insert({
         id: uuidv4(),
         user_id: req.user.id,
-        name: fileName,
+        name: originalname,
         url: publicUrl,
-        type: mimeType,
-        size: fileBuffer.length,
+        type: mimetype,
+        size: buffer.length,
         path: uniqueName,
         created_at: new Date().toISOString()
       })
@@ -86,6 +61,7 @@ router.post('/upload', async (req, res, next) => {
 
     res.status(201).json(data);
   } catch (err) {
+    console.error('[Media upload error]', err);
     next(err);
   }
 });
@@ -122,12 +98,14 @@ router.delete('/:id', async (req, res, next) => {
       .eq('user_id', req.user.id)
       .single();
 
-    if (findError || !file) return res.status(404).json({ error: 'Archivo no encontrado' });
+    if (findError || !file) {
+      return res.status(404).json({ error: 'Archivo no encontrado' });
+    }
 
     // Eliminar de Storage
     await supabase.storage.from('media').remove([file.path]);
 
-    // Eliminar de la tabla
+    // Eliminar de tabla
     const { error } = await supabase
       .from('media')
       .delete()

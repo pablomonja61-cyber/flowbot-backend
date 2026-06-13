@@ -22,7 +22,7 @@ Construye una aplicación SaaS completa llamada **FlowBot** para automatización
 - Layout tipo dashboard moderno
 
 ## URL BASE DE LA API
-Todas las llamadas van a: `https://TU_BACKEND.railway.app`
+Todas las llamadas van a: `https://flowbot-backend-production-ee08.up.railway.app`
 Guardar en variable de entorno: VITE_API_URL
 
 ## AUTENTICACIÓN
