@@ -20,15 +20,12 @@ router.get('/', async (req, res, next) => {
 });
 
 // ── POST /api/connections ─────────────────────────────────────
-// Body: { name, phone_number_id, waba_id, access_token }
 router.post('/', async (req, res, next) => {
   try {
     const { name, phone_number_id, waba_id, access_token } = req.body;
     if (!name || !phone_number_id || !waba_id || !access_token) {
       return res.status(400).json({ error: 'Todos los campos son requeridos' });
     }
-
-    // Verificar que el token es válido con Meta
     try {
       const verify = await axios.get(
         `https://graph.facebook.com/v19.0/${phone_number_id}`,
@@ -38,7 +35,6 @@ router.post('/', async (req, res, next) => {
     } catch (e) {
       return res.status(400).json({ error: 'Token de Meta inválido o phone_number_id incorrecto' });
     }
-
     const { data, error } = await supabase
       .from('connections')
       .insert({
@@ -48,13 +44,62 @@ router.post('/', async (req, res, next) => {
         phone_number,
         phone_number_id,
         waba_id,
-        access_token, // se guarda encriptado idealmente
+        access_token,
         is_active: true
       })
       .select('id, name, phone_number, waba_id, is_active, created_at')
       .single();
     if (error) throw error;
     res.status(201).json(data);
+  } catch (err) { next(err); }
+});
+
+// ── PUT /api/connections/:id ──────────────────────────────────
+router.put('/:id', async (req, res, next) => {
+  try {
+    const { name, phone_number_id, waba_id, access_token } = req.body;
+
+    // Verificar que la conexión pertenece al usuario
+    const { data: existing } = await supabase
+      .from('connections')
+      .select('id')
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id)
+      .single();
+
+    if (!existing) return res.status(404).json({ error: 'Conexión no encontrada' });
+
+    // Construir objeto de actualización
+    const updates = {};
+    if (name) updates.name = name;
+    if (waba_id) updates.waba_id = waba_id;
+    if (access_token) updates.access_token = access_token;
+
+    // Si cambia el phone_number_id verificar con Meta
+    if (phone_number_id) {
+      updates.phone_number_id = phone_number_id;
+      try {
+        const verify = await axios.get(
+          `https://graph.facebook.com/v19.0/${phone_number_id}`,
+          { headers: { Authorization: `Bearer ${access_token || req.body.access_token}` } }
+        );
+        updates.phone_number = verify.data.display_phone_number || phone_number_id;
+      } catch (e) {
+        // Si falla la verificación igual guardamos
+        updates.phone_number = phone_number_id;
+      }
+    }
+
+    const { data, error } = await supabase
+      .from('connections')
+      .update(updates)
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id)
+      .select('id, name, phone_number, waba_id, is_active, created_at')
+      .single();
+
+    if (error) throw error;
+    res.json(data);
   } catch (err) { next(err); }
 });
 
