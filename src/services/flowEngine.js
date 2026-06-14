@@ -234,14 +234,23 @@ async function processSeguimiento(seg, connection, contactPhone, conversationId,
 async function runScheduler() {
   try {
     const now = new Date().toISOString();
+    console.log(`[Scheduler] Corriendo, hora actual: ${now}`);
 
-    const { data: pending } = await supabase
+    const { data: pending, error } = await supabase
       .from('scheduled_followups')
       .select('*, connections(*)')
       .eq('status', 'pending')
       .lte('send_at', now);
 
-    if (!pending?.length) return;
+    console.log(`[Scheduler] Pending encontrados: ${pending?.length || 0}, error: ${error?.message || 'ninguno'}`);
+
+    if (!pending?.length) return;      .from('scheduled_followups')
+      .select('*, connections(*)')
+      .eq('status', 'pending')
+      .lte('send_at', now);
+
+    console.log(`[Scheduler] Registros pending encontrados: ${pending?.length || 0}`);
+if (!pending?.length) return;
 
     console.log(`[Scheduler] ${pending.length} seguimiento(s) para enviar`);
 
