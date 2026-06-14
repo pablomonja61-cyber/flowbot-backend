@@ -104,6 +104,20 @@ async function sendWhatsAppButtons(phoneNumberId, accessToken, to, bodyText, but
   }
 }
 
+
+// ── Enviar typing indicator ──────────────────────────────────
+async function sendTypingIndicator(phoneNumberId, accessToken, to) {
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`,
+      { messaging_product: 'whatsapp', to, type: 'reaction', reaction: { message_id: '', emoji: '' } },
+      { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
+    );
+  } catch (_) {}
+  // Pausa simulando escritura
+  await sleep(1500);
+}
+
 // ── Sleep ────────────────────────────────────────────────────
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -168,6 +182,7 @@ async function processSeguimiento(seg, connection, contactPhone, conversationId,
     if (tipo === 'texto' || tipo === 'text') {
       const texto = replaceVariables(contenido.texto || contenido.text || '', vars);
       if (texto) {
+        await sendTypingIndicator(connection.phone_number_id, connection.access_token, contactPhone);
         await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, texto);
         await saveMessage(conversationId, texto, 'outbound', 'text');
       }
@@ -182,6 +197,7 @@ async function processSeguimiento(seg, connection, contactPhone, conversationId,
       const botones = contenido.botones || contenido.buttons || [];
       const headerImg = contenido.imagen_cabecera || contenido.header_image || '';
       const textoCompleto = mensaje + (pie ? `\n\n_${pie}_` : '');
+      await sendTypingIndicator(connection.phone_number_id, connection.access_token, contactPhone);
       if (botones.length > 0) {
         await sendWhatsAppButtons(connection.phone_number_id, connection.access_token, contactPhone, textoCompleto, botones, headerImg);
       } else if (textoCompleto) {
@@ -401,11 +417,13 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
             const itemType = (item.type || '').toLowerCase();
 
             if (itemType === 'image' || itemType === 'imagen') {
+              await sendTypingIndicator(connection.phone_number_id, connection.access_token, contactPhone);
               await sendWhatsAppImage(connection.phone_number_id, connection.access_token, contactPhone, item.url || '', item.caption || item.description || '');
               await saveMessage(conversationId, item.caption || '[Imagen]', 'outbound', 'image', item.url || '');
             } else if (itemType === 'text' || itemType === 'texto') {
               const text = replaceVariables(item.text || item.content || '', vars);
               if (text) {
+                await sendTypingIndicator(connection.phone_number_id, connection.access_token, contactPhone);
                 await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, text);
                 await saveMessage(conversationId, text, 'outbound', 'text');
               }
@@ -457,6 +475,7 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
         const text = replaceVariables(node.data?.body || node.data?.text || '', vars);
         const buttons = node.data?.buttons || [];
 
+        await sendTypingIndicator(connection.phone_number_id, connection.access_token, contactPhone);
         if (buttons.length > 0) {
           await sendWhatsAppButtons(connection.phone_number_id, connection.access_token, contactPhone, text, buttons);
         } else if (text) {
@@ -474,6 +493,7 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
           'Eres un asistente de ventas amable y profesional. Responde en español.';
         const aiResponse = await callGroqAI(systemPrompt, history || [], userMessage);
         lastAiResponse = aiResponse;
+        await sendTypingIndicator(connection.phone_number_id, connection.access_token, contactPhone);
         await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, aiResponse);
         await saveMessage(conversationId, aiResponse, 'outbound', 'text');
         break;
