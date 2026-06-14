@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const supabase = require('../models/supabase');
-const { executeFlow, saveMessage, sendWhatsAppMessage } = require('../services/flowEngine');
+const { executeFlow, saveMessage, sendWhatsAppMessage, cancelFollowups } = require('../services/flowEngine');
 const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
 
@@ -237,9 +237,9 @@ Responde SOLO en formato JSON exacto, sin texto adicional:
         is_sale: true,
         sale_amount: monto,
         sale_at: new Date().toISOString()
-const { cancelFollowups } = require('../services/flowEngine');
-await cancelFollowups(conversation.id);
       }).eq('id', conversation.id);
+
+      await cancelFollowups(conversation.id);
     } else {
       console.log(`[Payment] No hay regla configurada para monto ${monto}`);
     }
