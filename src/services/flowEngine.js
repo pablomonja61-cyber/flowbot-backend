@@ -409,6 +409,9 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
                 await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, text);
                 await saveMessage(conversationId, text, 'outbound', 'text');
               }
+            } else if (itemType === 'interval') {
+              const seconds = item.seconds || 2;
+              await sleep(Math.min(seconds * 1000, 60000));
             } else if (itemType === 'audio') {
               const url = item.url || '';
               if (url && !url.startsWith('data:')) {
