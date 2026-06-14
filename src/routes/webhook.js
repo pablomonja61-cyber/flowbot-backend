@@ -237,6 +237,8 @@ Responde SOLO en formato JSON exacto, sin texto adicional:
         is_sale: true,
         sale_amount: monto,
         sale_at: new Date().toISOString()
+const { cancelFollowups } = require('../services/flowEngine');
+await cancelFollowups(conversation.id);
       }).eq('id', conversation.id);
     } else {
       console.log(`[Payment] No hay regla configurada para monto ${monto}`);
