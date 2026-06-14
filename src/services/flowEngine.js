@@ -238,7 +238,7 @@ async function runScheduler() {
 
     const { data: pending, error } = await supabase
       .from('scheduled_followups')
-      .select('*, connections(*)')
+      .select('*')
       .eq('status', 'pending')
       .lte('send_at', now);
 
@@ -262,7 +262,11 @@ async function runScheduler() {
           continue;
         }
 
-        const connection = followup.connections;
+        const { data: connection } = await supabase
+          .from('connections')
+          .select('*')
+          .eq('id', followup.connection_id)
+          .single();
         if (!connection) {
           await supabase.from('scheduled_followups').update({ status: 'failed' }).eq('id', followup.id);
           continue;
