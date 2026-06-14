@@ -45,6 +45,12 @@ app.use('/api/conversations', conversationRoutes);
 app.use('/api/ai-config', aiConfigRoutes);
 app.use('/api/payment-config', paymentConfigRoutes);
 app.use('/api/media', mediaRoutes);
+const { runScheduler } = require('./services/flowEngine');
+app.get('/api/scheduler/run', async (req, res) => {
+  if (req.query.secret !== process.env.SCHEDULER_SECRET) return res.status(401).json({ error: 'No autorizado' });
+  await runScheduler();
+  res.json({ ok: true, time: new Date().toISOString() });
+});
 app.use('/api/remarketing', remarketingRoutes);
 
 // ── Error handler global ────────────────────────────────────

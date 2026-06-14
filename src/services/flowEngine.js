@@ -576,4 +576,4 @@ async function saveMessage(conversationId, content, direction, msgType = 'text',
   }).eq('id', conversationId);
 }
 
-module.exports = { executeFlow, saveMessage, sendWhatsAppMessage, cancelFollowups };
+module.exports = { executeFlow, saveMessage, sendWhatsAppMessage, cancelFollowups, runScheduler };
