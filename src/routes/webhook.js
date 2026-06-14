@@ -48,17 +48,22 @@ router.post('/whatsapp', async (req, res) => {
 
           if (msg.type !== 'text' && msg.type !== 'interactive') continue;
 
-          const userMessage = msg.type === 'text'
-            ? msg.text?.body || ''
-            : msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || '';
-
           const isButtonReply = msg.type === 'interactive';
+
+          // Para botones, capturamos el ID del botón además del título
+          const buttonId = isButtonReply
+            ? (msg.interactive?.button_reply?.id || msg.interactive?.list_reply?.id || '')
+            : '';
+
+          const userMessage = isButtonReply
+            ? (msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || '')
+            : (msg.text?.body || '');
 
           if (!userMessage) continue;
 
-          console.log(`[Webhook] Mensaje de ${contactPhone}: "${userMessage}" (botón: ${isButtonReply})`);
+          console.log(`[Webhook] Mensaje de ${contactPhone}: "${userMessage}" (botón: ${isButtonReply}, buttonId: ${buttonId})`);
 
-          processIncomingMessage(phoneNumberId, contactPhone, userMessage, isButtonReply).catch(err => {
+          processIncomingMessage(phoneNumberId, contactPhone, userMessage, isButtonReply, buttonId).catch(err => {
             console.error('[Webhook] Error procesando mensaje:', err.message);
           });
         }
@@ -116,7 +121,7 @@ async function processIncomingImage(phoneNumberId, contactPhone, imageData) {
 
   await saveMessage(conversation.id, '[Imagen recibida - posible comprobante]', 'inbound', 'image');
 
-  // 1. Descargar la imagen de WhatsApp (Meta Graph API)
+  // 1. Descargar la imagen de WhatsApp
   let imageBuffer;
   try {
     const mediaInfo = await axios.get(
@@ -206,7 +211,7 @@ Responde SOLO en formato JSON exacto, sin texto adicional:
     return;
   }
 
-  // Es un comprobante válido → mandar mensaje general de confirmación
+  // Es un comprobante válido
   await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, msgConfirmacion);
   await saveMessage(conversation.id, msgConfirmacion, 'outbound', 'text');
 
@@ -274,8 +279,6 @@ async function respondWithAI(userId, connection, contactPhone, userMessage, conv
       { role: 'user', content: userMessage }
     ];
 
-    console.log('[AI Fallback] Llamando a Groq con modelo:', model);
-
     const response = await axios.post(
       'https://api.groq.com/openai/v1/chat/completions',
       { model, max_tokens: 500, messages },
@@ -291,12 +294,7 @@ async function respondWithAI(userId, connection, contactPhone, userMessage, conv
     const aiResponse = response.data.choices[0].message.content;
     console.log('[AI Fallback] Respuesta IA:', aiResponse.slice(0, 100));
 
-    await sendWhatsAppMessage(
-      connection.phone_number_id,
-      connection.access_token,
-      contactPhone,
-      aiResponse
-    );
+    await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, aiResponse);
     await saveMessage(conversationId, aiResponse, 'outbound', 'text');
 
   } catch (err) {
@@ -307,7 +305,7 @@ async function respondWithAI(userId, connection, contactPhone, userMessage, conv
 // ════════════════════════════════════════════════════════════
 // Lógica principal: texto / botones
 // ════════════════════════════════════════════════════════════
-async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, isButtonReply = false) {
+async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, isButtonReply = false, buttonId = '') {
   const { data: connection } = await supabase
     .from('connections')
     .select('*')
@@ -353,18 +351,55 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
 
   const normalizedMsg = userMessage.toLowerCase().trim();
 
+  // ── SI ES RESPUESTA DE BOTÓN: continuar el flujo pendiente ──
+  if (isButtonReply) {
+    console.log(`[Webhook] Botón presionado: "${userMessage}" (id: ${buttonId})`);
+
+    // Buscar si hay un flujo en progreso para este contacto
+    const { data: flowState } = await supabase
+      .from('flow_states')
+      .select('*')
+      .eq('conversation_id', conversation.id)
+      .eq('status', 'waiting_button')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (flowState) {
+      console.log(`[Webhook] Continuando flujo ${flowState.flow_id} desde nodo ${flowState.current_node_id}`);
+      await supabase
+        .from('flow_states')
+        .update({ status: 'completed' })
+        .eq('id', flowState.id);
+
+      await executeFlow(
+        flowState.flow_id,
+        contactPhone,
+        userMessage,
+        connection,
+        conversation.id,
+        {
+          resumeFromNodeId: flowState.current_node_id,
+          buttonPressed: userMessage,
+          buttonId: buttonId
+        }
+      );
+      return;
+    }
+
+    // Sin flujo pendiente → la IA responde con contexto
+    console.log(`[Webhook] Sin flujo pendiente para botón — usando IA fallback`);
+    await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
+    return;
+  }
+
+  // ── MENSAJE DE TEXTO NORMAL ──
   const { data: triggers } = await supabase
     .from('triggers')
     .select('*, flows(id, nodes, edges, is_active)')
     .eq('user_id', userId)
     .eq('connection_id', connection.id)
     .eq('is_active', true);
-
-  if (isButtonReply) {
-    console.log(`[Webhook] Respuesta de botón: "${userMessage}" — IA puede responder con info adicional`);
-    await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
-    return;
-  }
 
   if (!triggers?.length) {
     console.log(`[Webhook] Sin triggers — usando IA fallback`);
@@ -401,7 +436,7 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
       .eq('trigger_id', matchedTrigger.id)
       .eq('contact_phone', contactPhone);
     if (count > 0) {
-      console.log(`[Webhook] Trigger no repetible ya ejecutado — usando IA fallback`);
+      console.log(`[Webhook] Trigger no repetible ya ejecutado para ${contactPhone}`);
       await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
       return;
     }
