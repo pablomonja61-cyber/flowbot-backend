@@ -12,6 +12,7 @@ const conversationRoutes = require('./routes/conversations');
 const aiConfigRoutes = require('./routes/aiConfig');
 const paymentConfigRoutes = require('./routes/paymentConfig');
 const mediaRoutes = require('./routes/media');
+const remarketingRoutes = require('./routes/remarketing');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -44,6 +45,7 @@ app.use('/api/conversations', conversationRoutes);
 app.use('/api/ai-config', aiConfigRoutes);
 app.use('/api/payment-config', paymentConfigRoutes);
 app.use('/api/media', mediaRoutes);
+app.use('/api/remarketing', remarketingRoutes);
 
 // ── Error handler global ────────────────────────────────────
 app.use((err, req, res, next) => {
@@ -58,6 +60,7 @@ app.listen(PORT, () => {
   console.log(`📡 Webhook: POST /webhook/whatsapp`);
   console.log(`🔐 Auth:    POST /api/auth/register | /api/auth/login`);
   console.log(`📁 Media:   POST /api/media/upload | GET /api/media`);
+  console.log(`📢 Remarketing: GET/POST /api/remarketing`);
 });
 
 module.exports = app;
