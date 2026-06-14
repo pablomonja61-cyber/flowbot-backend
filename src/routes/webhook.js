@@ -50,7 +50,6 @@ router.post('/whatsapp', async (req, res) => {
 
           const isButtonReply = msg.type === 'interactive';
 
-          // Para botones, capturamos el ID del botón además del título
           const buttonId = isButtonReply
             ? (msg.interactive?.button_reply?.id || msg.interactive?.list_reply?.id || '')
             : '';
@@ -117,6 +116,12 @@ async function processIncomingImage(phoneNumberId, contactPhone, imageData) {
       .select()
       .single();
     conversation = newConv;
+  }
+
+  // ── Verificar bloqueo ────────────────────────────────────
+  if (conversation.is_blocked) {
+    console.log(`[Webhook] Contacto ${contactPhone} bloqueado — ignorando imagen`);
+    return;
   }
 
   await saveMessage(conversation.id, '[Imagen recibida - posible comprobante]', 'inbound', 'image');
@@ -349,6 +354,12 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
     conversation = newConv;
   }
 
+  // ── Verificar bloqueo ────────────────────────────────────
+  if (conversation.is_blocked) {
+    console.log(`[Webhook] Contacto ${contactPhone} bloqueado — ignorando mensaje`);
+    return;
+  }
+
   await saveMessage(conversation.id, userMessage, 'inbound', 'text');
 
   const normalizedMsg = userMessage.toLowerCase().trim();
@@ -357,7 +368,6 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
   if (isButtonReply) {
     console.log(`[Webhook] Botón presionado: "${userMessage}" (id: ${buttonId})`);
 
-    // Buscar si hay un flujo en progreso para este contacto
     const { data: flowState } = await supabase
       .from('flow_states')
       .select('*')
@@ -389,8 +399,15 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
       return;
     }
 
-    // Sin flujo pendiente → la IA responde con contexto
+    // Sin flujo pendiente → IA responde
     console.log(`[Webhook] Sin flujo pendiente para botón — usando IA fallback`);
+    await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
+    return;
+  }
+
+  // ── Verificar si el flujo está apagado ──────────────────
+  if (conversation.flow_active === false) {
+    console.log(`[Webhook] Flujo apagado para ${contactPhone} — solo IA fallback`);
     await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
     return;
   }
