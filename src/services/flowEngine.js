@@ -1,5 +1,6 @@
 const axios = require('axios');
 const supabase = require('../models/supabase');
+const { v4: uuidv4 } = require('uuid');
 
 // ── IA con Groq ──────────────────────────────────────────────
 async function callGroqAI(systemPrompt, conversationHistory, userMessage) {
@@ -100,7 +101,10 @@ async function sendWhatsAppButtons(phoneNumberId, accessToken, to, bodyText, but
       action: {
         buttons: buttons.slice(0, 3).map((btn, i) => ({
           type: 'reply',
-          reply: { id: `btn_${i}`, title: (btn.titulo || btn.title || btn).slice(0, 20) }
+          reply: {
+            id: `btn_${i}_${(btn.titulo || btn.title || btn).slice(0, 20).replace(/\s/g, '_')}`,
+            title: (btn.titulo || btn.title || btn).slice(0, 20)
+          }
         }))
       }
     };
@@ -114,6 +118,7 @@ async function sendWhatsAppButtons(phoneNumberId, accessToken, to, bodyText, but
       { messaging_product: 'whatsapp', to, type: 'interactive', interactive },
       { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
     );
+    console.log(`[WhatsApp] Botones enviados a ${to}`);
   } catch (err) {
     console.error('[WhatsApp buttons error]', err.response?.data || err.message);
     const text = (bodyText || '') + '\n\n' + buttons.map((b, i) => `${i + 1}. ${b.titulo || b.title || b}`).join('\n');
@@ -124,6 +129,27 @@ async function sendWhatsAppButtons(phoneNumberId, accessToken, to, bodyText, but
 // ── Espera ───────────────────────────────────────────────────
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ── Guardar estado de flujo (pausa esperando botón) ──────────
+async function saveFlowState(conversationId, flowId, currentNodeId) {
+  // Marcar estados anteriores como completados
+  await supabase
+    .from('flow_states')
+    .update({ status: 'completed' })
+    .eq('conversation_id', conversationId)
+    .eq('status', 'waiting_button');
+
+  await supabase.from('flow_states').insert({
+    id: uuidv4(),
+    conversation_id: conversationId,
+    flow_id: flowId,
+    current_node_id: currentNodeId,
+    status: 'waiting_button',
+    created_at: new Date().toISOString()
+  });
+
+  console.log(`[Flow] Flujo pausado en nodo ${currentNodeId}, esperando botón`);
 }
 
 // ── Procesar seguimiento individual ─────────────────────────
@@ -139,34 +165,23 @@ async function processSeguimiento(seg, connection, contactPhone, conversationId,
         await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, texto);
         await saveMessage(conversationId, texto, 'outbound', 'text');
       }
-
     } else if (tipo === 'imagen' || tipo === 'image') {
       const url = contenido.url || '';
       const caption = replaceVariables(contenido.caption || '', vars);
       await sendWhatsAppImage(connection.phone_number_id, connection.access_token, contactPhone, url, caption);
       await saveMessage(conversationId, caption || '[Imagen]', 'outbound', 'image', url);
-
     } else if (tipo === 'botones' || tipo === 'buttons') {
       const mensaje = replaceVariables(contenido.mensaje || contenido.message || '', vars);
       const pie = replaceVariables(contenido.pie || '', vars);
       const botones = contenido.botones || contenido.buttons || [];
       const headerImg = contenido.imagen_cabecera || contenido.header_image || '';
       const textoCompleto = mensaje + (pie ? `\n\n_${pie}_` : '');
-
       if (botones.length > 0) {
-        await sendWhatsAppButtons(
-          connection.phone_number_id,
-          connection.access_token,
-          contactPhone,
-          textoCompleto,
-          botones,
-          headerImg
-        );
+        await sendWhatsAppButtons(connection.phone_number_id, connection.access_token, contactPhone, textoCompleto, botones, headerImg);
       } else if (textoCompleto) {
         await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, textoCompleto);
       }
       await saveMessage(conversationId, textoCompleto || '[Botones]', 'outbound', 'text');
-
     } else if (tipo === 'audio') {
       const url = contenido.url || '';
       if (url && !url.startsWith('data:')) {
@@ -179,7 +194,6 @@ async function processSeguimiento(seg, connection, contactPhone, conversationId,
           await saveMessage(conversationId, '[Audio]', 'outbound', 'audio', url);
         } catch (e) { console.error('[audio error]', e.message); }
       }
-
     } else if (tipo === 'video') {
       const url = contenido.url || '';
       const caption = replaceVariables(contenido.caption || '', vars);
@@ -193,11 +207,9 @@ async function processSeguimiento(seg, connection, contactPhone, conversationId,
           await saveMessage(conversationId, caption || '[Video]', 'outbound', 'video', url);
         } catch (e) { console.error('[video error]', e.message); }
       }
-
     } else if (tipo === 'pausa' || tipo === 'pause') {
       const segundos = contenido.segundos || contenido.seconds || 2;
       await sleep(Math.min(segundos * 1000, 30000));
-
     } else if (tipo === 'archivo' || tipo === 'document' || tipo === 'doc') {
       const url = contenido.url || '';
       if (url && !url.startsWith('data:')) {
@@ -218,8 +230,9 @@ async function processSeguimiento(seg, connection, contactPhone, conversationId,
 
 // ════════════════════════════════════════════════════════════
 // MOTOR DE FLUJOS
+// options: { resumeFromNodeId, buttonPressed, buttonId }
 // ════════════════════════════════════════════════════════════
-async function executeFlow(flowId, contactPhone, userMessage, connection, conversationId) {
+async function executeFlow(flowId, contactPhone, userMessage, connection, conversationId, options = {}) {
   const { data: flow } = await supabase
     .from('flows')
     .select('*')
@@ -235,7 +248,6 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
     .order('created_at', { ascending: true })
     .limit(20);
 
-  // Obtener datos del contacto para variables
   const { data: conv } = await supabase
     .from('conversations')
     .select('contact_name, contact_phone')
@@ -253,18 +265,71 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
   const nodeMap = {};
   flow.nodes.forEach(n => { nodeMap[n.id] = n; });
 
+  // edgeMap: source -> array de edges (con sourceHandle)
   const edgeMap = {};
   (flow.edges || []).forEach(e => {
     if (!edgeMap[e.source]) edgeMap[e.source] = [];
-    edgeMap[e.source].push(e.target);
+    edgeMap[e.source].push(e);
   });
 
-  const startNode = flow.nodes.find(n => n.type === 'start' || n.type === 'trigger');
-  if (!startNode) return;
-
-  let currentNodeId = edgeMap[startNode.id]?.[0];
+  let currentNodeId;
   let lastAiResponse = null;
 
+  // ── MODO REANUDACIÓN: viene de un botón presionado ──
+  if (options.resumeFromNodeId) {
+    const pausedNodeId = options.resumeFromNodeId;
+    const buttonPressed = (options.buttonPressed || '').toLowerCase().trim();
+    const buttonId = options.buttonId || '';
+
+    console.log(`[Flow] Reanudando desde nodo ${pausedNodeId}, botón: "${buttonPressed}"`);
+
+    const edges = edgeMap[pausedNodeId] || [];
+
+    // Buscar edge que coincida con el botón presionado
+    // Primero por sourceHandle (btn_0_Yape, btn_1_Plin...)
+    // Luego por label
+    // Luego por posición (btn_0 = primer botón)
+    let matchedEdge = null;
+
+    // Extraer índice del buttonId (btn_0_... -> 0)
+    const btnIndexMatch = buttonId.match(/^btn_(\d+)/);
+    const btnIndex = btnIndexMatch ? parseInt(btnIndexMatch[1]) : -1;
+
+    // Intentar match por sourceHandle exacto
+    matchedEdge = edges.find(e =>
+      e.sourceHandle && (
+        e.sourceHandle === buttonId ||
+        e.sourceHandle === `output-btn-${btnIndex}` ||
+        e.sourceHandle.toLowerCase().includes(buttonPressed)
+      )
+    );
+
+    // Si no, match por índice de botón (primer edge = primer botón)
+    if (!matchedEdge && btnIndex >= 0 && edges[btnIndex]) {
+      matchedEdge = edges[btnIndex];
+    }
+
+    // Si no, tomar el primer edge disponible
+    if (!matchedEdge && edges.length > 0) {
+      matchedEdge = edges[0];
+    }
+
+    if (!matchedEdge) {
+      console.log(`[Flow] No se encontró edge para el botón "${buttonPressed}"`);
+      return;
+    }
+
+    currentNodeId = matchedEdge.target;
+    console.log(`[Flow] Continuando hacia nodo ${currentNodeId}`);
+
+  } else {
+    // ── MODO NORMAL: desde el inicio ──
+    const startNode = flow.nodes.find(n => n.type === 'start' || n.type === 'trigger');
+    if (!startNode) return;
+    currentNodeId = (edgeMap[startNode.id] || [])[0]?.target || null;
+  }
+
+  // ── LOOP PRINCIPAL ──
   while (currentNodeId) {
     const node = nodeMap[currentNodeId];
     if (!node) break;
@@ -329,18 +394,23 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
         break;
       }
 
+      // ── NODO BOTONES — PAUSA Y ESPERA RESPUESTA ──────────
       case 'api':
       case 'buttons':
       case 'api_message': {
         const text = replaceVariables(node.data?.body || node.data?.text || '', vars);
         const buttons = node.data?.buttons || [];
+
         if (buttons.length > 0) {
           await sendWhatsAppButtons(connection.phone_number_id, connection.access_token, contactPhone, text, buttons);
         } else if (text) {
           await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, text);
         }
-        await saveMessage(conversationId, text, 'outbound', 'text');
-        break;
+        await saveMessage(conversationId, text || '[Botones]', 'outbound', 'text');
+
+        // ⚠️ PAUSA AQUÍ — guardar estado y esperar que el cliente toque un botón
+        await saveFlowState(conversationId, flowId, currentNodeId);
+        return; // Detener ejecución hasta que llegue la respuesta
       }
 
       case 'ai':
@@ -354,7 +424,6 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
         break;
       }
 
-      // ── NODO SEGUIMIENTO / FOLLOWUP ──────────────────────
       case 'followup':
       case 'seguimiento': {
         const seguimientos = node.data?.seguimientos || [];
@@ -362,24 +431,14 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
 
         for (const seg of seguimientos) {
           const tiempoMs = (seg.tiempo_minutos || 0) * 60 * 1000;
-
-          // Actualizar precio en vars si el seguimiento tiene precio
           if (seg.precio) vars.precio = seg.precio;
 
           if (tiempoMs > 0 && tiempoMs <= 30000) {
-            // Si el tiempo es pequeño (menos de 30s) esperamos aquí mismo
             await sleep(tiempoMs);
             await processSeguimiento(seg, connection, contactPhone, conversationId, vars);
-          } else if (tiempoMs === 0) {
-            // Si tiempo es 0, enviar inmediatamente
-            await processSeguimiento(seg, connection, contactPhone, conversationId, vars);
           } else {
-            // Si el tiempo es largo (minutos reales), guardar para scheduler futuro
-            console.log(`[Seguimiento] Programado para ${seg.tiempo_minutos} minutos — pendiente scheduler`);
-            // Por ahora enviamos igual para no perder el mensaje
             await processSeguimiento(seg, connection, contactPhone, conversationId, vars);
           }
-
           await sleep(1000);
         }
         break;
@@ -397,7 +456,7 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
         else if (operator === 'starts_with') conditionMet = checkText.startsWith(value);
         else if (operator === 'not_contains') conditionMet = !checkText.includes(value);
 
-        const edges = (flow.edges || []).filter(e => e.source === currentNodeId);
+        const edges = edgeMap[currentNodeId] || [];
         const yesEdge = edges.find(e => e.sourceHandle === 'yes' || e.label === 'sí');
         const noEdge = edges.find(e => e.sourceHandle === 'no' || e.label === 'no');
         currentNodeId = (conditionMet ? yesEdge : noEdge)?.target || null;
@@ -436,7 +495,9 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
         continue;
     }
 
-    currentNodeId = edgeMap[currentNodeId]?.[0] || null;
+    // Avanzar al siguiente nodo (primer edge del nodo actual)
+    const nextEdges = edgeMap[currentNodeId] || [];
+    currentNodeId = nextEdges[0]?.target || null;
   }
 }
 
