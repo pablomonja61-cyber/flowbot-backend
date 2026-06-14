@@ -35,6 +35,19 @@ async function callGroqAI(systemPrompt, conversationHistory, userMessage) {
   }
 }
 
+// ── Reemplazar variables en texto ────────────────────────────
+function replaceVariables(text, vars = {}) {
+  if (!text) return text;
+  return text
+    .replace(/\{\{nombre\}\}/g, vars.nombre || '')
+    .replace(/\{\{telefono\}\}/g, vars.telefono || '')
+    .replace(/\{\{email\}\}/g, vars.email || '')
+    .replace(/\{\{origen\}\}/g, vars.origen || '')
+    .replace(/\{\{precio\}\}/g, vars.precio || '')
+    .replace(/\{\{phone\}\}/g, vars.telefono || '')
+    .replace(/\{\{userNumber\}\}/g, vars.telefono || '');
+}
+
 // ── Enviar mensaje de texto ──────────────────────────────────
 async function sendWhatsAppMessage(phoneNumberId, accessToken, to, message) {
   try {
@@ -58,23 +71,16 @@ async function sendWhatsAppMessage(phoneNumberId, accessToken, to, message) {
 async function sendWhatsAppImage(phoneNumberId, accessToken, to, imageUrl, caption) {
   try {
     if (!imageUrl || imageUrl.startsWith('data:')) {
-      console.warn('[WhatsApp image] URL base64 no soportada, enviando caption como texto');
       if (caption) await sendWhatsAppMessage(phoneNumberId, accessToken, to, caption);
       return;
     }
-
-    console.log(`[WhatsApp] Enviando imagen: ${imageUrl}`);
-
     await axios.post(
       `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`,
       {
         messaging_product: 'whatsapp',
         to,
         type: 'image',
-        image: {
-          link: imageUrl,
-          ...(caption ? { caption } : {})
-        }
+        image: { link: imageUrl, ...(caption ? { caption } : {}) }
       },
       { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
     );
@@ -86,30 +92,31 @@ async function sendWhatsAppImage(phoneNumberId, accessToken, to, imageUrl, capti
 }
 
 // ── Enviar botones ───────────────────────────────────────────
-async function sendWhatsAppButtons(phoneNumberId, accessToken, to, bodyText, buttons) {
+async function sendWhatsAppButtons(phoneNumberId, accessToken, to, bodyText, buttons, headerImageUrl) {
   try {
+    const interactive = {
+      type: 'button',
+      body: { text: bodyText || ' ' },
+      action: {
+        buttons: buttons.slice(0, 3).map((btn, i) => ({
+          type: 'reply',
+          reply: { id: `btn_${i}`, title: (btn.titulo || btn.title || btn).slice(0, 20) }
+        }))
+      }
+    };
+
+    if (headerImageUrl && !headerImageUrl.startsWith('data:')) {
+      interactive.header = { type: 'image', image: { link: headerImageUrl } };
+    }
+
     await axios.post(
       `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`,
-      {
-        messaging_product: 'whatsapp',
-        to,
-        type: 'interactive',
-        interactive: {
-          type: 'button',
-          body: { text: bodyText },
-          action: {
-            buttons: buttons.slice(0, 3).map((btn, i) => ({
-              type: 'reply',
-              reply: { id: `btn_${i}`, title: btn.slice(0, 20) }
-            }))
-          }
-        }
-      },
+      { messaging_product: 'whatsapp', to, type: 'interactive', interactive },
       { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
     );
   } catch (err) {
     console.error('[WhatsApp buttons error]', err.response?.data || err.message);
-    const text = bodyText + '\n\n' + buttons.map((b, i) => `${i + 1}. ${b}`).join('\n');
+    const text = (bodyText || '') + '\n\n' + buttons.map((b, i) => `${i + 1}. ${b.titulo || b.title || b}`).join('\n');
     await sendWhatsAppMessage(phoneNumberId, accessToken, to, text);
   }
 }
@@ -117,6 +124,96 @@ async function sendWhatsAppButtons(phoneNumberId, accessToken, to, bodyText, but
 // ── Espera ───────────────────────────────────────────────────
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ── Procesar seguimiento individual ─────────────────────────
+async function processSeguimiento(seg, connection, contactPhone, conversationId, vars) {
+  const contenidos = seg.contenidos || [];
+
+  for (const contenido of contenidos) {
+    const tipo = (contenido.tipo || '').toLowerCase();
+
+    if (tipo === 'texto' || tipo === 'text') {
+      const texto = replaceVariables(contenido.texto || contenido.text || '', vars);
+      if (texto) {
+        await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, texto);
+        await saveMessage(conversationId, texto, 'outbound', 'text');
+      }
+
+    } else if (tipo === 'imagen' || tipo === 'image') {
+      const url = contenido.url || '';
+      const caption = replaceVariables(contenido.caption || '', vars);
+      await sendWhatsAppImage(connection.phone_number_id, connection.access_token, contactPhone, url, caption);
+      await saveMessage(conversationId, caption || '[Imagen]', 'outbound', 'image', url);
+
+    } else if (tipo === 'botones' || tipo === 'buttons') {
+      const mensaje = replaceVariables(contenido.mensaje || contenido.message || '', vars);
+      const pie = replaceVariables(contenido.pie || '', vars);
+      const botones = contenido.botones || contenido.buttons || [];
+      const headerImg = contenido.imagen_cabecera || contenido.header_image || '';
+      const textoCompleto = mensaje + (pie ? `\n\n_${pie}_` : '');
+
+      if (botones.length > 0) {
+        await sendWhatsAppButtons(
+          connection.phone_number_id,
+          connection.access_token,
+          contactPhone,
+          textoCompleto,
+          botones,
+          headerImg
+        );
+      } else if (textoCompleto) {
+        await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, textoCompleto);
+      }
+      await saveMessage(conversationId, textoCompleto || '[Botones]', 'outbound', 'text');
+
+    } else if (tipo === 'audio') {
+      const url = contenido.url || '';
+      if (url && !url.startsWith('data:')) {
+        try {
+          await axios.post(
+            `https://graph.facebook.com/v19.0/${connection.phone_number_id}/messages`,
+            { messaging_product: 'whatsapp', to: contactPhone, type: 'audio', audio: { link: url } },
+            { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } }
+          );
+          await saveMessage(conversationId, '[Audio]', 'outbound', 'audio', url);
+        } catch (e) { console.error('[audio error]', e.message); }
+      }
+
+    } else if (tipo === 'video') {
+      const url = contenido.url || '';
+      const caption = replaceVariables(contenido.caption || '', vars);
+      if (url && !url.startsWith('data:')) {
+        try {
+          await axios.post(
+            `https://graph.facebook.com/v19.0/${connection.phone_number_id}/messages`,
+            { messaging_product: 'whatsapp', to: contactPhone, type: 'video', video: { link: url, ...(caption ? { caption } : {}) } },
+            { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } }
+          );
+          await saveMessage(conversationId, caption || '[Video]', 'outbound', 'video', url);
+        } catch (e) { console.error('[video error]', e.message); }
+      }
+
+    } else if (tipo === 'pausa' || tipo === 'pause') {
+      const segundos = contenido.segundos || contenido.seconds || 2;
+      await sleep(Math.min(segundos * 1000, 30000));
+
+    } else if (tipo === 'archivo' || tipo === 'document' || tipo === 'doc') {
+      const url = contenido.url || '';
+      if (url && !url.startsWith('data:')) {
+        try {
+          await axios.post(
+            `https://graph.facebook.com/v19.0/${connection.phone_number_id}/messages`,
+            { messaging_product: 'whatsapp', to: contactPhone, type: 'document', document: { link: url, filename: contenido.filename || 'archivo.pdf' } },
+            { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } }
+          );
+          await saveMessage(conversationId, '[Documento]', 'outbound', 'document', url);
+        } catch (e) { console.error('[doc error]', e.message); }
+      }
+    }
+
+    await sleep(500);
+  }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -138,6 +235,21 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
     .order('created_at', { ascending: true })
     .limit(20);
 
+  // Obtener datos del contacto para variables
+  const { data: conv } = await supabase
+    .from('conversations')
+    .select('contact_name, contact_phone')
+    .eq('id', conversationId)
+    .single();
+
+  const vars = {
+    nombre: conv?.contact_name || contactPhone,
+    telefono: contactPhone,
+    email: '',
+    origen: '',
+    precio: ''
+  };
+
   const nodeMap = {};
   flow.nodes.forEach(n => { nodeMap[n.id] = n; });
 
@@ -158,7 +270,6 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
     if (!node) break;
 
     console.log(`[Flow] Ejecutando nodo: ${node.type} (${node.id})`);
-    console.log(`[Flow] Data del nodo:`, JSON.stringify(node.data));
 
     switch (node.type) {
 
@@ -169,107 +280,59 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
         if (items && Array.isArray(items) && items.length > 0) {
           for (const item of items) {
             const itemType = (item.type || '').toLowerCase();
-            console.log(`[Flow] Procesando item tipo: ${itemType}, url: ${item.url}`);
 
             if (itemType === 'image' || itemType === 'imagen') {
-              await sendWhatsAppImage(
-                connection.phone_number_id,
-                connection.access_token,
-                contactPhone,
-                item.url || '',
-                item.caption || item.description || ''
-              );
-              await saveMessage(
-                conversationId,
-                item.caption || '[Imagen]',
-                'outbound',
-                'image',
-                item.url || ''
-              );
-
+              await sendWhatsAppImage(connection.phone_number_id, connection.access_token, contactPhone, item.url || '', item.caption || item.description || '');
+              await saveMessage(conversationId, item.caption || '[Imagen]', 'outbound', 'image', item.url || '');
             } else if (itemType === 'text' || itemType === 'texto') {
-              const text = item.text || item.content || item.contenido || '';
+              const text = replaceVariables(item.text || item.content || '', vars);
               if (text) {
-                await sendWhatsAppMessage(
-                  connection.phone_number_id,
-                  connection.access_token,
-                  contactPhone,
-                  text
-                );
+                await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, text);
                 await saveMessage(conversationId, text, 'outbound', 'text');
               }
-
             } else if (itemType === 'audio') {
               const url = item.url || '';
               if (url && !url.startsWith('data:')) {
                 try {
-                  await axios.post(
-                    `https://graph.facebook.com/v19.0/${connection.phone_number_id}/messages`,
-                    { messaging_product: 'whatsapp', to: contactPhone, type: 'audio', audio: { link: url } },
-                    { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } }
-                  );
+                  await axios.post(`https://graph.facebook.com/v19.0/${connection.phone_number_id}/messages`, { messaging_product: 'whatsapp', to: contactPhone, type: 'audio', audio: { link: url } }, { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } });
                   await saveMessage(conversationId, '[Audio]', 'outbound', 'audio', url);
-                } catch (e) {
-                  console.error('[WhatsApp audio error]', e.response?.data || e.message);
-                }
+                } catch (e) { console.error('[audio]', e.message); }
               }
-
             } else if (itemType === 'video') {
               const url = item.url || '';
               if (url && !url.startsWith('data:')) {
                 try {
-                  await axios.post(
-                    `https://graph.facebook.com/v19.0/${connection.phone_number_id}/messages`,
-                    { messaging_product: 'whatsapp', to: contactPhone, type: 'video', video: { link: url, ...(item.caption ? { caption: item.caption } : {}) } },
-                    { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } }
-                  );
+                  await axios.post(`https://graph.facebook.com/v19.0/${connection.phone_number_id}/messages`, { messaging_product: 'whatsapp', to: contactPhone, type: 'video', video: { link: url, ...(item.caption ? { caption: item.caption } : {}) } }, { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } });
                   await saveMessage(conversationId, item.caption || '[Video]', 'outbound', 'video', url);
-                } catch (e) {
-                  console.error('[WhatsApp video error]', e.response?.data || e.message);
-                }
+                } catch (e) { console.error('[video]', e.message); }
               }
-
             } else if (itemType === 'document' || itemType === 'doc') {
               const url = item.url || '';
               if (url && !url.startsWith('data:')) {
                 try {
-                  await axios.post(
-                    `https://graph.facebook.com/v19.0/${connection.phone_number_id}/messages`,
-                    { messaging_product: 'whatsapp', to: contactPhone, type: 'document', document: { link: url, filename: item.filename || 'documento.pdf' } },
-                    { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } }
-                  );
+                  await axios.post(`https://graph.facebook.com/v19.0/${connection.phone_number_id}/messages`, { messaging_product: 'whatsapp', to: contactPhone, type: 'document', document: { link: url, filename: item.filename || 'documento.pdf' } }, { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } });
                   await saveMessage(conversationId, '[Documento]', 'outbound', 'document', url);
-                } catch (e) {
-                  console.error('[WhatsApp doc error]', e.response?.data || e.message);
-                }
+                } catch (e) { console.error('[doc]', e.message); }
               }
             }
-
             await sleep(500);
           }
-
         } else {
-          const text = node.data?.text || node.data?.content || '';
+          const text = replaceVariables(node.data?.text || node.data?.content || '', vars);
           if (text) {
-            await sendWhatsAppMessage(
-              connection.phone_number_id,
-              connection.access_token,
-              contactPhone,
-              text
-            );
+            await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, text);
             await saveMessage(conversationId, text, 'outbound', 'text');
           }
         }
 
-        if (node.data?.delay_seconds) {
-          await sleep(node.data.delay_seconds * 1000);
-        }
+        if (node.data?.delay_seconds) await sleep(node.data.delay_seconds * 1000);
         break;
       }
 
-case 'api':
-case 'buttons':
-case 'api_message': {        const text = node.data?.body || node.data?.text || '';
+      case 'api':
+      case 'buttons':
+      case 'api_message': {
+        const text = replaceVariables(node.data?.body || node.data?.text || '', vars);
         const buttons = node.data?.buttons || [];
         if (buttons.length > 0) {
           await sendWhatsAppButtons(connection.phone_number_id, connection.access_token, contactPhone, text, buttons);
@@ -288,6 +351,37 @@ case 'api_message': {        const text = node.data?.body || node.data?.text || 
         lastAiResponse = aiResponse;
         await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, aiResponse);
         await saveMessage(conversationId, aiResponse, 'outbound', 'text');
+        break;
+      }
+
+      // ── NODO SEGUIMIENTO / FOLLOWUP ──────────────────────
+      case 'followup':
+      case 'seguimiento': {
+        const seguimientos = node.data?.seguimientos || [];
+        if (seguimientos.length === 0) break;
+
+        for (const seg of seguimientos) {
+          const tiempoMs = (seg.tiempo_minutos || 0) * 60 * 1000;
+
+          // Actualizar precio en vars si el seguimiento tiene precio
+          if (seg.precio) vars.precio = seg.precio;
+
+          if (tiempoMs > 0 && tiempoMs <= 30000) {
+            // Si el tiempo es pequeño (menos de 30s) esperamos aquí mismo
+            await sleep(tiempoMs);
+            await processSeguimiento(seg, connection, contactPhone, conversationId, vars);
+          } else if (tiempoMs === 0) {
+            // Si tiempo es 0, enviar inmediatamente
+            await processSeguimiento(seg, connection, contactPhone, conversationId, vars);
+          } else {
+            // Si el tiempo es largo (minutos reales), guardar para scheduler futuro
+            console.log(`[Seguimiento] Programado para ${seg.tiempo_minutos} minutos — pendiente scheduler`);
+            // Por ahora enviamos igual para no perder el mensaje
+            await processSeguimiento(seg, connection, contactPhone, conversationId, vars);
+          }
+
+          await sleep(1000);
+        }
         break;
       }
 
@@ -320,12 +414,9 @@ case 'api_message': {        const text = node.data?.body || node.data?.text || 
       case 'label': {
         const tag = node.data?.tag || '';
         if (tag) {
-          const { data: convData } = await supabase.from('conversations')
-            .select('tags').eq('id', conversationId).single();
+          const { data: convData } = await supabase.from('conversations').select('tags').eq('id', conversationId).single();
           const currentTags = convData?.tags || [];
-          await supabase.from('conversations')
-            .update({ tags: [...currentTags, tag] })
-            .eq('id', conversationId);
+          await supabase.from('conversations').update({ tags: [...currentTags, tag] }).eq('id', conversationId);
         }
         break;
       }
@@ -333,9 +424,7 @@ case 'api_message': {        const text = node.data?.body || node.data?.text || 
       case 'notification':
       case 'notify': {
         const notifyPhone = node.data?.phone || '';
-        const msg = (node.data?.message || 'Nueva conversación: {{phone}}')
-          .replace('{{phone}}', contactPhone)
-          .replace('{{userNumber}}', contactPhone);
+        const msg = replaceVariables(node.data?.message || 'Nueva conversación: {{telefono}}', vars);
         if (notifyPhone) {
           await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, notifyPhone, msg);
         }
