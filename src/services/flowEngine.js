@@ -244,19 +244,12 @@ async function runScheduler() {
 
     console.log(`[Scheduler] Pending encontrados: ${pending?.length || 0}, error: ${error?.message || 'ninguno'}`);
 
-    if (!pending?.length) return;      .from('scheduled_followups')
-      .select('*, connections(*)')
-      .eq('status', 'pending')
-      .lte('send_at', now);
-
-    console.log(`[Scheduler] Registros pending encontrados: ${pending?.length || 0}`);
-if (!pending?.length) return;
+    if (!pending?.length) return;
 
     console.log(`[Scheduler] ${pending.length} seguimiento(s) para enviar`);
 
     for (const followup of pending) {
       try {
-        // Verificar que la conversación no haya comprado ya
         const { data: conv } = await supabase
           .from('conversations')
           .select('is_sale')
@@ -345,7 +338,6 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
   let currentNodeId;
   let lastAiResponse = null;
 
-  // ── MODO REANUDACIÓN (botón presionado) ──
   if (options.resumeFromNodeId) {
     const pausedNodeId = options.resumeFromNodeId;
     const buttonPressed = (options.buttonPressed || '').toLowerCase().trim();
@@ -383,13 +375,11 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
     currentNodeId = matchedEdge.target;
 
   } else {
-    // ── MODO NORMAL ──
     const startNode = flow.nodes.find(n => n.type === 'start' || n.type === 'trigger');
     if (!startNode) return;
     currentNodeId = (edgeMap[startNode.id] || [])[0]?.target || null;
   }
 
-  // ── LOOP PRINCIPAL ──
   while (currentNodeId) {
     const node = nodeMap[currentNodeId];
     if (!node) break;
@@ -467,7 +457,6 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
         }
         await saveMessage(conversationId, text || '[Botones]', 'outbound', 'text');
 
-        // Pausar y esperar botón
         await saveFlowState(conversationId, flowId, currentNodeId);
         return;
       }
@@ -483,13 +472,11 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
         break;
       }
 
-      // ── SEGUIMIENTO — programa envíos futuros ────────────
       case 'followup':
       case 'seguimiento': {
         const seguimientos = node.data?.seguimientos || [];
         if (seguimientos.length === 0) break;
 
-        // Cancelar seguimientos previos de esta conversación
         await cancelFollowups(conversationId);
 
         let tiempoAcumulado = 0;
@@ -501,10 +488,8 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
           tiempoAcumulado += tiempoMinutos;
 
           if (tiempoAcumulado === 0) {
-            // Enviar inmediatamente
             await processSeguimiento(seg, connection, contactPhone, conversationId, { ...vars });
           } else {
-            // Programar para después
             await scheduleFollowup(seg, connection, contactPhone, conversationId, { ...vars }, tiempoAcumulado);
           }
         }
