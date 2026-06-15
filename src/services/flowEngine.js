@@ -417,6 +417,10 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
                   await saveMessage(conversationId, item.caption || '[Video]', 'outbound', 'video', url);
                 } catch (e) { console.error('[video]', e.message); }
               }
+            } else if (itemType === 'intervalo' || itemType === 'interval' || itemType === 'delay') {
+              const segundos = item.segundos || item.seconds || item.value || 3;
+              console.log(`[Flow] Intervalo de ${segundos} segundos`);
+              await sleep(Math.min(segundos * 1000, 60000));
             } else if (itemType === 'document' || itemType === 'doc') {
               const url = item.url || '';
               if (url && !url.startsWith('data:')) {
