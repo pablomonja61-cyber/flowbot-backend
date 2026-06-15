@@ -468,7 +468,27 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
 
       case 'ai':
       case 'ai_agent': {
-        const aiConfig = await getAIConfig(connection.user_id);
+        // Obtener config IA — primero la del nodo, luego la activa global
+        const nodeConfigId = node.data?.ai_config_id || node.data?.config_id;
+        let aiConfig;
+        if (nodeConfigId) {
+          const { data: specificConfig } = await supabase
+            .from('ai_config')
+            .select('*')
+            .eq('id', nodeConfigId)
+            .single();
+          aiConfig = specificConfig;
+        }
+        if (!aiConfig) aiConfig = await getAIConfig(connection.user_id);
+
+        // Guardar qué config IA está usando esta conversación
+        if (aiConfig?.id) {
+          await supabase.from('conversations')
+            .update({ ai_config_id: aiConfig.id })
+            .eq('id', conversationId);
+          console.log(`[Flow] Config IA guardada en conversación: ${aiConfig.id}`);
+        }
+
         const systemPrompt = node.data?.context || node.data?.prompt ||
           aiConfig?.system_prompt ||
           'Eres un asistente de ventas amable y profesional. Responde en español.';

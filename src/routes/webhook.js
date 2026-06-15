@@ -253,15 +253,37 @@ Responde SOLO en formato JSON exacto, sin texto adicional:
   }
 }
 
-// ── Responder con IA usando config activa de Supabase ─────────
 async function respondWithAI(userId, connection, contactPhone, userMessage, conversationId) {
   try {
-    const { data: aiConfig } = await supabase
-      .from('ai_config')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('is_active', true)
+    // Primero intentar usar la config IA guardada en la conversación
+    const { data: convData } = await supabase
+      .from('conversations')
+      .select('ai_config_id, active_price')
+      .eq('id', conversationId)
       .single();
+
+    let aiConfig = null;
+
+    if (convData?.ai_config_id) {
+      const { data: specificConfig } = await supabase
+        .from('ai_config')
+        .select('*')
+        .eq('id', convData.ai_config_id)
+        .single();
+      aiConfig = specificConfig;
+      console.log('[AI Fallback] Usando config IA de la conversación:', convData.ai_config_id);
+    }
+
+    // Si no hay config guardada, usar la activa global
+    if (!aiConfig) {
+      const { data: globalConfig } = await supabase
+        .from('ai_config')
+        .select('*')
+        .eq('user_id', userId)
+        .eq('is_active', true)
+        .single();
+      aiConfig = globalConfig;
+    }
 
     if (!aiConfig) {
       console.log('[AI Fallback] Sin configuración activa para user:', userId);
@@ -273,14 +295,8 @@ async function respondWithAI(userId, connection, contactPhone, userMessage, conv
     let systemPrompt = aiConfig.system_prompt ||
       'Eres un asistente de ventas amable y profesional. Responde en español de forma concisa.';
 
-    const { data: convPrice } = await supabase
-      .from('conversations')
-      .select('active_price')
-      .eq('id', conversationId)
-      .single();
-
-    if (convPrice?.active_price) {
-      systemPrompt += `\n\n⚠️ IMPORTANTE - PRECIO ACTUALIZADO: El precio actual de esta oferta es S/${convPrice.active_price}. Usa SIEMPRE S/${convPrice.active_price} como el precio en tu respuesta.`;
+    if (convData?.active_price) {
+      systemPrompt += `\n\n⚠️ PRECIO ACTUALIZADO: El precio actual es S/${convData.active_price}. Usa SIEMPRE este precio.`;
     }
 
     const { data: history } = await supabase
