@@ -4,8 +4,34 @@ const auth = require('../middleware/auth');
 const supabase = require('../models/supabase');
 const { v4: uuidv4 } = require('uuid');
 
-// Todos los endpoints requieren auth
 router.use(auth);
+
+// ── Función para regenerar IDs de nodos y edges ──────────────
+function regenerateNodeIds(nodes = [], edges = []) {
+  const idMap = {}; // oldId -> newId
+
+  // Generar nuevos IDs para cada nodo
+  const newNodes = nodes.map(node => {
+    const newId = `${node.type || 'node'}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    idMap[node.id] = newId;
+    return { ...node, id: newId };
+  });
+
+  // Actualizar edges con los nuevos IDs
+  const newEdges = edges.map(edge => {
+    const newSource = idMap[edge.source] || edge.source;
+    const newTarget = idMap[edge.target] || edge.target;
+    const newId = `edge-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    return {
+      ...edge,
+      id: newId,
+      source: newSource,
+      target: newTarget
+    };
+  });
+
+  return { nodes: newNodes, edges: newEdges };
+}
 
 // ── GET /api/flows ───────────────────────────────────────────
 router.get('/', async (req, res, next) => {
@@ -35,11 +61,22 @@ router.get('/:id', async (req, res, next) => {
 });
 
 // ── POST /api/flows ──────────────────────────────────────────
-// Body: { name, description, nodes: [...], edges: [...] }
+// Si viene con nodes/edges desde importación, regenera IDs
 router.post('/', async (req, res, next) => {
   try {
-    const { name, description, nodes = [], edges = [] } = req.body;
+    const { name, description, nodes = [], edges = [], imported = false } = req.body;
     if (!name) return res.status(400).json({ error: 'name es requerido' });
+
+    // Si es importación o tiene nodos, regenerar IDs para evitar colisiones
+    let finalNodes = nodes;
+    let finalEdges = edges;
+
+    if (nodes.length > 0) {
+      const regenerated = regenerateNodeIds(nodes, edges);
+      finalNodes = regenerated.nodes;
+      finalEdges = regenerated.edges;
+      console.log(`[Flows] Regenerados ${finalNodes.length} nodos con IDs únicos`);
+    }
 
     const { data, error } = await supabase
       .from('flows')
@@ -48,8 +85,8 @@ router.post('/', async (req, res, next) => {
         user_id: req.user.id,
         name,
         description,
-        nodes,   // array de nodos (JSON)
-        edges,   // array de conexiones (JSON)
+        nodes: finalNodes,
+        edges: finalEdges,
         is_active: true
       })
       .select()
@@ -69,7 +106,6 @@ router.put('/:id', async (req, res, next) => {
     if (nodes !== undefined) updates.nodes = nodes;
     if (edges !== undefined) updates.edges = edges;
     if (is_active !== undefined) updates.is_active = is_active;
-
     const { data, error } = await supabase
       .from('flows')
       .update(updates)
