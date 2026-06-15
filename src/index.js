@@ -27,8 +27,9 @@ app.use(cors({
 
 // ── Body parser ─────────────────────────────────────────────
 app.use('/webhook', express.raw({ type: 'application/json' }));
-app.use(express.json({ limit: '10mb' }));
-app.use(express.raw({ type: 'multipart/form-data', limit: '50mb' }));
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
+app.use(express.raw({ type: 'multipart/form-data', limit: '100mb' }));
 
 // ── Health check ────────────────────────────────────────────
 app.get('/health', (req, res) => {
@@ -45,13 +46,14 @@ app.use('/api/conversations', conversationRoutes);
 app.use('/api/ai-config', aiConfigRoutes);
 app.use('/api/payment-config', paymentConfigRoutes);
 app.use('/api/media', mediaRoutes);
+app.use('/api/remarketing', remarketingRoutes);
+
 const { runScheduler } = require('./services/flowEngine');
 app.get('/api/scheduler/run', async (req, res) => {
   if (req.query.secret !== process.env.SCHEDULER_SECRET) return res.status(401).json({ error: 'No autorizado' });
   await runScheduler();
   res.json({ ok: true, time: new Date().toISOString() });
 });
-app.use('/api/remarketing', remarketingRoutes);
 
 // ── Error handler global ────────────────────────────────────
 app.use((err, req, res, next) => {
