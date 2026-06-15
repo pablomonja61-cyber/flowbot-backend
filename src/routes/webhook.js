@@ -274,8 +274,20 @@ async function respondWithAI(userId, connection, contactPhone, userMessage, conv
 
     const apiKey = aiConfig.groq_api_key || process.env.GROQ_API_KEY;
     const model = aiConfig.model || 'meta-llama/llama-4-scout-17b-16e-instruct';
-    const systemPrompt = aiConfig.system_prompt ||
+    let systemPrompt = aiConfig.system_prompt ||
       'Eres un asistente de ventas amable y profesional. Responde en español de forma concisa.';
+
+    // Si hay un precio activo (por una promo de seguimiento), sobreescribirlo
+    const { data: convPrice } = await supabase
+      .from('conversations')
+      .select('active_price')
+      .eq('id', conversationId)
+      .single();
+
+    if (convPrice?.active_price) {
+      systemPrompt += `\n\n⚠️ IMPORTANTE - PRECIO ACTUALIZADO: El precio actual de esta oferta es S/${convPrice.active_price} (NO S/10 ni el precio original mencionado arriba). Usa SIEMPRE S/${convPrice.active_price} como el precio en tu respuesta, ya que el cliente está viendo una promoción especial activa.`;
+      console.log(`[AI Fallback] Precio activo aplicado: S/${convPrice.active_price}`);
+    }
 
     const { data: history } = await supabase
       .from('messages')
