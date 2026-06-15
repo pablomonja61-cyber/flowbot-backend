@@ -3,7 +3,7 @@ const supabase = require('../models/supabase');
 const { v4: uuidv4 } = require('uuid');
 
 // ── IA con Groq ──────────────────────────────────────────────
-async function callGroqAI(systemPrompt, conversationHistory, userMessage) {
+async function callGroqAI(systemPrompt, conversationHistory, userMessage, model) {
   try {
     const messages = [
       { role: 'system', content: systemPrompt },
@@ -16,8 +16,17 @@ async function callGroqAI(systemPrompt, conversationHistory, userMessage) {
 
     const response = await axios.post(
       'https://api.groq.com/openai/v1/chat/completions',
-      { model: 'meta-llama/llama-4-scout-17b-16e-instruct', max_tokens: 500, messages },
-      { headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' } }
+      {
+        model: model || 'meta-llama/llama-4-scout-17b-16e-instruct',
+        max_tokens: 500,
+        messages
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+          'Content-Type': 'application/json'
+        }
+      }
     );
 
     return response.data.choices[0].message.content;
@@ -27,7 +36,21 @@ async function callGroqAI(systemPrompt, conversationHistory, userMessage) {
   }
 }
 
-// ── Reemplazar variables ─────────────────────────────────────
+// ── Obtener config de IA del usuario ────────────────────────
+async function getAIConfig(userId) {
+  try {
+    const { data } = await supabase
+      .from('ai_config')
+      .select('*')
+      .eq('user_id', userId)
+      .single();
+    return data;
+  } catch (err) {
+    return null;
+  }
+}
+
+// ── Reemplazar variables en texto ────────────────────────────
 function replaceVariables(text, vars = {}) {
   if (!text) return text;
   return text
@@ -40,12 +63,17 @@ function replaceVariables(text, vars = {}) {
     .replace(/\{\{userNumber\}\}/g, vars.telefono || '');
 }
 
-// ── Enviar texto ─────────────────────────────────────────────
+// ── Enviar mensaje de texto ──────────────────────────────────
 async function sendWhatsAppMessage(phoneNumberId, accessToken, to, message) {
   try {
     await axios.post(
       `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`,
-      { messaging_product: 'whatsapp', to, type: 'text', text: { body: message } },
+      {
+        messaging_product: 'whatsapp',
+        to,
+        type: 'text',
+        text: { body: message }
+      },
       { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
     );
     console.log(`[WhatsApp] Texto enviado a ${to}`);
@@ -63,7 +91,12 @@ async function sendWhatsAppImage(phoneNumberId, accessToken, to, imageUrl, capti
     }
     await axios.post(
       `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`,
-      { messaging_product: 'whatsapp', to, type: 'image', image: { link: imageUrl, ...(caption ? { caption } : {}) } },
+      {
+        messaging_product: 'whatsapp',
+        to,
+        type: 'image',
+        image: { link: imageUrl, ...(caption ? { caption } : {}) }
+      },
       { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
     );
   } catch (err) {
@@ -81,22 +114,20 @@ async function sendWhatsAppButtons(phoneNumberId, accessToken, to, bodyText, but
       action: {
         buttons: buttons.slice(0, 3).map((btn, i) => ({
           type: 'reply',
-          reply: {
-            id: `btn_${i}_${(btn.titulo || btn.title || btn).slice(0, 20).replace(/\s/g, '_')}`,
-            title: (btn.titulo || btn.title || btn).slice(0, 20)
-          }
+          reply: { id: `btn_${i}`, title: (btn.titulo || btn.title || btn).slice(0, 20) }
         }))
       }
     };
+
     if (headerImageUrl && !headerImageUrl.startsWith('data:')) {
       interactive.header = { type: 'image', image: { link: headerImageUrl } };
     }
+
     await axios.post(
       `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`,
       { messaging_product: 'whatsapp', to, type: 'interactive', interactive },
       { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
     );
-    console.log(`[WhatsApp] Botones enviados a ${to}`);
   } catch (err) {
     console.error('[WhatsApp buttons error]', err.response?.data || err.message);
     const text = (bodyText || '') + '\n\n' + buttons.map((b, i) => `${i + 1}. ${b.titulo || b.title || b}`).join('\n');
@@ -104,64 +135,73 @@ async function sendWhatsAppButtons(phoneNumberId, accessToken, to, bodyText, but
   }
 }
 
-// ── Sleep ────────────────────────────────────────────────────
+// ── Espera ───────────────────────────────────────────────────
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// ── Guardar estado de flujo (esperando botón) ────────────────
-async function saveFlowState(conversationId, flowId, currentNodeId) {
-  await supabase
-    .from('flow_states')
-    .update({ status: 'completed' })
-    .eq('conversation_id', conversationId)
-    .eq('status', 'waiting_button');
-
-  await supabase.from('flow_states').insert({
-    id: uuidv4(),
-    conversation_id: conversationId,
-    flow_id: flowId,
-    current_node_id: currentNodeId,
-    status: 'waiting_button',
-    created_at: new Date().toISOString()
-  });
-
-  console.log(`[Flow] Pausado en nodo ${currentNodeId}, esperando botón`);
+// ── Guardar estado del flujo (pausa en botones) ──────────────
+async function saveFlowState(conversationId, flowId, nodeId) {
+  try {
+    await supabase.from('flow_states').upsert({
+      conversation_id: conversationId,
+      flow_id: flowId,
+      current_node_id: nodeId,
+      status: 'waiting_button',
+      created_at: new Date().toISOString()
+    }, { onConflict: 'conversation_id' });
+    console.log(`[Flow] Estado guardado — esperando botón en nodo ${nodeId}`);
+  } catch (err) {
+    console.error('[Flow] Error guardando estado:', err.message);
+  }
 }
 
-// ── Programar seguimiento futuro ─────────────────────────────
-async function scheduleFollowup(seg, connection, contactPhone, conversationId, vars, delayMinutes) {
-  const sendAt = new Date(Date.now() + delayMinutes * 60 * 1000).toISOString();
-
-  await supabase.from('scheduled_followups').insert({
-    id: uuidv4(),
-    conversation_id: conversationId,
-    connection_id: connection.id,
-    contact_phone: contactPhone,
-    seg_data: seg,
-    vars: vars,
-    send_at: sendAt,
-    status: 'pending'
-  });
-
-  console.log(`[Seguimiento] Programado para ${delayMinutes} minutos (${sendAt})`);
+// ── Limpiar estado del flujo ─────────────────────────────────
+async function clearFlowState(conversationId) {
+  try {
+    await supabase.from('flow_states')
+      .delete()
+      .eq('conversation_id', conversationId);
+  } catch (err) {
+    console.error('[Flow] Error limpiando estado:', err.message);
+  }
 }
 
-// ── Cancelar seguimientos pendientes de una conversación ─────
+// ── Programar seguimiento ────────────────────────────────────
+async function scheduleFollowup(conversationId, connectionId, contactPhone, segData, vars, delayMinutes) {
+  try {
+    const sendAt = new Date(Date.now() + delayMinutes * 60 * 1000).toISOString();
+    await supabase.from('scheduled_followups').insert({
+      id: uuidv4(),
+      conversation_id: conversationId,
+      connection_id: connectionId,
+      contact_phone: contactPhone,
+      seg_data: segData,
+      vars: vars,
+      send_at: sendAt,
+      status: 'pending'
+    });
+    console.log(`[Followup] Programado para ${delayMinutes} minutos — send_at: ${sendAt}`);
+  } catch (err) {
+    console.error('[Followup] Error programando:', err.message);
+  }
+}
+
+// ── Cancelar seguimientos pendientes (cuando hay pago) ───────
 async function cancelFollowups(conversationId) {
-  await supabase
-    .from('scheduled_followups')
-    .update({ status: 'cancelled' })
-    .eq('conversation_id', conversationId)
-    .eq('status', 'pending');
-
-  console.log(`[Seguimiento] Cancelados para conversación ${conversationId}`);
+  try {
+    await supabase.from('scheduled_followups')
+      .update({ status: 'cancelled' })
+      .eq('conversation_id', conversationId)
+      .eq('status', 'pending');
+    console.log(`[Followup] Seguimientos cancelados para conversación ${conversationId}`);
+  } catch (err) {
+    console.error('[Followup] Error cancelando:', err.message);
+  }
 }
 
-// ── Procesar contenido de un seguimiento ─────────────────────
-async function processSeguimiento(seg, connection, contactPhone, conversationId, vars) {
-  const contenidos = seg.contenidos || [];
-
+// ── Enviar contenido de seguimiento ─────────────────────────
+async function sendFollowupContents(contenidos, connection, contactPhone, conversationId, vars) {
   for (const contenido of contenidos) {
     const tipo = (contenido.tipo || '').toLowerCase();
 
@@ -196,58 +236,42 @@ async function processSeguimiento(seg, connection, contactPhone, conversationId,
             { messaging_product: 'whatsapp', to: contactPhone, type: 'audio', audio: { link: url } },
             { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } });
           await saveMessage(conversationId, '[Audio]', 'outbound', 'audio', url);
-        } catch (e) { console.error('[audio error]', e.message); }
+        } catch (e) { console.error('[audio]', e.message); }
       }
     } else if (tipo === 'video') {
       const url = contenido.url || '';
-      const caption = replaceVariables(contenido.caption || '', vars);
       if (url && !url.startsWith('data:')) {
         try {
           await axios.post(`https://graph.facebook.com/v19.0/${connection.phone_number_id}/messages`,
-            { messaging_product: 'whatsapp', to: contactPhone, type: 'video', video: { link: url, ...(caption ? { caption } : {}) } },
+            { messaging_product: 'whatsapp', to: contactPhone, type: 'video', video: { link: url, ...(contenido.caption ? { caption: contenido.caption } : {}) } },
             { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } });
-          await saveMessage(conversationId, caption || '[Video]', 'outbound', 'video', url);
-        } catch (e) { console.error('[video error]', e.message); }
+          await saveMessage(conversationId, contenido.caption || '[Video]', 'outbound', 'video', url);
+        } catch (e) { console.error('[video]', e.message); }
       }
     } else if (tipo === 'pausa' || tipo === 'pause') {
       const segundos = contenido.segundos || contenido.seconds || 2;
       await sleep(Math.min(segundos * 1000, 30000));
-    } else if (tipo === 'archivo' || tipo === 'document' || tipo === 'doc') {
-      const url = contenido.url || '';
-      if (url && !url.startsWith('data:')) {
-        try {
-          await axios.post(`https://graph.facebook.com/v19.0/${connection.phone_number_id}/messages`,
-            { messaging_product: 'whatsapp', to: contactPhone, type: 'document', document: { link: url, filename: contenido.filename || 'archivo.pdf' } },
-            { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } });
-          await saveMessage(conversationId, '[Documento]', 'outbound', 'document', url);
-        } catch (e) { console.error('[doc error]', e.message); }
-      }
     }
 
     await sleep(500);
   }
 }
 
-// ════════════════════════════════════════════════════════════
-// SCHEDULER — corre cada minuto
-// ════════════════════════════════════════════════════════════
+// ── Scheduler de seguimientos ────────────────────────────────
 async function runScheduler() {
   try {
     const now = new Date().toISOString();
-
-    const { data: pending } = await supabase
+    const { data: pendingFollowups } = await supabase
       .from('scheduled_followups')
       .select('*, connections(*)')
       .eq('status', 'pending')
       .lte('send_at', now);
 
-    if (!pending?.length) return;
+    if (!pendingFollowups?.length) return;
 
-    console.log(`[Scheduler] ${pending.length} seguimiento(s) para enviar`);
-
-    for (const followup of pending) {
+    for (const followup of pendingFollowups) {
       try {
-        // Verificar que la conversación no haya comprado ya
+        // Verificar si la conversación ya tiene una venta
         const { data: conv } = await supabase
           .from('conversations')
           .select('is_sale')
@@ -255,8 +279,10 @@ async function runScheduler() {
           .single();
 
         if (conv?.is_sale) {
-          console.log(`[Scheduler] Saltando — conversación ${followup.conversation_id} ya compró`);
-          await supabase.from('scheduled_followups').update({ status: 'cancelled' }).eq('id', followup.id);
+          await supabase.from('scheduled_followups')
+            .update({ status: 'cancelled' })
+            .eq('id', followup.id);
+          console.log(`[Scheduler] Seguimiento cancelado — conversación ${followup.conversation_id} ya tiene venta`);
           continue;
         }
 
@@ -266,17 +292,19 @@ async function runScheduler() {
           continue;
         }
 
-        await processSeguimiento(
-          followup.seg_data,
-          connection,
-          followup.contact_phone,
-          followup.conversation_id,
-          followup.vars || {}
-        );
+        const vars = followup.vars || {};
+        const segData = followup.seg_data || {};
+        const contenidos = segData.contenidos || [];
 
-        await supabase.from('scheduled_followups').update({ status: 'sent' }).eq('id', followup.id);
+        if (contenidos.length > 0) {
+          await sendFollowupContents(contenidos, connection, followup.contact_phone, followup.conversation_id, vars);
+        }
+
+        await supabase.from('scheduled_followups')
+          .update({ status: 'sent' })
+          .eq('id', followup.id);
+
         console.log(`[Scheduler] Seguimiento enviado a ${followup.contact_phone}`);
-
       } catch (err) {
         console.error(`[Scheduler] Error en followup ${followup.id}:`, err.message);
         await supabase.from('scheduled_followups').update({ status: 'failed' }).eq('id', followup.id);
@@ -288,18 +316,23 @@ async function runScheduler() {
 }
 
 // Iniciar scheduler cada 60 segundos
-setInterval(runScheduler, 60 * 1000);
+setInterval(runScheduler, 60000);
 console.log('[Scheduler] Iniciado — revisando seguimientos cada 60 segundos');
 
 // ════════════════════════════════════════════════════════════
 // MOTOR DE FLUJOS
 // ════════════════════════════════════════════════════════════
-async function executeFlow(flowId, contactPhone, userMessage, connection, conversationId, options = {}) {
-  const { data: flow } = await supabase
-    .from('flows')
-    .select('*')
-    .eq('id', flowId)
-    .single();
+async function executeFlow(flowId, contactPhone, userMessage, connection, conversationId, preloadedFlow) {
+  let flow = preloadedFlow;
+
+  if (!flow) {
+    const { data } = await supabase
+      .from('flows')
+      .select('*')
+      .eq('id', flowId)
+      .single();
+    flow = data;
+  }
 
   if (!flow || !flow.nodes?.length) return;
 
@@ -330,57 +363,17 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
   const edgeMap = {};
   (flow.edges || []).forEach(e => {
     if (!edgeMap[e.source]) edgeMap[e.source] = [];
-    edgeMap[e.source].push(e);
+    edgeMap[e.source].push({ target: e.target, sourceHandle: e.sourceHandle });
   });
 
+  // Buscar nodo de inicio
   let currentNodeId;
+  const startNode = flow.nodes.find(n => n.type === 'start' || n.type === 'trigger');
+  if (!startNode) return;
+  currentNodeId = edgeMap[startNode.id]?.[0]?.target;
+
   let lastAiResponse = null;
 
-  // ── MODO REANUDACIÓN (botón presionado) ──
-  if (options.resumeFromNodeId) {
-    const pausedNodeId = options.resumeFromNodeId;
-    const buttonPressed = (options.buttonPressed || '').toLowerCase().trim();
-    const buttonId = options.buttonId || '';
-
-    console.log(`[Flow] Reanudando desde nodo ${pausedNodeId}, botón: "${buttonPressed}"`);
-
-    const edges = edgeMap[pausedNodeId] || [];
-    let matchedEdge = null;
-
-    const btnIndexMatch = buttonId.match(/^btn_(\d+)/);
-    const btnIndex = btnIndexMatch ? parseInt(btnIndexMatch[1]) : -1;
-
-    matchedEdge = edges.find(e =>
-      e.sourceHandle && (
-        e.sourceHandle === buttonId ||
-        e.sourceHandle === `output-btn-${btnIndex}` ||
-        e.sourceHandle.toLowerCase().includes(buttonPressed)
-      )
-    );
-
-    if (!matchedEdge && btnIndex >= 0 && edges[btnIndex]) {
-      matchedEdge = edges[btnIndex];
-    }
-
-    if (!matchedEdge && edges.length > 0) {
-      matchedEdge = edges[0];
-    }
-
-    if (!matchedEdge) {
-      console.log(`[Flow] No se encontró edge para el botón "${buttonPressed}"`);
-      return;
-    }
-
-    currentNodeId = matchedEdge.target;
-
-  } else {
-    // ── MODO NORMAL ──
-    const startNode = flow.nodes.find(n => n.type === 'start' || n.type === 'trigger');
-    if (!startNode) return;
-    currentNodeId = (edgeMap[startNode.id] || [])[0]?.target || null;
-  }
-
-  // ── LOOP PRINCIPAL ──
   while (currentNodeId) {
     const node = nodeMap[currentNodeId];
     if (!node) break;
@@ -410,7 +403,9 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
               const url = item.url || '';
               if (url && !url.startsWith('data:')) {
                 try {
-                  await axios.post(`https://graph.facebook.com/v19.0/${connection.phone_number_id}/messages`, { messaging_product: 'whatsapp', to: contactPhone, type: 'audio', audio: { link: url } }, { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } });
+                  await axios.post(`https://graph.facebook.com/v19.0/${connection.phone_number_id}/messages`,
+                    { messaging_product: 'whatsapp', to: contactPhone, type: 'audio', audio: { link: url } },
+                    { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } });
                   await saveMessage(conversationId, '[Audio]', 'outbound', 'audio', url);
                 } catch (e) { console.error('[audio]', e.message); }
               }
@@ -418,7 +413,9 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
               const url = item.url || '';
               if (url && !url.startsWith('data:')) {
                 try {
-                  await axios.post(`https://graph.facebook.com/v19.0/${connection.phone_number_id}/messages`, { messaging_product: 'whatsapp', to: contactPhone, type: 'video', video: { link: url, ...(item.caption ? { caption: item.caption } : {}) } }, { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } });
+                  await axios.post(`https://graph.facebook.com/v19.0/${connection.phone_number_id}/messages`,
+                    { messaging_product: 'whatsapp', to: contactPhone, type: 'video', video: { link: url, ...(item.caption ? { caption: item.caption } : {}) } },
+                    { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } });
                   await saveMessage(conversationId, item.caption || '[Video]', 'outbound', 'video', url);
                 } catch (e) { console.error('[video]', e.message); }
               }
@@ -426,7 +423,9 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
               const url = item.url || '';
               if (url && !url.startsWith('data:')) {
                 try {
-                  await axios.post(`https://graph.facebook.com/v19.0/${connection.phone_number_id}/messages`, { messaging_product: 'whatsapp', to: contactPhone, type: 'document', document: { link: url, filename: item.filename || 'documento.pdf' } }, { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } });
+                  await axios.post(`https://graph.facebook.com/v19.0/${connection.phone_number_id}/messages`,
+                    { messaging_product: 'whatsapp', to: contactPhone, type: 'document', document: { link: url, filename: item.filename || 'documento.pdf' } },
+                    { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } });
                   await saveMessage(conversationId, '[Documento]', 'outbound', 'document', url);
                 } catch (e) { console.error('[doc]', e.message); }
               }
@@ -445,6 +444,7 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
         break;
       }
 
+      // ── NODO BOTONES — SE PAUSA AQUÍ ────────────────────
       case 'api':
       case 'buttons':
       case 'api_message': {
@@ -456,48 +456,59 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
         } else if (text) {
           await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, text);
         }
-        await saveMessage(conversationId, text || '[Botones]', 'outbound', 'text');
 
-        // Pausar y esperar botón
-        await saveFlowState(conversationId, flowId, currentNodeId);
-        return;
+        await saveMessage(conversationId, text, 'outbound', 'text');
+
+        // PAUSA — guardar estado y detener el flujo
+        await saveFlowState(conversationId, flow.id, node.id);
+        console.log(`[Flow] Pausado en nodo de botones ${node.id} — esperando respuesta del cliente`);
+        return; // DETENER el flujo aquí
       }
 
       case 'ai':
       case 'ai_agent': {
+        const aiConfig = await getAIConfig(connection.user_id);
         const systemPrompt = node.data?.context || node.data?.prompt ||
+          aiConfig?.system_prompt ||
           'Eres un asistente de ventas amable y profesional. Responde en español.';
-        const aiResponse = await callGroqAI(systemPrompt, history || [], userMessage);
+        const model = aiConfig?.model || 'meta-llama/llama-4-scout-17b-16e-instruct';
+        const aiResponse = await callGroqAI(systemPrompt, history || [], userMessage, model);
         lastAiResponse = aiResponse;
         await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, aiResponse);
         await saveMessage(conversationId, aiResponse, 'outbound', 'text');
         break;
       }
 
-      // ── SEGUIMIENTO — programa envíos futuros ────────────
+      // ── NODO SEGUIMIENTO ────────────────────────────────
       case 'followup':
       case 'seguimiento': {
         const seguimientos = node.data?.seguimientos || [];
         if (seguimientos.length === 0) break;
 
-        // Cancelar seguimientos previos de esta conversación
-        await cancelFollowups(conversationId);
-
-        let tiempoAcumulado = 0;
-
         for (const seg of seguimientos) {
           const tiempoMinutos = seg.tiempo_minutos || 0;
           if (seg.precio) vars.precio = seg.precio;
 
-          tiempoAcumulado += tiempoMinutos;
-
-          if (tiempoAcumulado === 0) {
+          if (tiempoMinutos <= 0) {
             // Enviar inmediatamente
-            await processSeguimiento(seg, connection, contactPhone, conversationId, { ...vars });
+            await sendFollowupContents(seg.contenidos || [], connection, contactPhone, conversationId, vars);
+          } else if (tiempoMinutos * 60 * 1000 <= 30000) {
+            // Tiempo corto — esperar aquí
+            await sleep(tiempoMinutos * 60 * 1000);
+            await sendFollowupContents(seg.contenidos || [], connection, contactPhone, conversationId, vars);
           } else {
-            // Programar para después
-            await scheduleFollowup(seg, connection, contactPhone, conversationId, { ...vars }, tiempoAcumulado);
+            // Tiempo largo — programar en scheduler
+            await scheduleFollowup(
+              conversationId,
+              connection.id,
+              contactPhone,
+              seg,
+              { ...vars },
+              tiempoMinutos
+            );
           }
+
+          await sleep(1000);
         }
         break;
       }
@@ -514,7 +525,7 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
         else if (operator === 'starts_with') conditionMet = checkText.startsWith(value);
         else if (operator === 'not_contains') conditionMet = !checkText.includes(value);
 
-        const edges = edgeMap[currentNodeId] || [];
+        const edges = (flow.edges || []).filter(e => e.source === currentNodeId);
         const yesEdge = edges.find(e => e.sourceHandle === 'yes' || e.label === 'sí');
         const noEdge = edges.find(e => e.sourceHandle === 'no' || e.label === 'no');
         currentNodeId = (conditionMet ? yesEdge : noEdge)?.target || null;
@@ -553,8 +564,98 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
         continue;
     }
 
-    const nextEdges = edgeMap[currentNodeId] || [];
-    currentNodeId = nextEdges[0]?.target || null;
+    currentNodeId = edgeMap[currentNodeId]?.[0]?.target || null;
+  }
+
+  // Flujo terminado — limpiar estado
+  await clearFlowState(conversationId);
+}
+
+// ── Continuar flujo desde un botón presionado ────────────────
+async function continueFlowFromButton(conversationId, buttonText, connection, contactPhone) {
+  try {
+    const { data: flowState } = await supabase
+      .from('flow_states')
+      .select('*')
+      .eq('conversation_id', conversationId)
+      .eq('status', 'waiting_button')
+      .single();
+
+    if (!flowState) {
+      console.log('[Button] No hay estado de flujo esperando botón');
+      return false;
+    }
+
+    const { data: flow } = await supabase
+      .from('flows')
+      .select('*')
+      .eq('id', flowState.flow_id)
+      .single();
+
+    if (!flow) return false;
+
+    const buttonLower = buttonText.toLowerCase().trim();
+
+    // Encontrar el nodo de botones
+    const apiNode = flow.nodes.find(n => n.id === flowState.current_node_id);
+    if (!apiNode) return false;
+
+    const buttons = apiNode.data?.buttons || [];
+    const buttonIndex = buttons.findIndex(b => {
+      const btnText = (b.titulo || b.title || b || '').toLowerCase();
+      return btnText === buttonLower || btnText.includes(buttonLower) || buttonLower.includes(btnText);
+    });
+
+    console.log(`[Button] Botón "${buttonText}" → índice ${buttonIndex}`);
+
+    // Buscar el edge correspondiente
+    const edges = flow.edges || [];
+    const buttonEdges = edges.filter(e => e.source === apiNode.id);
+
+    let nextNodeId = null;
+    const matchedEdge = buttonEdges.find(e =>
+      e.sourceHandle === `output-btn-${buttonIndex}` ||
+      e.sourceHandle === `btn-${buttonIndex}` ||
+      e.sourceHandle === `btn-${buttonIndex}-out`
+    );
+
+    if (matchedEdge) {
+      nextNodeId = matchedEdge.target;
+    } else if (buttonEdges[buttonIndex]) {
+      nextNodeId = buttonEdges[buttonIndex].target;
+    } else if (buttonEdges[0]) {
+      nextNodeId = buttonEdges[0].target;
+    }
+
+    if (!nextNodeId) {
+      console.log('[Button] No se encontró nodo siguiente');
+      return false;
+    }
+
+    console.log(`[Button] Continuando desde nodo ${nextNodeId}`);
+
+    // Limpiar estado actual
+    await clearFlowState(conversationId);
+
+    // Crear flujo temporal empezando desde el nodo siguiente
+    const tempStartId = `temp-start-${Date.now()}`;
+    const tempFlow = {
+      ...flow,
+      nodes: [
+        { id: tempStartId, type: 'start', data: {} },
+        ...flow.nodes
+      ],
+      edges: [
+        { id: `temp-edge-${Date.now()}`, source: tempStartId, target: nextNodeId },
+        ...flow.edges
+      ]
+    };
+
+    await executeFlow(flow.id, contactPhone, buttonText, connection, conversationId, tempFlow);
+    return true;
+  } catch (err) {
+    console.error('[Button] Error:', err.message);
+    return false;
   }
 }
 
@@ -576,4 +677,11 @@ async function saveMessage(conversationId, content, direction, msgType = 'text',
   }).eq('id', conversationId);
 }
 
-module.exports = { executeFlow, saveMessage, sendWhatsAppMessage, cancelFollowups };
+module.exports = {
+  executeFlow,
+  saveMessage,
+  sendWhatsAppMessage,
+  cancelFollowups,
+  continueFlowFromButton,
+  clearFlowState
+};
