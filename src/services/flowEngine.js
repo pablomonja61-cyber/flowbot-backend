@@ -271,7 +271,6 @@ async function runScheduler() {
 
     for (const followup of pendingFollowups) {
       try {
-        // Verificar si la conversación ya tiene una venta
         const { data: conv } = await supabase
           .from('conversations')
           .select('is_sale')
@@ -366,7 +365,6 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
     edgeMap[e.source].push({ target: e.target, sourceHandle: e.sourceHandle });
   });
 
-  // Buscar nodo de inicio
   let currentNodeId;
   const startNode = flow.nodes.find(n => n.type === 'start' || n.type === 'trigger');
   if (!startNode) return;
@@ -444,7 +442,6 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
         break;
       }
 
-      // ── NODO BOTONES — SE PAUSA AQUÍ ────────────────────
       case 'api':
       case 'buttons':
       case 'api_message': {
@@ -462,7 +459,7 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
         // PAUSA — guardar estado y detener el flujo
         await saveFlowState(conversationId, flow.id, node.id);
         console.log(`[Flow] Pausado en nodo de botones ${node.id} — esperando respuesta del cliente`);
-        return; // DETENER el flujo aquí
+        return;
       }
 
       case 'ai':
@@ -479,7 +476,6 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
         break;
       }
 
-      // ── NODO SEGUIMIENTO ────────────────────────────────
       case 'followup':
       case 'seguimiento': {
         const seguimientos = node.data?.seguimientos || [];
@@ -490,22 +486,12 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
           if (seg.precio) vars.precio = seg.precio;
 
           if (tiempoMinutos <= 0) {
-            // Enviar inmediatamente
             await sendFollowupContents(seg.contenidos || [], connection, contactPhone, conversationId, vars);
           } else if (tiempoMinutos * 60 * 1000 <= 30000) {
-            // Tiempo corto — esperar aquí
             await sleep(tiempoMinutos * 60 * 1000);
             await sendFollowupContents(seg.contenidos || [], connection, contactPhone, conversationId, vars);
           } else {
-            // Tiempo largo — programar en scheduler
-            await scheduleFollowup(
-              conversationId,
-              connection.id,
-              contactPhone,
-              seg,
-              { ...vars },
-              tiempoMinutos
-            );
+            await scheduleFollowup(conversationId, connection.id, contactPhone, seg, { ...vars }, tiempoMinutos);
           }
 
           await sleep(1000);
@@ -567,37 +553,22 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
     currentNodeId = edgeMap[currentNodeId]?.[0]?.target || null;
   }
 
-  // Flujo terminado — limpiar estado
   await clearFlowState(conversationId);
 }
 
 // ── Continuar flujo desde un botón presionado ────────────────
-async function continueFlowFromButton(conversationId, buttonText, connection, contactPhone) {
+async function continueFlowFromButton(flowId, currentNodeId, buttonText, contactPhone, connection, conversationId) {
   try {
-    const { data: flowState } = await supabase
-      .from('flow_states')
-      .select('*')
-      .eq('conversation_id', conversationId)
-      .eq('status', 'waiting_button')
-      .single();
-
-    if (!flowState) {
-      console.log('[Button] No hay estado de flujo esperando botón');
-      return false;
-    }
-
     const { data: flow } = await supabase
       .from('flows')
       .select('*')
-      .eq('id', flowState.flow_id)
+      .eq('id', flowId)
       .single();
 
     if (!flow) return false;
 
     const buttonLower = buttonText.toLowerCase().trim();
-
-    // Encontrar el nodo de botones
-    const apiNode = flow.nodes.find(n => n.id === flowState.current_node_id);
+    const apiNode = flow.nodes.find(n => n.id === currentNodeId);
     if (!apiNode) return false;
 
     const buttons = apiNode.data?.buttons || [];
@@ -608,7 +579,6 @@ async function continueFlowFromButton(conversationId, buttonText, connection, co
 
     console.log(`[Button] Botón "${buttonText}" → índice ${buttonIndex}`);
 
-    // Buscar el edge correspondiente
     const edges = flow.edges || [];
     const buttonEdges = edges.filter(e => e.source === apiNode.id);
 
@@ -634,10 +604,8 @@ async function continueFlowFromButton(conversationId, buttonText, connection, co
 
     console.log(`[Button] Continuando desde nodo ${nextNodeId}`);
 
-    // Limpiar estado actual
     await clearFlowState(conversationId);
 
-    // Crear flujo temporal empezando desde el nodo siguiente
     const tempStartId = `temp-start-${Date.now()}`;
     const tempFlow = {
       ...flow,
@@ -683,5 +651,6 @@ module.exports = {
   sendWhatsAppMessage,
   cancelFollowups,
   continueFlowFromButton,
-  clearFlowState
+  clearFlowState,
+  runScheduler
 };
