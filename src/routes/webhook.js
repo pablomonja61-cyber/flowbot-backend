@@ -38,9 +38,13 @@ router.post('/whatsapp', async (req, res) => {
         for (const msg of value.messages || []) {
           const contactPhone = msg.from;
 
+          // Datos del anuncio de origen (Click to WhatsApp Ads)
+          // Meta los envía solo en el primer mensaje del contacto
+          const referral = msg.referral || null;
+
           if (msg.type === 'image') {
             console.log(`[Webhook] Imagen recibida de ${contactPhone}`);
-            processIncomingImage(phoneNumberId, contactPhone, msg.image).catch(err => {
+            processIncomingImage(phoneNumberId, contactPhone, msg.image, referral).catch(err => {
               console.error('[Webhook] Error procesando imagen:', err.message);
             });
             continue;
@@ -58,7 +62,7 @@ router.post('/whatsapp', async (req, res) => {
 
           console.log(`[Webhook] Mensaje de ${contactPhone}: "${userMessage}" (botón: ${isButtonReply})`);
 
-          processIncomingMessage(phoneNumberId, contactPhone, userMessage, isButtonReply).catch(err => {
+          processIncomingMessage(phoneNumberId, contactPhone, userMessage, isButtonReply, referral).catch(err => {
             console.error('[Webhook] Error procesando mensaje:', err.message);
           });
         }
@@ -70,9 +74,25 @@ router.post('/whatsapp', async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════
+// Helper: construir campos de ads tracking a partir del referral
+// ════════════════════════════════════════════════════════════
+function buildAdsFields(referral) {
+  if (!referral) return {};
+
+  return {
+    ad_id: referral.source_id || null,
+    ad_name: referral.headline || referral.body || null,
+    campaign_id: referral.ctwa_clid || null,
+    campaign_name: referral.source_url || null,
+    adset_name: referral.media_type || null,
+    source_ctwa: true
+  };
+}
+
+// ════════════════════════════════════════════════════════════
 // Procesar IMAGEN entrante (posible comprobante de pago)
 // ════════════════════════════════════════════════════════════
-async function processIncomingImage(phoneNumberId, contactPhone, imageData) {
+async function processIncomingImage(phoneNumberId, contactPhone, imageData, referral = null) {
   const { data: connection } = await supabase
     .from('connections')
     .select('*')
@@ -107,7 +127,8 @@ async function processIncomingImage(phoneNumberId, contactPhone, imageData) {
         status: 'active',
         unread_count: 1,
         last_message: '[Imagen]',
-        last_message_at: new Date().toISOString()
+        last_message_at: new Date().toISOString(),
+        ...buildAdsFields(referral)
       })
       .select()
       .single();
@@ -224,7 +245,7 @@ Responde SOLO en formato JSON exacto, sin texto adicional:
   if (titularEsperado) {
     const titularDetectado = (analysisResult.titular_destino || '').toLowerCase().trim();
     console.log(`[Payment] Titular esperado: "${titularEsperado}" | Detectado: "${titularDetectado}"`);
-    
+
     if (titularDetectado && !titularDetectado.includes(titularEsperado) && !titularEsperado.includes(titularDetectado)) {
       console.log('[Payment] Titular no coincide — rechazando comprobante');
       await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, msgTitularInvalido);
@@ -358,7 +379,7 @@ async function respondWithAI(userId, connection, contactPhone, userMessage, conv
 // ════════════════════════════════════════════════════════════
 // Lógica principal: texto / botones
 // ════════════════════════════════════════════════════════════
-async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, isButtonReply = false) {
+async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, isButtonReply = false, referral = null) {
   const { data: connection } = await supabase
     .from('connections')
     .select('*')
@@ -393,7 +414,8 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
         status: 'active',
         unread_count: 1,
         last_message: userMessage.slice(0, 100),
-        last_message_at: new Date().toISOString()
+        last_message_at: new Date().toISOString(),
+        ...buildAdsFields(referral)
       })
       .select()
       .single();
