@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const supabase = require('../models/supabase');
-const { executeFlow, saveMessage, sendWhatsAppMessage, cancelFollowups } = require('../services/flowEngine');
+const { executeFlow, saveMessage, sendWhatsAppMessage, cancelFollowups, continueFlowFromButton } = require('../services/flowEngine');
 const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
 
@@ -114,7 +114,6 @@ async function processIncomingImage(phoneNumberId, contactPhone, imageData) {
     conversation = newConv;
   }
 
-  // Si la conversación está bloqueada, ignorar
   if (conversation.is_blocked) {
     console.log(`[Webhook] Conversación ${conversation.id} bloqueada — ignorando imagen`);
     return;
@@ -122,13 +121,12 @@ async function processIncomingImage(phoneNumberId, contactPhone, imageData) {
 
   await saveMessage(conversation.id, '[Imagen recibida - posible comprobante]', 'inbound', 'image');
 
-  // Si el flujo ya está desactivado (cliente ya compró), no procesar más
   if (conversation.flow_active === false) {
     console.log(`[Webhook] Flujo desactivado para ${conversation.id} — bot no responde más`);
     return;
   }
 
-  // 1. Descargar la imagen de WhatsApp (Meta Graph API)
+  // 1. Descargar la imagen de WhatsApp
   let imageBuffer;
   try {
     const mediaInfo = await axios.get(
@@ -218,7 +216,6 @@ Responde SOLO en formato JSON exacto, sin texto adicional:
     return;
   }
 
-  // Es un comprobante válido → mandar mensaje general de confirmación
   await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, msgConfirmacion);
   await saveMessage(conversation.id, msgConfirmacion, 'outbound', 'text');
 
@@ -240,7 +237,6 @@ Responde SOLO en formato JSON exacto, sin texto adicional:
       await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, matchedRule.access_message);
       await saveMessage(conversation.id, matchedRule.access_message, 'outbound', 'text');
 
-      // Marcar conversación como venta + apagar el bot + cancelar seguimientos pendientes
       await supabase.from('conversations').update({
         is_sale: true,
         sale_amount: monto,
@@ -277,7 +273,6 @@ async function respondWithAI(userId, connection, contactPhone, userMessage, conv
     let systemPrompt = aiConfig.system_prompt ||
       'Eres un asistente de ventas amable y profesional. Responde en español de forma concisa.';
 
-    // Si hay un precio activo (por una promo de seguimiento), sobreescribirlo
     const { data: convPrice } = await supabase
       .from('conversations')
       .select('active_price')
@@ -285,8 +280,7 @@ async function respondWithAI(userId, connection, contactPhone, userMessage, conv
       .single();
 
     if (convPrice?.active_price) {
-      systemPrompt += `\n\n⚠️ IMPORTANTE - PRECIO ACTUALIZADO: El precio actual de esta oferta es S/${convPrice.active_price} (NO S/10 ni el precio original mencionado arriba). Usa SIEMPRE S/${convPrice.active_price} como el precio en tu respuesta, ya que el cliente está viendo una promoción especial activa.`;
-      console.log(`[AI Fallback] Precio activo aplicado: S/${convPrice.active_price}`);
+      systemPrompt += `\n\n⚠️ IMPORTANTE - PRECIO ACTUALIZADO: El precio actual de esta oferta es S/${convPrice.active_price}. Usa SIEMPRE S/${convPrice.active_price} como el precio en tu respuesta.`;
     }
 
     const { data: history } = await supabase
@@ -305,8 +299,6 @@ async function respondWithAI(userId, connection, contactPhone, userMessage, conv
       { role: 'user', content: userMessage }
     ];
 
-    console.log('[AI Fallback] Llamando a Groq con modelo:', model);
-
     const response = await axios.post(
       'https://api.groq.com/openai/v1/chat/completions',
       { model, max_tokens: 500, messages },
@@ -322,12 +314,7 @@ async function respondWithAI(userId, connection, contactPhone, userMessage, conv
     const aiResponse = response.data.choices[0].message.content;
     console.log('[AI Fallback] Respuesta IA:', aiResponse.slice(0, 100));
 
-    await sendWhatsAppMessage(
-      connection.phone_number_id,
-      connection.access_token,
-      contactPhone,
-      aiResponse
-    );
+    await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, aiResponse);
     await saveMessage(conversationId, aiResponse, 'outbound', 'text');
 
   } catch (err) {
@@ -380,7 +367,6 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
     conversation = newConv;
   }
 
-  // ── Bloqueado: ignorar completamente ──────────────────────
   if (conversation.is_blocked) {
     console.log(`[Webhook] Conversación ${conversation.id} bloqueada — ignorando mensaje`);
     return;
@@ -388,7 +374,6 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
 
   await saveMessage(conversation.id, userMessage, 'inbound', 'text');
 
-  // ── Flujo apagado (ya compró / desactivado manualmente) ───
   if (conversation.flow_active === false) {
     console.log(`[Webhook] Flujo desactivado para ${conversation.id} — bot no responde más`);
     return;
@@ -396,20 +381,46 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
 
   const normalizedMsg = userMessage.toLowerCase().trim();
 
+  // ── Respuesta de botón interactivo ────────────────────────
+  // Intentar continuar el flujo desde el botón presionado.
+  // Si la conversación tiene un flujo pausado esperando botón,
+  // continúa desde el nodo correcto. Si no, usa IA fallback.
+  if (isButtonReply) {
+    console.log(`[Webhook] Respuesta de botón: "${userMessage}"`);
+
+    // Verificar si hay un flujo pausado esperando botón
+    if (conversation.current_flow_id && conversation.current_node_id) {
+      try {
+        const handled = await continueFlowFromButton(
+          conversation.current_flow_id,
+          conversation.current_node_id,
+          userMessage,
+          contactPhone,
+          connection,
+          conversation.id
+        );
+        if (handled) {
+          console.log(`[Webhook] Flujo continuado desde botón "${userMessage}"`);
+          return;
+        }
+      } catch (err) {
+        console.error('[Webhook] Error continuando flujo desde botón:', err.message);
+      }
+    }
+
+    // Sin flujo pausado → IA fallback
+    console.log('[Webhook] Sin flujo pausado, usando IA fallback para botón');
+    await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
+    return;
+  }
+
+  // ── Mensaje de texto normal ───────────────────────────────
   const { data: triggers } = await supabase
     .from('triggers')
     .select('*, flows(id, nodes, edges, is_active)')
     .eq('user_id', userId)
     .eq('connection_id', connection.id)
     .eq('is_active', true);
-
-  // Respuesta de botón (Yape/Plin/Transferencia) → responde con IA
-  // usando la info del producto si el cliente pregunta en lugar de pagar
-  if (isButtonReply) {
-    console.log(`[Webhook] Respuesta de botón: "${userMessage}"`);
-    await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
-    return;
-  }
 
   if (!triggers?.length) {
     console.log(`[Webhook] Sin triggers — usando IA fallback`);
@@ -425,13 +436,7 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
   if (!matchedTrigger) {
     const defaultTrigger = triggers.find(t => t.keyword === '*' || t.keyword === 'default');
     if (defaultTrigger) {
-      await executeFlow(
-        defaultTrigger.flow_id,
-        contactPhone,
-        userMessage,
-        connection,
-        conversation.id
-      );
+      await executeFlow(defaultTrigger.flow_id, contactPhone, userMessage, connection, conversation.id);
     } else {
       console.log(`[Webhook] Sin coincidencia para "${normalizedMsg}" — usando IA fallback`);
       await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
@@ -461,13 +466,7 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
   });
 
   console.log(`[Webhook] Ejecutando flujo para trigger "${matchedTrigger.name}"`);
-  await executeFlow(
-    matchedTrigger.flow_id,
-    contactPhone,
-    userMessage,
-    connection,
-    conversation.id
-  );
+  await executeFlow(matchedTrigger.flow_id, contactPhone, userMessage, connection, conversation.id);
 }
 
 module.exports = router;
