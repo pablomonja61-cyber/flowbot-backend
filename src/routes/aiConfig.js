@@ -103,6 +103,39 @@ router.delete('/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+
+// ── PATCH /api/ai-config/:id — toggle activo ──────────────
+router.patch('/:id', async (req, res, next) => {
+  try {
+    const { is_active, name, model, response_time, system_prompt } = req.body;
+
+    if (is_active) {
+      await supabase
+        .from('ai_config')
+        .update({ is_active: false })
+        .eq('user_id', req.user.id);
+    }
+
+    const updateData = { updated_at: new Date().toISOString() };
+    if (name !== undefined) updateData.name = name;
+    if (model !== undefined) updateData.model = model;
+    if (response_time !== undefined) updateData.response_time = response_time;
+    if (is_active !== undefined) updateData.is_active = is_active;
+    if (system_prompt !== undefined) updateData.system_prompt = system_prompt;
+
+    const { data, error } = await supabase
+      .from('ai_config')
+      .update(updateData)
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+});
+
 // ── PUT /api/ai-config (legacy) — compatibilidad ──────────
 router.put('/', async (req, res, next) => {
   try {
