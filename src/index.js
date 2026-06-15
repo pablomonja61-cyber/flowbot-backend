@@ -14,6 +14,7 @@ const paymentConfigRoutes = require('./routes/paymentConfig');
 const mediaRoutes = require('./routes/media');
 const remarketingRoutes = require('./routes/remarketing');
 const adsConfigRoutes = require('./routes/adsConfig');
+const adsMetricsRoutes = require('./routes/adsMetrics');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -49,6 +50,7 @@ app.use('/api/payment-config', paymentConfigRoutes);
 app.use('/api/media', mediaRoutes);
 app.use('/api/remarketing', remarketingRoutes);
 app.use('/api/ads-config', adsConfigRoutes);
+app.use('/api/ads-metrics', adsMetricsRoutes);
 
 const { runScheduler } = require('./services/flowEngine');
 app.get('/api/scheduler/run', async (req, res) => {
