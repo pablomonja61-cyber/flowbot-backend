@@ -8,26 +8,19 @@ router.use(auth);
 
 // ── Función para regenerar IDs de nodos y edges ──────────────
 function regenerateNodeIds(nodes = [], edges = []) {
-  const idMap = {}; // oldId -> newId
+  const idMap = {};
 
-  // Generar nuevos IDs para cada nodo
   const newNodes = nodes.map(node => {
     const newId = `${node.type || 'node'}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     idMap[node.id] = newId;
     return { ...node, id: newId };
   });
 
-  // Actualizar edges con los nuevos IDs
   const newEdges = edges.map(edge => {
     const newSource = idMap[edge.source] || edge.source;
     const newTarget = idMap[edge.target] || edge.target;
     const newId = `edge-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    return {
-      ...edge,
-      id: newId,
-      source: newSource,
-      target: newTarget
-    };
+    return { ...edge, id: newId, source: newSource, target: newTarget };
   });
 
   return { nodes: newNodes, edges: newEdges };
@@ -36,6 +29,8 @@ function regenerateNodeIds(nodes = [], edges = []) {
 // ── GET /api/flows ───────────────────────────────────────────
 router.get('/', async (req, res, next) => {
   try {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.set('Pragma', 'no-cache');
     const { data, error } = await supabase
       .from('flows')
       .select('id, name, description, is_active, created_at, updated_at')
@@ -49,6 +44,12 @@ router.get('/', async (req, res, next) => {
 // ── GET /api/flows/:id ───────────────────────────────────────
 router.get('/:id', async (req, res, next) => {
   try {
+    // Forzar no-cache para que Lovable siempre reciba datos frescos
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    res.set('Surrogate-Control', 'no-store');
+
     const { data, error } = await supabase
       .from('flows')
       .select('*')
@@ -61,13 +62,11 @@ router.get('/:id', async (req, res, next) => {
 });
 
 // ── POST /api/flows ──────────────────────────────────────────
-// Si viene con nodes/edges desde importación, regenera IDs
 router.post('/', async (req, res, next) => {
   try {
-    const { name, description, nodes = [], edges = [], imported = false } = req.body;
+    const { name, description, nodes = [], edges = [] } = req.body;
     if (!name) return res.status(400).json({ error: 'name es requerido' });
 
-    // Si es importación o tiene nodos, regenerar IDs para evitar colisiones
     let finalNodes = nodes;
     let finalEdges = edges;
 
