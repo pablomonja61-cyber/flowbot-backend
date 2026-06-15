@@ -48,21 +48,17 @@ router.post('/whatsapp', async (req, res) => {
 
           if (msg.type !== 'text' && msg.type !== 'interactive') continue;
 
+          const userMessage = msg.type === 'text'
+            ? msg.text?.body || ''
+            : msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || '';
+
           const isButtonReply = msg.type === 'interactive';
-
-          const buttonId = isButtonReply
-            ? (msg.interactive?.button_reply?.id || msg.interactive?.list_reply?.id || '')
-            : '';
-
-          const userMessage = isButtonReply
-            ? (msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || '')
-            : (msg.text?.body || '');
 
           if (!userMessage) continue;
 
-          console.log(`[Webhook] Mensaje de ${contactPhone}: "${userMessage}" (botón: ${isButtonReply}, buttonId: ${buttonId})`);
+          console.log(`[Webhook] Mensaje de ${contactPhone}: "${userMessage}" (botón: ${isButtonReply})`);
 
-          processIncomingMessage(phoneNumberId, contactPhone, userMessage, isButtonReply, buttonId).catch(err => {
+          processIncomingMessage(phoneNumberId, contactPhone, userMessage, isButtonReply).catch(err => {
             console.error('[Webhook] Error procesando mensaje:', err.message);
           });
         }
@@ -118,15 +114,21 @@ async function processIncomingImage(phoneNumberId, contactPhone, imageData) {
     conversation = newConv;
   }
 
-  // ── Verificar bloqueo ────────────────────────────────────
+  // Si la conversación está bloqueada, ignorar
   if (conversation.is_blocked) {
-    console.log(`[Webhook] Contacto ${contactPhone} bloqueado — ignorando imagen`);
+    console.log(`[Webhook] Conversación ${conversation.id} bloqueada — ignorando imagen`);
     return;
   }
 
   await saveMessage(conversation.id, '[Imagen recibida - posible comprobante]', 'inbound', 'image');
 
-  // 1. Descargar la imagen de WhatsApp
+  // Si el flujo ya está desactivado (cliente ya compró), no procesar más
+  if (conversation.flow_active === false) {
+    console.log(`[Webhook] Flujo desactivado para ${conversation.id} — bot no responde más`);
+    return;
+  }
+
+  // 1. Descargar la imagen de WhatsApp (Meta Graph API)
   let imageBuffer;
   try {
     const mediaInfo = await axios.get(
@@ -216,7 +218,7 @@ Responde SOLO en formato JSON exacto, sin texto adicional:
     return;
   }
 
-  // Es un comprobante válido
+  // Es un comprobante válido → mandar mensaje general de confirmación
   await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, msgConfirmacion);
   await saveMessage(conversation.id, msgConfirmacion, 'outbound', 'text');
 
@@ -238,30 +240,35 @@ Responde SOLO en formato JSON exacto, sin texto adicional:
       await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, matchedRule.access_message);
       await saveMessage(conversation.id, matchedRule.access_message, 'outbound', 'text');
 
+      // Marcar conversación como venta + apagar el bot + cancelar seguimientos pendientes
       await supabase.from('conversations').update({
         is_sale: true,
         sale_amount: monto,
-        sale_at: new Date().toISOString()
+        sale_at: new Date().toISOString(),
+        flow_active: false
       }).eq('id', conversation.id);
 
       await cancelFollowups(conversation.id);
+
+      console.log(`[Payment] Conversación ${conversation.id} marcada como venta. Bot desactivado.`);
     } else {
       console.log(`[Payment] No hay regla configurada para monto ${monto}`);
     }
   }
 }
 
-// ── Responder con IA usando config de Supabase ───────────────
+// ── Responder con IA usando config activa de Supabase ─────────
 async function respondWithAI(userId, connection, contactPhone, userMessage, conversationId) {
   try {
     const { data: aiConfig } = await supabase
       .from('ai_config')
       .select('*')
       .eq('user_id', userId)
+      .eq('is_active', true)
       .single();
 
-    if (!aiConfig || !aiConfig.is_active) {
-      console.log('[AI Fallback] IA desactivada o sin configurar para user:', userId);
+    if (!aiConfig) {
+      console.log('[AI Fallback] Sin configuración activa para user:', userId);
       return;
     }
 
@@ -286,6 +293,8 @@ async function respondWithAI(userId, connection, contactPhone, userMessage, conv
       { role: 'user', content: userMessage }
     ];
 
+    console.log('[AI Fallback] Llamando a Groq con modelo:', model);
+
     const response = await axios.post(
       'https://api.groq.com/openai/v1/chat/completions',
       { model, max_tokens: 500, messages },
@@ -301,7 +310,12 @@ async function respondWithAI(userId, connection, contactPhone, userMessage, conv
     const aiResponse = response.data.choices[0].message.content;
     console.log('[AI Fallback] Respuesta IA:', aiResponse.slice(0, 100));
 
-    await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, aiResponse);
+    await sendWhatsAppMessage(
+      connection.phone_number_id,
+      connection.access_token,
+      contactPhone,
+      aiResponse
+    );
     await saveMessage(conversationId, aiResponse, 'outbound', 'text');
 
   } catch (err) {
@@ -312,7 +326,7 @@ async function respondWithAI(userId, connection, contactPhone, userMessage, conv
 // ════════════════════════════════════════════════════════════
 // Lógica principal: texto / botones
 // ════════════════════════════════════════════════════════════
-async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, isButtonReply = false, buttonId = '') {
+async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, isButtonReply = false) {
   const { data: connection } = await supabase
     .from('connections')
     .select('*')
@@ -354,71 +368,36 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
     conversation = newConv;
   }
 
-  // ── Verificar bloqueo ────────────────────────────────────
+  // ── Bloqueado: ignorar completamente ──────────────────────
   if (conversation.is_blocked) {
-    console.log(`[Webhook] Contacto ${contactPhone} bloqueado — ignorando mensaje`);
+    console.log(`[Webhook] Conversación ${conversation.id} bloqueada — ignorando mensaje`);
     return;
   }
 
   await saveMessage(conversation.id, userMessage, 'inbound', 'text');
 
+  // ── Flujo apagado (ya compró / desactivado manualmente) ───
+  if (conversation.flow_active === false) {
+    console.log(`[Webhook] Flujo desactivado para ${conversation.id} — bot no responde más`);
+    return;
+  }
+
   const normalizedMsg = userMessage.toLowerCase().trim();
 
-  // ── SI ES RESPUESTA DE BOTÓN: continuar el flujo pendiente ──
-  if (isButtonReply) {
-    console.log(`[Webhook] Botón presionado: "${userMessage}" (id: ${buttonId})`);
-
-    const { data: flowState } = await supabase
-      .from('flow_states')
-      .select('*')
-      .eq('conversation_id', conversation.id)
-      .eq('status', 'waiting_button')
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .single();
-
-    if (flowState) {
-      console.log(`[Webhook] Continuando flujo ${flowState.flow_id} desde nodo ${flowState.current_node_id}`);
-      await supabase
-        .from('flow_states')
-        .update({ status: 'completed' })
-        .eq('id', flowState.id);
-
-      await executeFlow(
-        flowState.flow_id,
-        contactPhone,
-        userMessage,
-        connection,
-        conversation.id,
-        {
-          resumeFromNodeId: flowState.current_node_id,
-          buttonPressed: userMessage,
-          buttonId: buttonId
-        }
-      );
-      return;
-    }
-
-    // Sin flujo pendiente → IA responde
-    console.log(`[Webhook] Sin flujo pendiente para botón — usando IA fallback`);
-    await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
-    return;
-  }
-
-  // ── Verificar si el flujo está apagado ──────────────────
-  if (conversation.flow_active === false) {
-    console.log(`[Webhook] Flujo apagado para ${contactPhone} — solo IA fallback`);
-    await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
-    return;
-  }
-
-  // ── MENSAJE DE TEXTO NORMAL ──
   const { data: triggers } = await supabase
     .from('triggers')
     .select('*, flows(id, nodes, edges, is_active)')
     .eq('user_id', userId)
     .eq('connection_id', connection.id)
     .eq('is_active', true);
+
+  // Respuesta de botón (Yape/Plin/Transferencia) → responde con IA
+  // usando la info del producto si el cliente pregunta en lugar de pagar
+  if (isButtonReply) {
+    console.log(`[Webhook] Respuesta de botón: "${userMessage}"`);
+    await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
+    return;
+  }
 
   if (!triggers?.length) {
     console.log(`[Webhook] Sin triggers — usando IA fallback`);
@@ -455,7 +434,7 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
       .eq('trigger_id', matchedTrigger.id)
       .eq('contact_phone', contactPhone);
     if (count > 0) {
-      console.log(`[Webhook] Trigger no repetible ya ejecutado para ${contactPhone}`);
+      console.log(`[Webhook] Trigger no repetible ya ejecutado — usando IA fallback`);
       await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
       return;
     }
