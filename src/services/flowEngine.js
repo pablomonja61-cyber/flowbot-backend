@@ -3,7 +3,7 @@ const supabase = require('../models/supabase');
 const { v4: uuidv4 } = require('uuid');
 
 // ── IA con Groq ──────────────────────────────────────────────
-async function callGroqAI(systemPrompt, conversationHistory, userMessage) {
+async function callGroqAI(systemPrompt, conversationHistory, userMessage, model) {
   try {
     const messages = [
       { role: 'system', content: systemPrompt },
@@ -17,7 +17,7 @@ async function callGroqAI(systemPrompt, conversationHistory, userMessage) {
     const response = await axios.post(
       'https://api.groq.com/openai/v1/chat/completions',
       {
-        model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+        model: model || 'meta-llama/llama-4-scout-17b-16e-instruct',
         max_tokens: 500,
         messages
       },
@@ -168,6 +168,29 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// ── Obtener config de IA por ID o la activa del usuario ───────
+async function getAIConfig(aiConfigId, userId) {
+  if (aiConfigId) {
+    const { data } = await supabase
+      .from('ai_config')
+      .select('*')
+      .eq('id', aiConfigId)
+      .single();
+    if (data) return data;
+  }
+  // Fallback: usar la config activa del usuario
+  if (userId) {
+    const { data } = await supabase
+      .from('ai_config')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('is_active', true)
+      .single();
+    if (data) return data;
+  }
+  return null;
+}
+
 // ════════════════════════════════════════════════════════════
 // MOTOR DE FLUJOS
 // ════════════════════════════════════════════════════════════
@@ -249,23 +272,12 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
                 item.url || '',
                 caption
               );
-              await saveMessage(
-                conversationId,
-                caption || '[Imagen]',
-                'outbound',
-                'image',
-                item.url || ''
-              );
+              await saveMessage(conversationId, caption || '[Imagen]', 'outbound', 'image', item.url || '');
 
             } else if (itemType === 'text' || itemType === 'texto') {
               const text = replaceVariables(item.text || item.content || item.contenido || '', baseVars);
               if (text) {
-                await sendWhatsAppMessage(
-                  connection.phone_number_id,
-                  connection.access_token,
-                  contactPhone,
-                  text
-                );
+                await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, text);
                 await saveMessage(conversationId, text, 'outbound', 'text');
               }
 
@@ -322,12 +334,7 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
         } else {
           const text = replaceVariables(node.data?.text || node.data?.content || '', baseVars);
           if (text) {
-            await sendWhatsAppMessage(
-              connection.phone_number_id,
-              connection.access_token,
-              contactPhone,
-              text
-            );
+            await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, text);
             await saveMessage(conversationId, text, 'outbound', 'text');
           }
         }
@@ -362,10 +369,6 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
         break;
       }
 
-      // ──────────────────────────────────────────────────────
-      // NODO SEGUIMIENTO (followup) — ejecución inmediata
-      // (el envío diferido real lo maneja runScheduler)
-      // ──────────────────────────────────────────────────────
       case 'followup':
       case 'delay_followup': {
         const seguimientos = node.data?.seguimientos || [];
@@ -375,13 +378,11 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
           const precio = seg.precio || '';
 
           if (minutos > 0) {
-            // Programar para envío diferido vía scheduler
             await scheduleFollowup(conversationId, contactPhone, connection.id, seg, minutos);
             console.log(`[Followup] Seguimiento "${seg.id}" programado para ${minutos} min`);
             continue;
           }
 
-          // tiempo 0 → enviar inmediatamente
           if (precio) {
             await supabase.from('conversations').update({ active_price: precio }).eq('id', conversationId);
           }
@@ -391,11 +392,31 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
         break;
       }
 
+      // ── Agente IA — usa ai_config_id del nodo si existe ─────
       case 'ai':
       case 'ai_agent': {
-        const systemPrompt = node.data?.context || node.data?.prompt ||
-          'Eres un asistente de ventas amable y profesional. Responde en español.';
-        const aiResponse = await callGroqAI(systemPrompt, history || [], userMessage);
+        const aiConfigId = node.data?.ai_config_id || null;
+        const aiConfig = await getAIConfig(aiConfigId, connection.user_id);
+
+        let systemPrompt;
+        let modelToUse = 'meta-llama/llama-4-scout-17b-16e-instruct';
+
+        if (aiConfig) {
+          systemPrompt = aiConfig.system_prompt || node.data?.context || 'Eres un asistente de ventas amable. Responde en español.';
+          modelToUse = aiConfig.model || modelToUse;
+          console.log(`[AI] Usando config "${aiConfig.name || aiConfig.id}"`);
+        } else {
+          systemPrompt = node.data?.context || node.data?.prompt || 'Eres un asistente de ventas amable y profesional. Responde en español.';
+          console.log(`[AI] Usando prompt del nodo (sin config de IA seleccionada)`);
+        }
+
+        // Inyectar precio activo si existe
+        const activePrice = conv?.active_price;
+        if (activePrice) {
+          systemPrompt += `\n\nIMPORTANTE: El precio actual de la oferta activa es ${activePrice}. Usa ESTE precio en tu respuesta, no menciones precios anteriores.`;
+        }
+
+        const aiResponse = await callGroqAI(systemPrompt, history || [], userMessage, modelToUse);
         lastAiResponse = aiResponse;
         await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, aiResponse);
         await saveMessage(conversationId, aiResponse, 'outbound', 'text');
@@ -476,10 +497,7 @@ async function sendFollowupContents(connection, contactPhone, conversationId, co
 
     } else if (tipo === 'imagen') {
       const caption = replaceVariables(contenido.caption || '', segVars);
-      await sendWhatsAppImage(
-        connection.phone_number_id, connection.access_token, contactPhone,
-        contenido.url || '', caption
-      );
+      await sendWhatsAppImage(connection.phone_number_id, connection.access_token, contactPhone, contenido.url || '', caption);
       await saveMessage(conversationId, caption || '[Imagen]', 'outbound', 'image', contenido.url || '');
 
     } else if (tipo === 'audio') {
@@ -492,9 +510,7 @@ async function sendFollowupContents(connection, contactPhone, conversationId, co
             { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } }
           );
           await saveMessage(conversationId, '[Audio]', 'outbound', 'audio', url);
-        } catch (e) {
-          console.error('[Followup audio error]', e.response?.data || e.message);
-        }
+        } catch (e) { console.error('[Followup audio error]', e.response?.data || e.message); }
       }
 
     } else if (tipo === 'video') {
@@ -508,9 +524,7 @@ async function sendFollowupContents(connection, contactPhone, conversationId, co
             { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } }
           );
           await saveMessage(conversationId, caption || '[Video]', 'outbound', 'video', url);
-        } catch (e) {
-          console.error('[Followup video error]', e.response?.data || e.message);
-        }
+        } catch (e) { console.error('[Followup video error]', e.response?.data || e.message); }
       }
 
     } else if (tipo === 'archivo' || tipo === 'documento' || tipo === 'doc') {
@@ -523,9 +537,7 @@ async function sendFollowupContents(connection, contactPhone, conversationId, co
             { headers: { Authorization: `Bearer ${connection.access_token}`, 'Content-Type': 'application/json' } }
           );
           await saveMessage(conversationId, '[Documento]', 'outbound', 'document', url);
-        } catch (e) {
-          console.error('[Followup doc error]', e.response?.data || e.message);
-        }
+        } catch (e) { console.error('[Followup doc error]', e.response?.data || e.message); }
       }
 
     } else if (tipo === 'pausa') {
@@ -540,10 +552,7 @@ async function sendFollowupContents(connection, contactPhone, conversationId, co
 
       if (botones.length > 0) {
         if (imagenCabecera) {
-          await sendWhatsAppButtonsWithImage(
-            connection.phone_number_id, connection.access_token, contactPhone,
-            imagenCabecera, mensaje, pie, botones
-          );
+          await sendWhatsAppButtonsWithImage(connection.phone_number_id, connection.access_token, contactPhone, imagenCabecera, mensaje, pie, botones);
         } else {
           await sendWhatsAppButtons(connection.phone_number_id, connection.access_token, contactPhone, mensaje, botones);
         }
@@ -598,7 +607,6 @@ async function runScheduler() {
     if (!pending?.length) return;
 
     for (const followup of pending) {
-      // Verificar si la conversación ya compró / está bloqueada / flujo apagado
       const { data: conv } = await supabase
         .from('conversations')
         .select('*')
@@ -638,7 +646,6 @@ async function runScheduler() {
       };
 
       await sendFollowupContents(connection, followup.contact_phone, conv.id, seg.contenidos || [], segVars);
-
       await supabase.from('scheduled_followups').update({ status: 'sent' }).eq('id', followup.id);
       console.log(`[Scheduler] Seguimiento ${followup.id} enviado`);
     }
