@@ -159,6 +159,9 @@ async function processIncomingImage(phoneNumberId, contactPhone, imageData) {
     'Gracias por tu pago. Validaremos el comprobante y en breve te enviaremos el acceso.';
   const msgNoValido = paymentConfig?.msg_no_valido ||
     'Disculpa, no pudimos validar el comprobante. Por favor envía una foto más clara.';
+  const msgTitularInvalido =
+    'Disculpa, el comprobante no está dirigido a nuestra cuenta. Por favor verifica el destinatario e intenta de nuevo.';
+  const titularEsperado = (paymentConfig?.titular || '').toLowerCase().trim();
 
   // 3. Analizar la imagen con Groq Vision
   const apiKey = process.env.GROQ_API_KEY;
@@ -176,10 +179,11 @@ async function processIncomingImage(phoneNumberId, contactPhone, imageData) {
             content: [
               {
                 type: 'text',
-                text: `Analiza esta imagen. ¿Es un comprobante de pago (Yape, Plin, transferencia bancaria u otro)?
+                text: `Analiza esta imagen. \u00bfEs un comprobante de pago (Yape, Plin, transferencia bancaria u otro)?
 Si lo es, extrae el MONTO exacto pagado (solo el número, sin moneda).
+Extrae también el NOMBRE DEL DESTINATARIO/TITULAR al que se realizó el pago (puede aparecer como "Destino", "Para", "Titular", "Nombre").
 Responde SOLO en formato JSON exacto, sin texto adicional:
-{"es_comprobante": true/false, "monto": numero_o_null}`
+{"es_comprobante": true/false, "monto": numero_o_null, "titular_destino": "nombre_o_null"}`
               },
               {
                 type: 'image_url',
@@ -214,6 +218,19 @@ Responde SOLO en formato JSON exacto, sin texto adicional:
     await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, msgNoValido);
     await saveMessage(conversation.id, msgNoValido, 'outbound', 'text');
     return;
+  }
+
+  // 4b. Validar titular si está configurado
+  if (titularEsperado) {
+    const titularDetectado = (analysisResult.titular_destino || '').toLowerCase().trim();
+    console.log(`[Payment] Titular esperado: "${titularEsperado}" | Detectado: "${titularDetectado}"`);
+    
+    if (titularDetectado && !titularDetectado.includes(titularEsperado) && !titularEsperado.includes(titularDetectado)) {
+      console.log('[Payment] Titular no coincide — rechazando comprobante');
+      await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, msgTitularInvalido);
+      await saveMessage(conversation.id, msgTitularInvalido, 'outbound', 'text');
+      return;
+    }
   }
 
   await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, msgConfirmacion);
