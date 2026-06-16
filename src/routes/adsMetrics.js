@@ -76,8 +76,8 @@ router.get('/', async (req, res, next) => {
       .filter(c => c.is_sale)
       .reduce((sum, c) => sum + parseFloat(c.sale_amount || 0), 0);
 
-    const roi = totalSpend > 0 ? (((totalRevenue - totalSpend) / totalSpend) * 100).toFixed(1) : '0.0';
-    const cpa = totalSales > 0 ? (totalSpend / totalSales).toFixed(2) : '0.00';
+    const roi = totalSpend > 0 ? Number((((totalRevenue - totalSpend) / totalSpend) * 100).toFixed(1)) : 0;
+    const cpa = totalSales > 0 ? Number((totalSpend / totalSales).toFixed(2)) : 0;
 
     // 5. Construir la tabla detalle por anuncio, cruzando con conversationsByAd
     const adsDetail = ads.map(ad => {
@@ -91,27 +91,27 @@ router.get('/', async (req, res, next) => {
         ad_id: ad.ad_id,
         name: ad.ad_name || 'Sin nombre',
         campaign: ad.campaign_name || 'Sin campaña',
-        spend: spend.toFixed(2),
+        spend: Number(spend.toFixed(2)),
         conversations: stats.count,
         sales: stats.sales,
-        revenue: stats.revenue.toFixed(2),
-        cost_per_conversation: costPerConv.toFixed(2),
-        cost_per_sale: costPerSale.toFixed(2),
-        roi: `${adRoi.toFixed(1)}%`,
+        revenue: Number(stats.revenue.toFixed(2)),
+        cost_per_conversation: Number(costPerConv.toFixed(2)),
+        cost_per_sale: Number(costPerSale.toFixed(2)),
+        roi: Number(adRoi.toFixed(1)),
         clicks: parseInt(ad.clicks || 0),
         impressions: parseInt(ad.impressions || 0),
-        cpc: parseFloat(ad.cpc || 0).toFixed(2),
+        cpc: Number(parseFloat(ad.cpc || 0).toFixed(2)),
         status: 'active'
       };
     });
 
     res.json({
       summary: {
-        total_spend: totalSpend.toFixed(2),
+        total_spend: Number(totalSpend.toFixed(2)),
         total_conversations: totalConversations,
         total_sales: totalSales,
-        total_revenue: totalRevenue.toFixed(2),
-        roi: `${roi}%`,
+        total_revenue: Number(totalRevenue.toFixed(2)),
+        roi: roi,
         cpa: cpa,
         total_clicks: totalClicks,
         total_impressions: totalImpressions
