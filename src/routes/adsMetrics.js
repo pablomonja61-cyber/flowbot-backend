@@ -22,7 +22,7 @@ router.get('/', async (req, res, next) => {
     const dateFrom = from || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
     const dateTo = to || new Date().toISOString().split('T')[0];
 
-    // 1. Obtener métricas de anuncios desde Meta (incluyendo el ID del anuncio)
+    // 1. Obtener métricas de anuncios desde Meta (incluyendo el ID, estado real y nombres)
     const metricsResponse = await axios.get(
       `https://graph.facebook.com/v19.0/act_${accountId}/insights`,
       {
@@ -39,6 +39,36 @@ router.get('/', async (req, res, next) => {
 
     const ads = metricsResponse.data.data || [];
     console.log(`[Ads metrics] ${ads.length} anuncios obtenidos de Meta`);
+    if (ads.length > 0) {
+      console.log('[Ads metrics] Ejemplo de anuncio crudo:', JSON.stringify(ads[0]));
+    }
+
+    // 1b. Obtener el estado real (ACTIVE/PAUSED/etc) de cada anuncio
+    const adIds = ads.map(a => a.ad_id).filter(Boolean);
+    const statusByAdId = {};
+
+    if (adIds.length > 0) {
+      try {
+        const statusResponse = await axios.get(
+          `https://graph.facebook.com/v19.0/`,
+          {
+            params: {
+              ids: adIds.join(','),
+              fields: 'effective_status,name',
+              access_token: config.access_token
+            },
+            timeout: 15000
+          }
+        );
+        for (const id of adIds) {
+          if (statusResponse.data[id]) {
+            statusByAdId[id] = statusResponse.data[id].effective_status || 'UNKNOWN';
+          }
+        }
+      } catch (statusErr) {
+        console.error('[Ads metrics] Error obteniendo estados:', statusErr.response?.data || statusErr.message);
+      }
+    }
 
     // 2. Obtener TODAS las conversaciones del usuario en el período,
     //    con su ad_id para poder cruzarlas localmente
@@ -101,7 +131,10 @@ router.get('/', async (req, res, next) => {
         clicks: parseInt(ad.clicks || 0),
         impressions: parseInt(ad.impressions || 0),
         cpc: Number(parseFloat(ad.cpc || 0).toFixed(2)),
-        status: 'active'
+        status: (statusByAdId[ad.ad_id] || 'UNKNOWN').toLowerCase(),
+        ad_link: ad.ad_id
+          ? `https://www.facebook.com/adsmanager/manage/ads?act=${accountId}&selected_ad_ids=${ad.ad_id}`
+          : null
       };
     });
 
