@@ -22,14 +22,16 @@ router.get('/', async (req, res, next) => {
     const dateFrom = from || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
     const dateTo = to || new Date().toISOString().split('T')[0];
 
-    // 1. Obtener métricas de anuncios desde Meta (incluyendo el ID, estado real y nombres)
+    // 1. Obtener métricas de anuncios desde Meta, incluyendo "actions"
+    //    que contiene las conversaciones de mensajería iniciadas
+    //    (esto viene directo de Meta, no de nuestra base de datos)
     const metricsResponse = await axios.get(
       `https://graph.facebook.com/v19.0/act_${accountId}/insights`,
       {
         params: {
           access_token: config.access_token,
           time_range: JSON.stringify({ since: dateFrom, until: dateTo }),
-          fields: 'ad_id,ad_name,campaign_name,campaign_id,adset_name,spend,impressions,clicks,cpc,cpm,reach',
+          fields: 'ad_id,ad_name,campaign_name,campaign_id,adset_name,spend,impressions,clicks,cpc,cpm,reach,actions',
           level: 'ad',
           limit: 50
         },
@@ -41,6 +43,16 @@ router.get('/', async (req, res, next) => {
     console.log(`[Ads metrics] ${ads.length} anuncios obtenidos de Meta`);
     if (ads.length > 0) {
       console.log('[Ads metrics] Ejemplo de anuncio crudo:', JSON.stringify(ads[0]));
+    }
+
+    // Helper: extraer conversaciones de mensajería del array "actions" de Meta
+    function getMessagingConversations(actions) {
+      if (!actions || !Array.isArray(actions)) return 0;
+      const action = actions.find(a =>
+        a.action_type === 'onsite_conversion.messaging_conversation_started_7d' ||
+        a.action_type === 'onsite_conversion.messaging_first_reply'
+      );
+      return action ? parseInt(action.value || 0) : 0;
     }
 
     // 1b. Obtener el estado real (ACTIVE/PAUSED/etc) de cada anuncio
@@ -99,8 +111,8 @@ router.get('/', async (req, res, next) => {
     const totalSpend = ads.reduce((sum, ad) => sum + parseFloat(ad.spend || 0), 0);
     const totalClicks = ads.reduce((sum, ad) => sum + parseInt(ad.clicks || 0), 0);
     const totalImpressions = ads.reduce((sum, ad) => sum + parseInt(ad.impressions || 0), 0);
+    const totalConversationsFromMeta = ads.reduce((sum, ad) => sum + getMessagingConversations(ad.actions), 0);
 
-    const totalConversations = conversations.length;
     const totalSales = conversations.filter(c => c.is_sale).length;
     const totalRevenue = conversations
       .filter(c => c.is_sale)
@@ -109,11 +121,14 @@ router.get('/', async (req, res, next) => {
     const roi = totalSpend > 0 ? Number((((totalRevenue - totalSpend) / totalSpend) * 100).toFixed(1)) : 0;
     const cpa = totalSales > 0 ? Number((totalSpend / totalSales).toFixed(2)) : 0;
 
-    // 5. Construir la tabla detalle por anuncio, cruzando con conversationsByAd
+    // 5. Construir la tabla detalle por anuncio
+    //    Conversaciones = dato nativo de Meta (actions)
+    //    Ventas/Ingresos = cruzado desde nuestra tabla por ad_id
     const adsDetail = ads.map(ad => {
-      const stats = conversationsByAd[ad.ad_id] || { count: 0, sales: 0, revenue: 0 };
+      const stats = conversationsByAd[ad.ad_id] || { sales: 0, revenue: 0 };
+      const metaConversations = getMessagingConversations(ad.actions);
       const spend = parseFloat(ad.spend || 0);
-      const costPerConv = stats.count > 0 ? (spend / stats.count) : 0;
+      const costPerConv = metaConversations > 0 ? (spend / metaConversations) : 0;
       const costPerSale = stats.sales > 0 ? (spend / stats.sales) : 0;
       const adRoi = spend > 0 ? (((stats.revenue - spend) / spend) * 100) : 0;
 
@@ -122,7 +137,7 @@ router.get('/', async (req, res, next) => {
         name: ad.ad_name || 'Sin nombre',
         campaign: ad.campaign_name || 'Sin campaña',
         spend: Number(spend.toFixed(2)),
-        conversations: stats.count,
+        conversations: metaConversations,
         sales: stats.sales,
         revenue: Number(stats.revenue.toFixed(2)),
         cost_per_conversation: Number(costPerConv.toFixed(2)),
@@ -141,7 +156,7 @@ router.get('/', async (req, res, next) => {
     res.json({
       summary: {
         total_spend: Number(totalSpend.toFixed(2)),
-        total_conversations: totalConversations,
+        total_conversations: totalConversationsFromMeta,
         total_sales: totalSales,
         total_revenue: Number(totalRevenue.toFixed(2)),
         roi: roi,
