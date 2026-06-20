@@ -13,6 +13,9 @@ router.use((req, res, next) => {
   next();
 });
 
+// Tu user_id personal — solo se muestran tus datos
+const MY_USER_ID = '39a98a91-ce1b-44b9-a355-a910d7720597';
+
 // ════════════════════════════════════════════════════════════
 // GET /api/analytics/summary
 // Resumen general: ingresos, ventas, conversaciones por cuenta
@@ -23,10 +26,11 @@ router.get('/summary', async (req, res, next) => {
     const dateFrom = from || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
     const dateTo = to || new Date().toISOString().split('T')[0];
 
-    // Todas las conversaciones en el período
+    // Solo tus conversaciones
     const { data: conversations } = await supabase
       .from('conversations')
       .select('id, user_id, is_sale, sale_amount, sale_at, created_at')
+      .eq('user_id', MY_USER_ID)
       .gte('created_at', `${dateFrom}T00:00:00.000Z`)
       .lte('created_at', `${dateTo}T23:59:59.999Z`);
 
@@ -124,16 +128,22 @@ router.get('/flows', async (req, res, next) => {
     const dateFrom = from || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
     const dateTo = to || new Date().toISOString().split('T')[0];
 
-    // Obtener todas las ejecuciones de triggers en el período
+    // Obtener triggers solo tuyos
+    const { data: myTriggers } = await supabase
+      .from('triggers')
+      .select('id')
+      .eq('user_id', MY_USER_ID);
+
+    if (!myTriggers?.length) return res.json({ flows: [] });
+    const myTriggerIds = myTriggers.map(t => t.id);
+
+    // Obtener ejecuciones de tus triggers en el período
     const { data: executions } = await supabase
       .from('trigger_executions')
       .select('trigger_id, conversation_id, executed_at')
+      .in('trigger_id', myTriggerIds)
       .gte('executed_at', `${dateFrom}T00:00:00.000Z`)
       .lte('executed_at', `${dateTo}T23:59:59.999Z`);
-
-    if (!executions?.length) {
-      return res.json({ flows: [] });
-    }
 
     // Obtener conversaciones que resultaron en venta
     const convIds = [...new Set(executions.map(e => e.conversation_id))];
@@ -145,12 +155,12 @@ router.get('/flows', async (req, res, next) => {
     const convMap = {};
     (convs || []).forEach(c => { convMap[c.id] = c; });
 
-    // Obtener triggers y sus flujos
-    const triggerIds = [...new Set(executions.map(e => e.trigger_id))];
+    const triggerIds2 = [...new Set(executions.map(e => e.trigger_id))];
     const { data: triggers } = await supabase
       .from('triggers')
       .select('id, name, flow_id, flows(name)')
-      .in('id', triggerIds);
+      .eq('user_id', MY_USER_ID)
+      .in('id', triggerIds2);
 
     const triggerMap = {};
     (triggers || []).forEach(t => { triggerMap[t.id] = t; });
@@ -204,10 +214,11 @@ router.get('/ads', async (req, res, next) => {
     const dateFrom = from || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
     const dateTo = to || new Date().toISOString().split('T')[0];
 
-    // Obtener config de Meta Ads (si user_id especificado, solo esa cuenta)
-    let configQuery = supabase.from('ads_config').select('*');
-    if (user_id) configQuery = configQuery.eq('user_id', user_id);
-    const { data: configs } = await configQuery;
+    // Solo tu config de Meta Ads
+    const { data: configs } = await supabase
+      .from('ads_config')
+      .select('*')
+      .eq('user_id', MY_USER_ID);
 
     if (!configs?.length) {
       return res.json({ ads: [], demographics: { age: [], gender: [] } });
@@ -322,6 +333,7 @@ router.get('/ads', async (req, res, next) => {
     const { data: salesConvs } = await supabase
       .from('conversations')
       .select('ad_id, sale_amount, is_sale')
+      .eq('user_id', MY_USER_ID)
       .eq('is_sale', true)
       .gte('sale_at', `${dateFrom}T00:00:00.000Z`)
       .lte('sale_at', `${dateTo}T23:59:59.999Z`);
