@@ -2,7 +2,6 @@ const express = require('express');
 const router = express.Router();
 const supabase = require('../models/supabase');
 const { executeFlow, saveMessage, sendWhatsAppMessage, cancelFollowups, continueFlowFromButton } = require('../services/flowEngine');
-const { getCountryFromPhone } = require('../utils/countryDetector');
 const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
 
@@ -81,25 +80,6 @@ function buildAdsFields(referral) {
     adset_name: referral.media_type || null,
     source_ctwa: true
   };
-}
-
-// ── Verifica si el contacto pertenece a un país bloqueado ─────
-async function isCountryBlocked(userId, contactPhone) {
-  const countryCode = getCountryFromPhone(contactPhone);
-  if (!countryCode) return false;
-
-  const { data: blocked } = await supabase
-    .from('blocked_countries')
-    .select('country_code')
-    .eq('user_id', userId)
-    .eq('country_code', countryCode)
-    .maybeSingle();
-
-  if (blocked) {
-    console.log(`[Webhook] País bloqueado: ${countryCode} (${contactPhone}) — mensaje ignorado por completo`);
-    return true;
-  }
-  return false;
 }
 
 // ════════════════════════════════════════════════════════════
@@ -183,10 +163,6 @@ async function processIncomingImage(phoneNumberId, contactPhone, imageData, refe
   }
 
   const userId = connection.user_id;
-
-  if (await isCountryBlocked(userId, contactPhone)) {
-    return;
-  }
 
   let { data: conversation } = await supabase
     .from('conversations')
@@ -463,10 +439,6 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
   }
 
   const userId = connection.user_id;
-
-  if (await isCountryBlocked(userId, contactPhone)) {
-    return;
-  }
 
   let { data: conversation } = await supabase
     .from('conversations')
