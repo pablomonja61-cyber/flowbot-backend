@@ -24,10 +24,13 @@ const PORT = process.env.PORT || 3000;
 app.use(helmet());
 app.use(morgan('combined'));
 app.use(cors({
-  origin: [process.env.FRONTEND_URL, 'http://localhost:5173'],
+  origin: [
+    process.env.FRONTEND_URL,
+    'http://localhost:5173',
+    'https://ventas-vista.lovable.app'
+  ],
   credentials: true
 }));
-
 // ── Body parser ─────────────────────────────────────────────
 app.use('/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json({ limit: '100mb' }));
