@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const supabase = require('../models/supabase');
 const { executeFlow, saveMessage, sendWhatsAppMessage, cancelFollowups, continueFlowFromButton } = require('../services/flowEngine');
+const { getCountryFromPhone } = require('../utils/countryDetector');
 const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
 
@@ -37,9 +38,6 @@ router.post('/whatsapp', async (req, res) => {
 
         for (const msg of value.messages || []) {
           const contactPhone = msg.from;
-
-          // Datos del anuncio de origen (Click to WhatsApp Ads)
-          // Meta los envía solo en el primer mensaje del contacto
           const referral = msg.referral || null;
 
           if (msg.type === 'image') {
@@ -73,12 +71,8 @@ router.post('/whatsapp', async (req, res) => {
   }
 });
 
-// ════════════════════════════════════════════════════════════
-// Helper: construir campos de ads tracking a partir del referral
-// ════════════════════════════════════════════════════════════
 function buildAdsFields(referral) {
   if (!referral) return {};
-
   return {
     ad_id: referral.source_id || null,
     ad_name: referral.headline || referral.body || null,
@@ -89,9 +83,92 @@ function buildAdsFields(referral) {
   };
 }
 
+// ── Verifica si el contacto pertenece a un país bloqueado ─────
+async function isCountryBlocked(userId, contactPhone) {
+  const countryCode = getCountryFromPhone(contactPhone);
+  if (!countryCode) return false;
+
+  const { data: blocked } = await supabase
+    .from('blocked_countries')
+    .select('country_code')
+    .eq('user_id', userId)
+    .eq('country_code', countryCode)
+    .maybeSingle();
+
+  if (blocked) {
+    console.log(`[Webhook] País bloqueado: ${countryCode} (${contactPhone}) — mensaje ignorado por completo`);
+    return true;
+  }
+  return false;
+}
+
 // ════════════════════════════════════════════════════════════
-// Procesar IMAGEN entrante (posible comprobante de pago)
+// Conversions API (CAPI): reportar venta a Meta
 // ════════════════════════════════════════════════════════════
+async function sendConversionEvent(userId, contactPhone, monto, ctwaClid) {
+  try {
+    const { data: adsConfig } = await supabase
+      .from('ads_config')
+      .select('pixel_id, access_token, currency, conversions_api')
+      .eq('user_id', userId)
+      .single();
+
+    if (!adsConfig || !adsConfig.conversions_api || !adsConfig.pixel_id) {
+      console.log('[CAPI] No hay config de CAPI activa, omitiendo evento');
+      return;
+    }
+
+    const currency = adsConfig.currency || 'PEN';
+    const pixelId = adsConfig.pixel_id;
+    const accessToken = adsConfig.access_token;
+
+    // Hashear el teléfono con SHA256 (requerido por Meta)
+    const crypto = require('crypto');
+    const phoneHash = crypto
+      .createHash('sha256')
+      .update(contactPhone.replace(/\D/g, ''))
+      .digest('hex');
+
+    const eventData = {
+      data: [
+        {
+          event_name: 'Purchase',
+          event_time: Math.floor(Date.now() / 1000),
+          action_source: 'business_messaging',
+          messaging_channel: 'whatsapp',
+          user_data: {
+            ph: [phoneHash]
+          },
+          custom_data: {
+            value: Number(monto),
+            currency: currency
+          },
+          ...(ctwaClid ? { referrer_url: ctwaClid } : {})
+        }
+      ]
+    };
+
+    // Si tenemos el ctwa_clid, lo mandamos como parte del user_data
+    if (ctwaClid) {
+      eventData.data[0].user_data.ctwa_clid = ctwaClid;
+    }
+
+    const response = await axios.post(
+      `https://graph.facebook.com/v19.0/${pixelId}/events`,
+      eventData,
+      {
+        params: { access_token: accessToken },
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 10000
+      }
+    );
+
+    console.log(`[CAPI] Evento Purchase enviado a Meta. Respuesta:`, JSON.stringify(response.data));
+  } catch (err) {
+    console.error('[CAPI] Error enviando evento a Meta:', err.response?.data || err.message);
+  }
+}
+
 async function processIncomingImage(phoneNumberId, contactPhone, imageData, referral = null) {
   const { data: connection } = await supabase
     .from('connections')
@@ -106,6 +183,10 @@ async function processIncomingImage(phoneNumberId, contactPhone, imageData, refe
   }
 
   const userId = connection.user_id;
+
+  if (await isCountryBlocked(userId, contactPhone)) {
+    return;
+  }
 
   let { data: conversation } = await supabase
     .from('conversations')
@@ -147,7 +228,6 @@ async function processIncomingImage(phoneNumberId, contactPhone, imageData, refe
     return;
   }
 
-  // 1. Descargar la imagen de WhatsApp
   let imageBuffer;
   try {
     const mediaInfo = await axios.get(
@@ -169,7 +249,6 @@ async function processIncomingImage(phoneNumberId, contactPhone, imageData, refe
   const base64Image = imageBuffer.toString('base64');
   const mimeType = imageData.mime_type || 'image/jpeg';
 
-  // 2. Obtener config de pagos del usuario
   const { data: paymentConfig } = await supabase
     .from('payment_config')
     .select('*')
@@ -184,7 +263,6 @@ async function processIncomingImage(phoneNumberId, contactPhone, imageData, refe
     'Disculpa, el comprobante no está dirigido a nuestra cuenta. Por favor verifica el destinatario e intenta de nuevo.';
   const titularEsperado = (paymentConfig?.titular || '').toLowerCase().trim();
 
-  // 3. Analizar la imagen con Groq Vision
   const apiKey = process.env.GROQ_API_KEY;
   let analysisResult = null;
 
@@ -200,11 +278,7 @@ async function processIncomingImage(phoneNumberId, contactPhone, imageData, refe
             content: [
               {
                 type: 'text',
-                text: `Analiza esta imagen. \u00bfEs un comprobante de pago (Yape, Plin, transferencia bancaria u otro)?
-Si lo es, extrae el MONTO exacto pagado (solo el número, sin moneda).
-Extrae también el NOMBRE DEL DESTINATARIO/TITULAR al que se realizó el pago (puede aparecer como "Destino", "Para", "Titular", "Nombre").
-Responde SOLO en formato JSON exacto, sin texto adicional:
-{"es_comprobante": true/false, "monto": numero_o_null, "titular_destino": "nombre_o_null"}`
+                text: 'Analiza esta imagen. \u00bfEs un comprobante de pago (Yape, Plin, transferencia bancaria u otro)?\nSi lo es, extrae el MONTO exacto pagado (solo el numero, sin moneda).\nExtrae tambien el NOMBRE DEL DESTINATARIO/TITULAR al que se realizo el pago (puede aparecer como "Destino", "Para", "Titular", "Nombre").\nResponde SOLO en formato JSON exacto, sin texto adicional:\n{"es_comprobante": true/false, "monto": numero_o_null, "titular_destino": "nombre_o_null"}'
               },
               {
                 type: 'image_url',
@@ -233,7 +307,6 @@ Responde SOLO en formato JSON exacto, sin texto adicional:
     console.error('[Payment Vision error]', err.response?.data || err.message);
   }
 
-  // 4. Decidir respuesta según análisis
   if (!analysisResult || !analysisResult.es_comprobante) {
     console.log('[Payment] No es un comprobante válido');
     await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, msgNoValido);
@@ -241,7 +314,6 @@ Responde SOLO en formato JSON exacto, sin texto adicional:
     return;
   }
 
-  // 4b. Validar titular si está configurado
   if (titularEsperado) {
     const titularDetectado = (analysisResult.titular_destino || '').toLowerCase().trim();
     console.log(`[Payment] Titular esperado: "${titularEsperado}" | Detectado: "${titularDetectado}"`);
@@ -260,7 +332,6 @@ Responde SOLO en formato JSON exacto, sin texto adicional:
   const monto = analysisResult.monto;
   console.log(`[Payment] Comprobante válido, monto detectado: ${monto}`);
 
-  // 5. Buscar regla de acceso que coincida con el monto
   if (monto !== null && monto !== undefined) {
     const { data: rules } = await supabase
       .from('payment_rules')
@@ -284,6 +355,10 @@ Responde SOLO en formato JSON exacto, sin texto adicional:
 
       await cancelFollowups(conversation.id);
 
+      // Reportar venta a Meta Conversions API
+      const ctwaClid = conversation.campaign_id || null;
+      await sendConversionEvent(userId, contactPhone, monto, ctwaClid);
+
       console.log(`[Payment] Conversación ${conversation.id} marcada como venta. Bot desactivado.`);
     } else {
       console.log(`[Payment] No hay regla configurada para monto ${monto}`);
@@ -293,7 +368,6 @@ Responde SOLO en formato JSON exacto, sin texto adicional:
 
 async function respondWithAI(userId, connection, contactPhone, userMessage, conversationId) {
   try {
-    // Primero intentar usar la config IA guardada en la conversación
     const { data: convData } = await supabase
       .from('conversations')
       .select('ai_config_id, active_price')
@@ -312,7 +386,6 @@ async function respondWithAI(userId, connection, contactPhone, userMessage, conv
       console.log('[AI Fallback] Usando config IA de la conversación:', convData.ai_config_id);
     }
 
-    // Si no hay config guardada, usar la activa global
     if (!aiConfig) {
       const { data: globalConfig } = await supabase
         .from('ai_config')
@@ -376,9 +449,6 @@ async function respondWithAI(userId, connection, contactPhone, userMessage, conv
   }
 }
 
-// ════════════════════════════════════════════════════════════
-// Lógica principal: texto / botones
-// ════════════════════════════════════════════════════════════
 async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, isButtonReply = false, referral = null) {
   const { data: connection } = await supabase
     .from('connections')
@@ -393,6 +463,10 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
   }
 
   const userId = connection.user_id;
+
+  if (await isCountryBlocked(userId, contactPhone)) {
+    return;
+  }
 
   let { data: conversation } = await supabase
     .from('conversations')
@@ -436,14 +510,9 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
 
   const normalizedMsg = userMessage.toLowerCase().trim();
 
-  // ── Respuesta de botón interactivo ────────────────────────
-  // Intentar continuar el flujo desde el botón presionado.
-  // Si la conversación tiene un flujo pausado esperando botón,
-  // continúa desde el nodo correcto. Si no, usa IA fallback.
   if (isButtonReply) {
     console.log(`[Webhook] Respuesta de botón: "${userMessage}"`);
 
-    // Verificar si hay un flujo pausado esperando botón
     if (conversation.current_flow_id && conversation.current_node_id) {
       try {
         const handled = await continueFlowFromButton(
@@ -463,13 +532,11 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
       }
     }
 
-    // Sin flujo pausado → IA fallback
     console.log('[Webhook] Sin flujo pausado, usando IA fallback para botón');
     await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
     return;
   }
 
-  // ── Mensaje de texto normal ───────────────────────────────
   const { data: triggers } = await supabase
     .from('triggers')
     .select('*, flows(id, nodes, edges, is_active)')
