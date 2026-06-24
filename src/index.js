@@ -9,6 +9,8 @@ const flowRoutes = require('./routes/flows');
 const triggerRoutes = require('./routes/triggers');
 const connectionRoutes = require('./routes/connections');
 const conversationRoutes = require('./routes/conversations');
+const qrConnectionRoutes = require('./routes/qrConnections');
+const { restoreActiveSessions } = require('./services/baileys');
 const analyticsRoutes = require('./routes/analytics');
 const aiConfigRoutes = require('./routes/aiConfig');
 const paymentConfigRoutes = require('./routes/paymentConfig');
@@ -49,6 +51,7 @@ app.use('/api/flows', flowRoutes);
 app.use('/api/triggers', triggerRoutes);
 app.use('/api/connections', connectionRoutes);
 app.use('/api/conversations', conversationRoutes);
+app.use('/api/qr-connections', qrConnectionRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/ai-config', aiConfigRoutes);
 app.use('/api/payment-config', paymentConfigRoutes);
@@ -72,6 +75,7 @@ app.use((err, req, res, next) => {
   });
 });
 
+setTimeout(() => restoreActiveSessions(), 3000);
 app.listen(PORT, () => {
   console.log(`🚀 Backend corriendo en puerto ${PORT}`);
   console.log(`📡 Webhook: POST /webhook/whatsapp`);
