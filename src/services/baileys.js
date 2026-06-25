@@ -292,7 +292,8 @@ async function executeFlowBaileys(flowId, contactPhone, userMessage, sock, jid, 
     const node = nodeMap[currentNodeId];
     if (!node) break;
 
-    switch (node.type) {
+    console.log(`[Baileys Flow] Nodo: ${node.type} (${currentNodeId})`);
+switch (node.type) {
       case 'message':
       case 'content': {
         const items = node.data?.items || [];
