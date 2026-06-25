@@ -120,7 +120,22 @@ async function startQRSession(connectionId, userId) {
         if (msg.key.fromMe) continue; // ignorar mensajes propios
         if (!msg.message) continue;
 
-        const contactPhone = msg.key.remoteJid?.replace('@s.whatsapp.net', '') || '';
+        const rawJid = msg.key.remoteJid || '';
+        // Manejar tanto formato @s.whatsapp.net como @lid
+        let contactPhone = rawJid
+          .replace('@s.whatsapp.net', '')
+          .replace('@lid', '')
+          .replace('@g.us', '');
+        
+        // Si es formato @lid (número largo), intentar obtener el teléfono real
+        if (rawJid.includes('@lid')) {
+          // Buscar en los participantes del mensaje si existe
+          const participant = msg.key.participant || '';
+          if (participant) {
+            contactPhone = participant.replace('@s.whatsapp.net', '').replace('@lid', '');
+          }
+        }
+        
         if (!contactPhone) continue;
 
         // Extraer texto del mensaje
@@ -135,7 +150,7 @@ async function startQRSession(connectionId, userId) {
         console.log(`[Baileys] Mensaje de ${contactPhone}: "${userMessage}"`);
 
         try {
-          await processBaileysMessage(connectionId, userId, sock, contactPhone, userMessage, isImage, msg);
+          await processBaileysMessage(connectionId, userId, sock, contactPhone, userMessage, isImage, msg, rawJid);
         } catch (err) {
           console.error('[Baileys] Error procesando mensaje:', err.message);
         }
@@ -152,7 +167,7 @@ async function startQRSession(connectionId, userId) {
 // ════════════════════════════════════════════════════════════
 // Procesar mensaje entrante de Baileys
 // ════════════════════════════════════════════════════════════
-async function processBaileysMessage(connectionId, userId, sock, contactPhone, userMessage, isImage, rawMsg) {
+async function processBaileysMessage(connectionId, userId, sock, contactPhone, userMessage, isImage, rawMsg, rawJid) {
   // Buscar o crear conversación
   let { data: conversation } = await supabase
     .from('conversations')
@@ -193,8 +208,8 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
 
   if (conversation.flow_active === false) return;
 
-  // Función para enviar mensaje por Baileys
-  const jid = `${contactPhone}@s.whatsapp.net`;
+  // Usar el JID original para responder correctamente
+  const jid = rawJid || `${contactPhone}@s.whatsapp.net`;
 
   const connection = {
     id: connectionId,
