@@ -302,7 +302,12 @@ switch (node.type) {
           if (tipo === 'text' || tipo === 'texto') {
             const text = item.text || item.content || '';
             if (text) {
-              await sock.sendMessage(jid, { text });
+              try {
+  await sock.sendMessage(jid, { text });
+  console.log(`[Baileys] Mensaje enviado a ${jid}: ${text.slice(0, 50)}`);
+} catch (sendErr) {
+  console.error(`[Baileys] Error enviando mensaje a ${jid}:`, sendErr.message);
+}
               await saveMessage(conversationId, text, 'outbound', 'text');
             }
           } else if (tipo === 'image' || tipo === 'imagen') {
