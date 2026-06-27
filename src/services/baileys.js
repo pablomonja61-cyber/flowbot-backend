@@ -292,8 +292,7 @@ async function executeFlowBaileys(flowId, contactPhone, userMessage, sock, jid, 
     const node = nodeMap[currentNodeId];
     if (!node) break;
 
-    console.log(`[Baileys Flow] Nodo: ${node.type} (${currentNodeId})`);
-switch (node.type) {
+    switch (node.type) {
       case 'message':
       case 'content': {
         const items = node.data?.items || [];
@@ -303,20 +302,40 @@ switch (node.type) {
             const text = item.text || item.content || '';
             if (text) {
               try {
-  await sock.sendMessage(jid, { text });
-  console.log(`[Baileys] Mensaje enviado a ${jid}: ${text.slice(0, 50)}`);
-} catch (sendErr) {
-  console.error(`[Baileys] Error enviando mensaje a ${jid}:`, sendErr.message);
-}
-              await saveMessage(conversationId, text, 'outbound', 'text');
+                await sock.sendMessage(jid, { text });
+                await saveMessage(conversationId, text, 'outbound', 'text');
+                console.log(`[Baileys] Texto enviado: ${text.slice(0, 50)}`);
+              } catch (e) {
+                console.error(`[Baileys] Error enviando texto:`, e.message);
+              }
             }
           } else if (tipo === 'image' || tipo === 'imagen') {
             if (item.url) {
-              await sock.sendMessage(jid, {
-                image: { url: item.url },
-                caption: item.caption || ''
-              });
-              await saveMessage(conversationId, item.caption || '[Imagen]', 'outbound', 'image', item.url);
+              try {
+                await sock.sendMessage(jid, {
+                  image: { url: item.url },
+                  caption: item.caption || ''
+                });
+                await saveMessage(conversationId, item.caption || '[Imagen]', 'outbound', 'image', item.url);
+                console.log(`[Baileys] Imagen enviada: ${item.url.slice(0, 50)}`);
+              } catch (e) {
+                console.error(`[Baileys] Error enviando imagen:`, e.message);
+              }
+            }
+          } else if (tipo === 'video') {
+            if (item.url) {
+              try {
+                await sock.sendMessage(jid, {
+                  video: { url: item.url },
+                  caption: item.caption || ''
+                });
+                await saveMessage(conversationId, item.caption || '[Video]', 'outbound', 'video', item.url);
+                console.log(`[Baileys] Video enviado: ${item.url.slice(0, 50)}`);
+              } catch (e) {
+                console.error(`[Baileys] Error enviando video:`, e.message);
+              }
+            } else {
+              console.log(`[Baileys] Video sin URL, saltando nodo`);
             }
           } else if (tipo === 'interval') {
             await new Promise(r => setTimeout(r, Math.min((item.seconds || 1) * 1000, 30000)));
@@ -329,17 +348,38 @@ switch (node.type) {
       case 'api':
       case 'buttons':
       case 'api_message': {
-        // Baileys no soporta botones interactivos de WhatsApp Business API
-        // Enviamos el texto con las opciones numeradas
         const text = node.data?.body || node.data?.text || '';
         const buttons = node.data?.buttons || [];
+        const headerImage = node.data?.headerType === 'Imagen' ? (node.data?.headerImage || '') : '';
+
+        // Enviar imagen de cabecera si existe
+        if (headerImage) {
+          try {
+            await sock.sendMessage(jid, {
+              image: { url: headerImage },
+              caption: ''
+            });
+            await saveMessage(conversationId, '[Imagen]', 'outbound', 'image', headerImage);
+            await new Promise(r => setTimeout(r, 800));
+          } catch (imgErr) {
+            console.error(`[Baileys] Error enviando imagen cabecera:`, imgErr.message);
+          }
+        }
+
+        // Construir texto con botones numerados
         let fullText = text;
         if (buttons.length > 0) {
           fullText += '\n\n' + buttons.map((b, i) => `${i + 1}. ${b}`).join('\n');
         }
+
         if (fullText) {
-          await sock.sendMessage(jid, { text: fullText });
-          await saveMessage(conversationId, fullText, 'outbound', 'text');
+          try {
+            await sock.sendMessage(jid, { text: fullText });
+            await saveMessage(conversationId, fullText, 'outbound', 'text');
+            console.log(`[Baileys] Mensaje API enviado a ${jid}`);
+          } catch (sendErr) {
+            console.error(`[Baileys] Error enviando mensaje API:`, sendErr.message);
+          }
         }
         break;
       }
