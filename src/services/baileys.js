@@ -468,6 +468,10 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
       console.log(`[Baileys] Flujo continuado desde respuesta: "${userMessage}"`);
       return;
     }
+    // No coincidió con ningún botón → IA responde sin perder estado pausado
+    console.log(`[Baileys] Respuesta no coincide con botones — IA responde manteniendo flujo pausado`);
+    await respondWithAIBaileys(userId, sock, jid, userMessage, conversation.id);
+    return;
   }
 
   const normalizedMsg = userMessage.toLowerCase().trim();
