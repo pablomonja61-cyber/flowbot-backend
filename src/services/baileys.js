@@ -472,8 +472,8 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
       return;
     }
     // No coincidió con ningún botón → IA responde sin perder estado pausado
-    console.log(`[Baileys] Respuesta no coincide con botones — IA responde manteniendo flujo pausado`);
-    await respondWithAIBaileys(userId, sock, jid, userMessage, conversation.id);
+  console.log(`[Baileys] Respuesta no coincide con botones — IA responde, userId: ${userId}`);
+await respondWithAIBaileys(userId, sock, jid, userMessage, conversation.id);
     return;
   }
 
