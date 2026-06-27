@@ -314,8 +314,11 @@ async function continueFlowFromButtonBaileys(flowId, pausedNodeId, userResponse,
     }
   }
 
-  // Si no coincide con ningún botón, usar el primero por defecto
-  if (!matchedHandle) matchedHandle = 'output-btn-0';
+  // Si no coincide con ningún botón, retornar false para que la IA responda
+  if (!matchedHandle) {
+    console.log(`[Baileys Flow] Respuesta "${userResponse}" no coincide con ningún botón — IA responderá`);
+    return false;
+  }
 
   // Encontrar el edge correcto
   const matchedEdge = (flow.edges || []).find(e =>
