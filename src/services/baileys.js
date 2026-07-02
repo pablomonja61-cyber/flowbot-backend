@@ -79,7 +79,6 @@ async function respondWithAIBaileys(userId, sock, jid, userMessage, conversation
 
     let aiConfig = null;
 
-    // Intentar config específica de la conversación
     if (convData?.ai_config_id) {
       const { data: c } = await supabase
         .from('ai_config')
@@ -89,7 +88,6 @@ async function respondWithAIBaileys(userId, sock, jid, userMessage, conversation
       if (c) aiConfig = c;
     }
 
-    // Fallback: config activa global del usuario
     if (!aiConfig) {
       const { data: c } = await supabase
         .from('ai_config')
@@ -146,7 +144,7 @@ async function respondWithAIBaileys(userId, sock, jid, userMessage, conversation
     );
 
     const aiResponse = response.data.choices[0].message.content;
-    console.log(`[Baileys AI] Respuesta generada: ${aiResponse.slice(0, 80)}`);
+    console.log(`[Baileys AI] Respuesta: ${aiResponse.slice(0, 80)}`);
     await sendText(sock, jid, aiResponse, conversationId);
 
   } catch (err) {
@@ -167,14 +165,12 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
   const nodeMap = {};
   flow.nodes.forEach(n => { nodeMap[n.id] = n; });
 
-  // edgeMap: source -> lista de { target, handle }
   const edgeMap = {};
   (flow.edges || []).forEach(e => {
     if (!edgeMap[e.source]) edgeMap[e.source] = [];
     edgeMap[e.source].push({ target: e.target, handle: e.sourceHandle || 'default' });
   });
 
-  // Nodo inicial
   let currentNodeId = startNodeId;
   if (!currentNodeId) {
     const startNode = flow.nodes.find(n => n.type === 'start' || n.type === 'trigger');
@@ -207,7 +203,6 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
             const seconds = Math.min(item.seconds || 1, 30);
             console.log(`[Baileys Flow] Intervalo: ${seconds}s`);
             await sleep(seconds * 1000);
-            // NO hacer await sleep(600) extra después de interval
             continue;
           }
 
@@ -219,10 +214,7 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
           } else if (tipo === 'video') {
             if (item.url) {
               try {
-                await sock.sendMessage(jid, {
-                  video: { url: item.url },
-                  caption: item.caption || ''
-                });
+                await sock.sendMessage(jid, { video: { url: item.url }, caption: item.caption || '' });
                 await saveMsg(conversationId, item.caption || '[Video]', 'outbound', 'video', item.url);
               } catch (e) { console.error('[Baileys] Error enviando video:', e.message); }
             }
@@ -235,7 +227,6 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
             }
           }
 
-          // Pausa entre items (excepto después de interval)
           await sleep(600);
         }
         break;
@@ -259,7 +250,6 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
         }
         if (fullText) await sendText(sock, jid, fullText, conversationId);
 
-        // PAUSAR si tiene botones — guardar estado y esperar respuesta
         if (buttons.length > 0) {
           await supabase.from('conversations').update({
             current_flow_id: flowId,
@@ -342,10 +332,8 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
         continue;
     }
 
-    // Si el flujo se pausó (nodo con botones), salir del loop
     if (shouldPause) break;
 
-    // Avanzar al siguiente nodo: buscar edge sin sourceHandle específico
     const nextEdges = edgeMap[currentNodeId] || [];
     const defaultEdge = nextEdges.find(e => e.handle === 'default' || !e.handle) || nextEdges[0];
     currentNodeId = defaultEdge?.target || null;
@@ -371,7 +359,6 @@ async function continueFlowFromButtonBaileys(flowId, pausedNodeId, userResponse,
   const response = userResponse.toLowerCase().trim();
   let matchedHandle = null;
 
-  // Buscar por número (1, 2, 3...)
   const numMatch = response.match(/^(\d+)/);
   if (numMatch) {
     const idx = parseInt(numMatch[1]) - 1;
@@ -381,7 +368,6 @@ async function continueFlowFromButtonBaileys(flowId, pausedNodeId, userResponse,
     }
   }
 
-  // Buscar por texto del botón
   if (!matchedHandle) {
     for (let i = 0; i < buttons.length; i++) {
       const btnText = buttons[i].toLowerCase().replace(/[^a-z0-9áéíóúñ ]/g, '').trim();
@@ -394,13 +380,11 @@ async function continueFlowFromButtonBaileys(flowId, pausedNodeId, userResponse,
     }
   }
 
-  // Sin coincidencia → IA responde, flujo sigue pausado
   if (!matchedHandle) {
     console.log(`[Baileys Flow] "${userResponse}" no coincide con ningún botón → IA responderá`);
     return false;
   }
 
-  // Encontrar el edge correcto
   const matchedEdge = (flow.edges || []).find(e =>
     e.source === pausedNodeId && e.sourceHandle === matchedHandle
   );
@@ -410,7 +394,6 @@ async function continueFlowFromButtonBaileys(flowId, pausedNodeId, userResponse,
     return false;
   }
 
-  // Limpiar estado pausado
   await supabase.from('conversations').update({
     current_node_id: null,
     current_flow_id: null
@@ -433,7 +416,7 @@ async function sendFollowupContent(sock, jid, contenido, conversationId) {
 // ════════════════════════════════════════════════════════════
 // PROCESAR MENSAJE ENTRANTE
 // ════════════════════════════════════════════════════════════
-async function processBaileysMessage(connectionId, userId, sock, contactPhone, userMessage, isImage, rawMsg, rawJid) {
+async function processBaileysMessage(connectionId, userId, sock, contactPhone, userMessage, isImage, rawMsg, rawJid, contactName) {
   const jid = rawJid || `${contactPhone}@s.whatsapp.net`;
 
   let { data: conversation } = await supabase
@@ -452,7 +435,7 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
         user_id: userId,
         connection_id: connectionId,
         contact_phone: contactPhone,
-        contact_name: contactPhone,
+        contact_name: contactName || contactPhone,
         status: 'active',
         unread_count: 1,
         flow_active: true,
@@ -462,6 +445,9 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
       .select()
       .single();
     conversation = newConv;
+  } else if (contactName && contactName !== contactPhone && conversation.contact_name === conversation.contact_phone) {
+    // Actualizar nombre si antes solo tenía el número
+    await supabase.from('conversations').update({ contact_name: contactName }).eq('id', conversation.id);
   }
 
   if (!conversation) return;
@@ -469,13 +455,11 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
 
   await saveMsg(conversation.id, isImage ? '[Imagen recibida]' : userMessage, 'inbound', isImage ? 'image' : 'text');
 
-  // Bot apagado → solo IA
   if (conversation.flow_active === false) {
     await respondWithAIBaileys(userId, sock, jid, userMessage, conversation.id);
     return;
   }
 
-  // ── Flujo pausado en botón ────────────────────────────────
   if (conversation.current_flow_id && conversation.current_node_id) {
     console.log(`[Baileys] Flujo pausado detectado en nodo: ${conversation.current_node_id}`);
     const handled = await continueFlowFromButtonBaileys(
@@ -487,13 +471,11 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
     );
     if (handled) return;
 
-    // No coincidió con botón → IA responde sin perder estado pausado
     console.log(`[Baileys] IA responde duda mientras flujo sigue pausado`);
     await respondWithAIBaileys(userId, sock, jid, userMessage, conversation.id);
     return;
   }
 
-  // ── Buscar trigger ────────────────────────────────────────
   const normalizedMsg = userMessage.toLowerCase().trim();
 
   const { data: triggers } = await supabase
@@ -523,7 +505,6 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
     return;
   }
 
-  // Verificar si es repetible
   if (!matchedTrigger.is_repeatable) {
     const { count } = await supabase
       .from('trigger_executions')
@@ -624,19 +605,28 @@ async function startQRSession(connectionId, userId) {
         if (!msg.message) continue;
 
         const rawJid = msg.key.remoteJid || '';
-        if (rawJid.includes('@g.us')) continue; // ignorar grupos
+        if (rawJid.includes('@g.us')) continue;
 
+        // ── FIX: limpiar @lid y caracteres no numéricos ──────
         let contactPhone = rawJid
           .replace('@s.whatsapp.net', '')
-          .replace('@lid', '');
+          .replace('@lid', '')
+          .replace(/[^0-9]/g, '');
 
-        if (rawJid.includes('@lid') && msg.key.participant) {
-          contactPhone = msg.key.participant
+        // Si el JID tiene formato @lid, intentar obtener número real del participant
+        if (rawJid.includes('@lid')) {
+          const participant = msg.key.participant || '';
+          const cleaned = participant
             .replace('@s.whatsapp.net', '')
-            .replace('@lid', '');
+            .replace('@lid', '')
+            .replace(/[^0-9]/g, '');
+          if (cleaned) contactPhone = cleaned;
         }
 
         if (!contactPhone) continue;
+
+        // Nombre real del contacto (pushName de WhatsApp)
+        const contactName = msg.pushName || contactPhone;
 
         const userMessage =
           msg.message.conversation ||
@@ -645,10 +635,10 @@ async function startQRSession(connectionId, userId) {
 
         const isImage = !!msg.message.imageMessage;
 
-        console.log(`[Baileys] 📨 Mensaje de ${contactPhone}: "${userMessage}"`);
+        console.log(`[Baileys] 📨 Mensaje de ${contactPhone} (${contactName}): "${userMessage}"`);
 
         try {
-          await processBaileysMessage(connectionId, userId, sock, contactPhone, userMessage, isImage, msg, rawJid);
+          await processBaileysMessage(connectionId, userId, sock, contactPhone, userMessage, isImage, msg, rawJid, contactName);
         } catch (err) {
           console.error('[Baileys] Error procesando mensaje:', err.message);
         }
