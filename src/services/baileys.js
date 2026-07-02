@@ -245,6 +245,16 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
 
           await sleep(600);
         }
+
+        if (node.data?.esperarRespuesta) {
+          await supabase.from('conversations').update({
+            current_flow_id: flowId,
+            current_node_id: node.id,
+            flow_active: true
+          }).eq('id', conversationId);
+          console.log(`[Baileys Flow] ⏸ Pausado en ${node.id} (texto) esperando respuesta`);
+          shouldPause = true;
+        }
         break;
       }
 
@@ -368,6 +378,24 @@ async function continueFlowFromButtonBaileys(flowId, pausedNodeId, userResponse,
 
   const pausedNode = nodeMap[pausedNodeId];
   if (!pausedNode) return false;
+
+  // Si el nodo pausado es de texto normal (no botones API), simplemente
+  // avanza al siguiente nodo, pasando la respuesta del cliente como
+  // userMessage para que el siguiente nodo (ej. Agente IA) la use.
+  if (pausedNode.type !== 'buttons' && pausedNode.type !== 'api_message' && pausedNode.type !== 'api') {
+    const nextEdges = (flow.edges || []).filter(e => e.source === pausedNodeId);
+    const nextEdge = nextEdges.find(e => !e.sourceHandle || e.sourceHandle === 'default') || nextEdges[0];
+    if (!nextEdge) return false;
+
+    await supabase.from('conversations').update({
+      current_node_id: null,
+      current_flow_id: null
+    }).eq('id', conversationId);
+
+    console.log(`[Baileys Flow] ▶ Continuando (texto) → ${nextEdge.target}`);
+    await executeFlowBaileys(flowId, sock, jid, contactPhone, userResponse, conversationId, nextEdge.target);
+    return true;
+  }
 
   const buttons = pausedNode.data?.buttons || [];
   if (!buttons.length) return false;
