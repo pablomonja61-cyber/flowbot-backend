@@ -1,4 +1,4 @@
-const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, downloadMediaMessage } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const QRCode = require('qrcode');
 const supabase = require('../models/supabase');
@@ -6,8 +6,24 @@ const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
+const { cancelFollowups } = require('../services/flowEngine');
 
 const activeSessions = {};
+
+// ════════════════════════════════════════════════════════════
+// NUEVO: verifica si esta conversación ya activó algún flujo
+// alguna vez (dijo una palabra activadora en el pasado).
+// Solo si esto es TRUE se permite usar la IA de dudas como
+// fallback. Si es FALSE, el bot debe quedarse en silencio.
+// ════════════════════════════════════════════════════════════
+async function hasActivatedFlowBaileys(conversationId) {
+  const { count } = await supabase
+    .from('trigger_executions')
+    .select('*', { count: 'exact', head: true })
+    .eq('conversation_id', conversationId);
+
+  return (count || 0) > 0;
+}
 
 function getSessionPath(connectionId) {
   const dir = path.join('/tmp', 'baileys_sessions', connectionId);
@@ -414,6 +430,187 @@ async function sendFollowupContent(sock, jid, contenido, conversationId) {
 }
 
 // ════════════════════════════════════════════════════════════
+// PROCESAR IMAGEN ENTRANTE (comprobante de pago)
+// Equivalente a processIncomingImage() de webhook.js, adaptado
+// para descargar el archivo con Baileys en vez de la Graph API.
+// ════════════════════════════════════════════════════════════
+async function processIncomingImageBaileys(connectionId, userId, sock, contactPhone, rawMsg, rawJid, contactName) {
+  const jid = rawJid || `${contactPhone}@s.whatsapp.net`;
+
+  let { data: conversation } = await supabase
+    .from('conversations')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('contact_phone', contactPhone)
+    .eq('connection_id', connectionId)
+    .single();
+
+  if (!conversation) {
+    const { data: newConv } = await supabase
+      .from('conversations')
+      .insert({
+        id: uuidv4(),
+        user_id: userId,
+        connection_id: connectionId,
+        contact_phone: contactPhone,
+        contact_name: contactName || contactPhone,
+        status: 'active',
+        unread_count: 1,
+        flow_active: true,
+        last_message: '[Imagen]',
+        last_message_at: new Date().toISOString()
+      })
+      .select()
+      .single();
+    conversation = newConv;
+  }
+
+  if (!conversation) return;
+
+  if (conversation.is_blocked) {
+    console.log(`[Baileys Payment] Conversación ${conversation.id} bloqueada — ignorando imagen`);
+    return;
+  }
+
+  await saveMsg(conversation.id, '[Imagen recibida - posible comprobante]', 'inbound', 'image');
+
+  if (conversation.flow_active === false) {
+    console.log(`[Baileys Payment] Flujo desactivado para ${conversation.id} — bot no responde más`);
+    return;
+  }
+
+  // Descargar la imagen real usando Baileys
+  let imageBuffer;
+  try {
+    imageBuffer = await downloadMediaMessage(
+      rawMsg,
+      'buffer',
+      {},
+      { logger: pino({ level: 'silent' }) }
+    );
+  } catch (err) {
+    console.error('[Baileys Payment] Error descargando imagen:', err.message);
+    return;
+  }
+
+  const base64Image = imageBuffer.toString('base64');
+  const mimeType = rawMsg.message?.imageMessage?.mimetype || 'image/jpeg';
+
+  const { data: paymentConfig } = await supabase
+    .from('payment_config')
+    .select('*')
+    .eq('user_id', userId)
+    .single();
+
+  const msgConfirmacion = paymentConfig?.msg_confirmacion ||
+    'Gracias por tu pago. Validaremos el comprobante y en breve te enviaremos el acceso.';
+  const msgNoValido = paymentConfig?.msg_no_valido ||
+    'Disculpa, no pudimos validar el comprobante. Por favor envía una foto más clara.';
+  const msgTitularInvalido =
+    'Disculpa, el comprobante no está dirigido a nuestra cuenta. Por favor verifica el destinatario e intenta de nuevo.';
+  const titularEsperado = (paymentConfig?.titular || '').toLowerCase().trim();
+
+  const apiKey = process.env.GROQ_API_KEY;
+  let analysisResult = null;
+
+  try {
+    const visionResponse = await axios.post(
+      'https://api.groq.com/openai/v1/chat/completions',
+      {
+        model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+        max_tokens: 300,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: 'Analiza esta imagen. \u00bfEs un comprobante de pago (Yape, Plin, transferencia bancaria u otro)?\nSi lo es, extrae el MONTO exacto pagado (solo el numero, sin moneda).\nExtrae tambien el NOMBRE DEL DESTINATARIO/TITULAR al que se realizo el pago (puede aparecer como "Destino", "Para", "Titular", "Nombre").\nResponde SOLO en formato JSON exacto, sin texto adicional:\n{"es_comprobante": true/false, "monto": numero_o_null, "titular_destino": "nombre_o_null"}'
+              },
+              {
+                type: 'image_url',
+                image_url: { url: `data:${mimeType};base64,${base64Image}` }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    const rawText = visionResponse.data.choices[0].message.content.trim();
+    console.log('[Baileys Payment Vision] Respuesta IA:', rawText);
+
+    const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      analysisResult = JSON.parse(jsonMatch[0]);
+    }
+  } catch (err) {
+    console.error('[Baileys Payment Vision error]', err.response?.data || err.message);
+  }
+
+  if (!analysisResult || !analysisResult.es_comprobante) {
+    console.log('[Baileys Payment] No es un comprobante válido');
+    await sendText(sock, jid, msgNoValido, conversation.id);
+    return;
+  }
+
+  if (titularEsperado) {
+    const titularDetectado = (analysisResult.titular_destino || '').toLowerCase().trim();
+    console.log(`[Baileys Payment] Titular esperado: "${titularEsperado}" | Detectado: "${titularDetectado}"`);
+
+    if (titularDetectado && !titularDetectado.includes(titularEsperado) && !titularEsperado.includes(titularDetectado)) {
+      console.log('[Baileys Payment] Titular no coincide — rechazando comprobante');
+      await sendText(sock, jid, msgTitularInvalido, conversation.id);
+      return;
+    }
+  }
+
+  await sendText(sock, jid, msgConfirmacion, conversation.id);
+
+  const monto = analysisResult.monto;
+  console.log(`[Baileys Payment] Comprobante válido, monto detectado: ${monto}`);
+
+  if (monto === null || monto === undefined) return;
+
+  const { data: rules } = await supabase
+    .from('payment_rules')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('is_active', true);
+
+  const matchedRule = (rules || []).find(r => Math.abs(Number(r.amount) - Number(monto)) < 0.5);
+
+  if (!matchedRule) {
+    console.log(`[Baileys Payment] No hay regla configurada para monto ${monto}`);
+    return;
+  }
+
+  console.log(`[Baileys Payment] Regla encontrada para monto ${monto}, enviando acceso`);
+  await sendText(sock, jid, matchedRule.access_message, conversation.id);
+
+  await supabase.from('conversations').update({
+    is_sale: true,
+    sale_amount: monto,
+    sale_at: new Date().toISOString(),
+    flow_active: false
+  }).eq('id', conversation.id);
+
+  try {
+    await cancelFollowups(conversation.id);
+  } catch (e) {
+    console.error('[Baileys Payment] Error cancelando seguimientos:', e.message);
+  }
+
+  console.log(`[Baileys Payment] Conversación ${conversation.id} marcada como venta. Bot desactivado — flujo terminado.`);
+}
+
+// ════════════════════════════════════════════════════════════
 // PROCESAR MENSAJE ENTRANTE
 // ════════════════════════════════════════════════════════════
 async function processBaileysMessage(connectionId, userId, sock, contactPhone, userMessage, isImage, rawMsg, rawJid, contactName) {
@@ -456,7 +653,9 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
   await saveMsg(conversation.id, isImage ? '[Imagen recibida]' : userMessage, 'inbound', isImage ? 'image' : 'text');
 
   if (conversation.flow_active === false) {
-    await respondWithAIBaileys(userId, sock, jid, userMessage, conversation.id);
+    // El flujo fue desactivado (ej. después de una venta) — el bot
+    // se queda en silencio, igual que en webhook.js (API oficial).
+    console.log(`[Baileys] Flujo desactivado para ${conversation.id} — bot no responde más`);
     return;
   }
 
@@ -471,6 +670,8 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
     );
     if (handled) return;
 
+    // Está en medio de un flujo pausado (ya activado antes),
+    // así que aquí sí es válido usar la IA como fallback.
     console.log(`[Baileys] IA responde duda mientras flujo sigue pausado`);
     await respondWithAIBaileys(userId, sock, jid, userMessage, conversation.id);
     return;
@@ -485,48 +686,55 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
     .eq('connection_id', connectionId)
     .eq('is_active', true);
 
-  if (!triggers?.length) {
-    await respondWithAIBaileys(userId, sock, jid, userMessage, conversation.id);
-    return;
-  }
-
-  const matchedTrigger = triggers.find(t => {
+  const matchedTrigger = (triggers || []).find(t => {
     const kw = t.keyword.toLowerCase().trim();
     return normalizedMsg === kw || normalizedMsg.includes(kw);
   });
 
-  if (!matchedTrigger) {
-    const defaultTrigger = triggers.find(t => t.keyword === '*' || t.keyword === 'default');
-    if (defaultTrigger) {
-      await executeFlowBaileys(defaultTrigger.flow_id, sock, jid, contactPhone, userMessage, conversation.id);
-    } else {
-      await respondWithAIBaileys(userId, sock, jid, userMessage, conversation.id);
+  // Caso 1: el mensaje SÍ coincide con una palabra activadora → ejecutar flujo
+  if (matchedTrigger) {
+    if (!matchedTrigger.is_repeatable) {
+      const { count } = await supabase
+        .from('trigger_executions')
+        .select('*', { count: 'exact', head: true })
+        .eq('trigger_id', matchedTrigger.id)
+        .eq('contact_phone', contactPhone);
+
+      if (count > 0) {
+        // Ya se ejecutó antes → el flujo ya se activó en algún
+        // momento para este contacto, así que sí usamos IA.
+        console.log(`[Baileys] Trigger "${matchedTrigger.keyword}" no repetible y ya ejecutado — usando IA fallback`);
+        await respondWithAIBaileys(userId, sock, jid, userMessage, conversation.id);
+        return;
+      }
     }
+
+    await supabase.from('trigger_executions').insert({
+      id: uuidv4(),
+      trigger_id: matchedTrigger.id,
+      contact_phone: contactPhone,
+      conversation_id: conversation.id,
+      executed_at: new Date().toISOString()
+    });
+
+    console.log(`[Baileys] ▶ Ejecutando trigger "${matchedTrigger.keyword}"`);
+    await executeFlowBaileys(matchedTrigger.flow_id, sock, jid, contactPhone, userMessage, conversation.id);
     return;
   }
 
-  if (!matchedTrigger.is_repeatable) {
-    const { count } = await supabase
-      .from('trigger_executions')
-      .select('*', { count: 'exact', head: true })
-      .eq('trigger_id', matchedTrigger.id)
-      .eq('contact_phone', contactPhone);
-    if (count > 0) {
-      await respondWithAIBaileys(userId, sock, jid, userMessage, conversation.id);
-      return;
-    }
+  // Caso 2: NO coincide con ningún trigger.
+  // Solo respondemos con IA si esta conversación YA activó un
+  // flujo antes (dijo la palabra clave en algún mensaje previo).
+  // Si nunca la dijo, el bot se queda en silencio — no responde nada.
+  const yaActivo = await hasActivatedFlowBaileys(conversation.id);
+
+  if (!yaActivo) {
+    console.log(`[Baileys] "${normalizedMsg}" no coincide con ningún trigger y la conversación nunca activó un flujo — el bot NO responde`);
+    return;
   }
 
-  await supabase.from('trigger_executions').insert({
-    id: uuidv4(),
-    trigger_id: matchedTrigger.id,
-    contact_phone: contactPhone,
-    conversation_id: conversation.id,
-    executed_at: new Date().toISOString()
-  });
-
-  console.log(`[Baileys] ▶ Ejecutando trigger "${matchedTrigger.keyword}"`);
-  await executeFlowBaileys(matchedTrigger.flow_id, sock, jid, contactPhone, userMessage, conversation.id);
+  console.log(`[Baileys] "${normalizedMsg}" no coincide con trigger, pero el flujo ya fue activado antes — usando IA fallback`);
+  await respondWithAIBaileys(userId, sock, jid, userMessage, conversation.id);
 }
 
 // ════════════════════════════════════════════════════════════
@@ -635,10 +843,16 @@ async function startQRSession(connectionId, userId) {
 
         const isImage = !!msg.message.imageMessage;
 
-        console.log(`[Baileys] 📨 Mensaje de ${contactPhone} (${contactName}): "${userMessage}"`);
+        console.log(`[Baileys] 📨 Mensaje de ${contactPhone} (${contactName}): "${userMessage}"${isImage ? ' [Imagen]' : ''}`);
 
         try {
-          await processBaileysMessage(connectionId, userId, sock, contactPhone, userMessage, isImage, msg, rawJid, contactName);
+          if (isImage) {
+            // Las imágenes se procesan como posible comprobante de
+            // pago, sin importar el estado del trigger/flujo actual.
+            await processIncomingImageBaileys(connectionId, userId, sock, contactPhone, msg, rawJid, contactName);
+          } else {
+            await processBaileysMessage(connectionId, userId, sock, contactPhone, userMessage, isImage, msg, rawJid, contactName);
+          }
         } catch (err) {
           console.error('[Baileys] Error procesando mensaje:', err.message);
         }
