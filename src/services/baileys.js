@@ -430,6 +430,39 @@ async function sendFollowupContent(sock, jid, contenido, conversationId) {
 }
 
 // ════════════════════════════════════════════════════════════
+// NUEVO: cuando el monto coincide con MÁS de una regla (porque
+// dos productos pueden costar lo mismo), se usa context_keyword
+// para desempatar, buscando esas palabras en los últimos
+// mensajes de la conversación (lo que ya se le mandó al cliente
+// dentro del flujo).
+// ════════════════════════════════════════════════════════════
+async function findMatchingPaymentRule(rules, monto, conversationId) {
+  const candidates = (rules || []).filter(r => Math.abs(Number(r.amount) - Number(monto)) < 0.5);
+  if (candidates.length === 0) return null;
+  if (candidates.length === 1) return candidates[0];
+
+  const { data: history } = await supabase
+    .from('messages')
+    .select('content')
+    .eq('conversation_id', conversationId)
+    .order('created_at', { ascending: false })
+    .limit(20);
+
+  const recentText = (history || []).map(m => m.content || '').join(' ').toLowerCase();
+
+  for (const rule of candidates) {
+    const keywords = (rule.context_keyword || '').toLowerCase().split(/\s+/).filter(Boolean);
+    if (keywords.length && keywords.some(kw => recentText.includes(kw))) {
+      console.log(`[Payment] Desempate por contexto: regla "${rule.context_keyword}" coincide con la conversación`);
+      return rule;
+    }
+  }
+
+  console.warn(`[Payment] Monto ${monto} coincide con ${candidates.length} reglas y ninguna coincide por contexto — usando la primera`);
+  return candidates[0];
+}
+
+// ════════════════════════════════════════════════════════════
 // PROCESAR IMAGEN ENTRANTE (comprobante de pago)
 // Equivalente a processIncomingImage() de webhook.js, adaptado
 // para descargar el archivo con Baileys en vez de la Graph API.
@@ -584,7 +617,7 @@ async function processIncomingImageBaileys(connectionId, userId, sock, contactPh
     .eq('user_id', userId)
     .eq('is_active', true);
 
-  const matchedRule = (rules || []).find(r => Math.abs(Number(r.amount) - Number(monto)) < 0.5);
+  const matchedRule = await findMatchingPaymentRule(rules, monto, conversation.id);
 
   if (!matchedRule) {
     console.log(`[Baileys Payment] No hay regla configurada para monto ${monto}`);
