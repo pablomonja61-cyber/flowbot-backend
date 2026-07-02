@@ -83,6 +83,21 @@ function buildAdsFields(referral) {
 }
 
 // ════════════════════════════════════════════════════════════
+// NUEVO: verifica si esta conversación ya activó algún flujo
+// alguna vez (dijo una palabra activadora en el pasado).
+// Solo si esto es TRUE se permite usar la IA de dudas como
+// fallback. Si es FALSE, el bot debe quedarse en silencio.
+// ════════════════════════════════════════════════════════════
+async function hasActivatedFlow(conversationId) {
+  const { count } = await supabase
+    .from('trigger_executions')
+    .select('*', { count: 'exact', head: true })
+    .eq('conversation_id', conversationId);
+
+  return (count || 0) > 0;
+}
+
+// ════════════════════════════════════════════════════════════
 // Conversions API (CAPI): reportar venta a Meta
 // ════════════════════════════════════════════════════════════
 async function sendConversionEvent(userId, contactPhone, monto, ctwaClid) {
@@ -203,6 +218,11 @@ async function processIncomingImage(phoneNumberId, contactPhone, imageData, refe
     console.log(`[Webhook] Flujo desactivado para ${conversation.id} — bot no responde más`);
     return;
   }
+
+  // NOTA: el análisis de comprobantes de pago (imagen) se mantiene
+  // SIEMPRE activo, sin importar si hubo trigger de texto o no,
+  // porque el cliente puede mandar el comprobante directamente
+  // sin escribir la palabra activadora. Esto es intencional.
 
   let imageBuffer;
   try {
@@ -482,6 +502,7 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
 
   const normalizedMsg = userMessage.toLowerCase().trim();
 
+  // ── Respuesta de botón interactivo ────────────────────────
   if (isButtonReply) {
     console.log(`[Webhook] Respuesta de botón: "${userMessage}"`);
 
@@ -504,11 +525,14 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
       }
     }
 
+    // Un botón solo puede venir de un flujo que ya se activó,
+    // así que aquí siempre se permite el fallback de IA.
     console.log('[Webhook] Sin flujo pausado, usando IA fallback para botón');
     await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
     return;
   }
 
+  // ── Mensaje de texto normal ────────────────────────────────
   const { data: triggers } = await supabase
     .from('triggers')
     .select('*, flows(id, nodes, edges, is_active)')
@@ -516,51 +540,55 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
     .eq('connection_id', connection.id)
     .eq('is_active', true);
 
-  if (!triggers?.length) {
-    console.log(`[Webhook] Sin triggers — usando IA fallback`);
-    await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
-    return;
-  }
-
-  const matchedTrigger = triggers.find(t => {
+  const matchedTrigger = (triggers || []).find(t => {
     const kw = t.keyword.toLowerCase().trim();
     return normalizedMsg === kw || normalizedMsg.includes(kw);
   });
 
-  if (!matchedTrigger) {
-    const defaultTrigger = triggers.find(t => t.keyword === '*' || t.keyword === 'default');
-    if (defaultTrigger) {
-      await executeFlow(defaultTrigger.flow_id, contactPhone, userMessage, connection, conversation.id);
-    } else {
-      console.log(`[Webhook] Sin coincidencia para "${normalizedMsg}" — usando IA fallback`);
-      await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
+  // Caso 1: el mensaje SÍ coincide con una palabra activadora → ejecutar flujo
+  if (matchedTrigger) {
+    if (!matchedTrigger.is_repeatable) {
+      const { count } = await supabase
+        .from('trigger_executions')
+        .select('*', { count: 'exact', head: true })
+        .eq('trigger_id', matchedTrigger.id)
+        .eq('contact_phone', contactPhone);
+
+      if (count > 0) {
+        // Ya se ejecutó antes → esto confirma que el flujo ya
+        // se activó en algún momento, así que sí usamos IA.
+        console.log(`[Webhook] Trigger "${matchedTrigger.name}" no repetible y ya ejecutado — usando IA fallback`);
+        await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
+        return;
+      }
     }
+
+    await supabase.from('trigger_executions').insert({
+      id: uuidv4(),
+      trigger_id: matchedTrigger.id,
+      contact_phone: contactPhone,
+      conversation_id: conversation.id,
+      executed_at: new Date().toISOString()
+    });
+
+    console.log(`[Webhook] Ejecutando flujo para trigger "${matchedTrigger.name}"`);
+    await executeFlow(matchedTrigger.flow_id, contactPhone, userMessage, connection, conversation.id);
     return;
   }
 
-  if (!matchedTrigger.is_repeatable) {
-    const { count } = await supabase
-      .from('trigger_executions')
-      .select('*', { count: 'exact', head: true })
-      .eq('trigger_id', matchedTrigger.id)
-      .eq('contact_phone', contactPhone);
-    if (count > 0) {
-      console.log(`[Webhook] Trigger no repetible ya ejecutado — usando IA fallback`);
-      await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
-      return;
-    }
+  // Caso 2: NO coincide con ningún trigger.
+  // Solo respondemos con IA si esta conversación YA activó un
+  // flujo antes (dijo la palabra clave en algún mensaje previo).
+  // Si nunca la dijo, el bot se queda en silencio — no responde nada.
+  const yaActivo = await hasActivatedFlow(conversation.id);
+
+  if (!yaActivo) {
+    console.log(`[Webhook] "${normalizedMsg}" no coincide con ningún trigger y la conversación nunca activó un flujo — el bot NO responde`);
+    return;
   }
 
-  await supabase.from('trigger_executions').insert({
-    id: uuidv4(),
-    trigger_id: matchedTrigger.id,
-    contact_phone: contactPhone,
-    conversation_id: conversation.id,
-    executed_at: new Date().toISOString()
-  });
-
-  console.log(`[Webhook] Ejecutando flujo para trigger "${matchedTrigger.name}"`);
-  await executeFlow(matchedTrigger.flow_id, contactPhone, userMessage, connection, conversation.id);
+  console.log(`[Webhook] "${normalizedMsg}" no coincide con trigger, pero el flujo ya fue activado antes — usando IA fallback`);
+  await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
 }
 
 module.exports = router;
