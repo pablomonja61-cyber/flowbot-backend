@@ -299,6 +299,18 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
         if (conv?.user_id) {
           await respondWithAIBaileys(conv.user_id, sock, jid, userMessage, conversationId);
         }
+
+        // Si tiene caminos de ruteo configurados, se pausa aquí y
+        // espera la respuesta del cliente para decidir el camino.
+        if (node.data?.paths?.length > 0) {
+          await supabase.from('conversations').update({
+            current_flow_id: flowId,
+            current_node_id: node.id,
+            flow_active: true
+          }).eq('id', conversationId);
+          console.log(`[Baileys Flow] ⏸ Pausado en ${node.id} (Agente IA) esperando respuesta para elegir camino`);
+          shouldPause = true;
+        }
         break;
       }
 
@@ -367,6 +379,91 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
 }
 
 // ════════════════════════════════════════════════════════════
+// RESOLVER CAMINO DE UN NODO "AGENTE IA" (con paths configurados)
+// Primero intenta match directo de texto (rápido, sin costo de IA).
+// Si no hay match claro, usa IA para clasificar la respuesta.
+// ════════════════════════════════════════════════════════════
+async function resolveAIPathBaileys(flow, pausedNode, paths, userResponse, sock, jid, contactPhone, conversationId, flowId) {
+  const pausedNodeId = pausedNode.id;
+  const normalizedResponse = userResponse.toLowerCase().replace(/[^a-z0-9áéíóúñ ]/g, '').trim();
+
+  let matchedIndex = paths.findIndex(p => {
+    const label = (p.label || '').toLowerCase().replace(/[^a-z0-9áéíóúñ ]/g, '').trim();
+    return label && (normalizedResponse.includes(label) || label.includes(normalizedResponse));
+  });
+
+  if (matchedIndex === -1) {
+    matchedIndex = await classifyResponseWithAI(userResponse, paths, pausedNode.data?.ai_config_id);
+  }
+
+  if (matchedIndex === -1) {
+    console.log(`[Baileys Flow] "${userResponse}" no coincide con ningún camino de ${pausedNodeId}`);
+    if (pausedNode.data?.respondIfNoMatch !== false) {
+      const { data: conv } = await supabase.from('conversations').select('user_id').eq('id', conversationId).single();
+      if (conv?.user_id) {
+        await respondWithAIBaileys(conv.user_id, sock, jid, userResponse, conversationId);
+      }
+    }
+    // Se mantiene pausado en el mismo nodo para que el cliente pueda reintentar
+    return true;
+  }
+
+  const matchedHandle = `path-${matchedIndex}`;
+  const matchedEdge = (flow.edges || []).find(e => e.source === pausedNodeId && e.sourceHandle === matchedHandle);
+
+  if (!matchedEdge) {
+    console.log(`[Baileys Flow] Camino "${matchedHandle}" (${paths[matchedIndex]?.label}) no tiene edge conectado en el editor`);
+    return true;
+  }
+
+  await supabase.from('conversations').update({
+    current_node_id: null,
+    current_flow_id: null
+  }).eq('id', conversationId);
+
+  console.log(`[Baileys Flow] ▶ Camino elegido: "${paths[matchedIndex].label}" → ${matchedEdge.target}`);
+  await executeFlowBaileys(flowId, sock, jid, contactPhone, userResponse, conversationId, matchedEdge.target);
+  return true;
+}
+
+// ── Clasifica la respuesta del cliente contra los caminos usando IA ──
+async function classifyResponseWithAI(userResponse, paths, aiConfigId) {
+  try {
+    let aiConfig = null;
+    if (aiConfigId) {
+      const { data: c } = await supabase.from('ai_config').select('*').eq('id', aiConfigId).single();
+      if (c) aiConfig = c;
+    }
+
+    const apiKey = aiConfig?.groq_api_key || process.env.GROQ_API_KEY;
+    const model = aiConfig?.model || 'meta-llama/llama-4-scout-17b-16e-instruct';
+    const options = paths.map((p, i) => `${i}: ${p.label}`).join('\n');
+
+    const response = await axios.post(
+      'https://api.groq.com/openai/v1/chat/completions',
+      {
+        model,
+        max_tokens: 10,
+        messages: [
+          {
+            role: 'system',
+            content: `Eres un clasificador. Dado un mensaje de un cliente, decide a cuál de estas opciones corresponde mejor:\n${options}\n\nResponde SOLO con el número de la opción (ej: "0"), sin texto adicional. Si el mensaje no corresponde claramente a ninguna opción, responde "-1".`
+          },
+          { role: 'user', content: userResponse }
+        ]
+      },
+      { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 10000 }
+    );
+    const raw = response.data.choices[0].message.content.trim();
+    const idx = parseInt(raw.match(/-?\d+/)?.[0] ?? '-1', 10);
+    return (idx >= 0 && idx < paths.length) ? idx : -1;
+  } catch (err) {
+    console.error('[Baileys Flow] Error clasificando camino con IA:', err.message);
+    return -1;
+  }
+}
+
+// ════════════════════════════════════════════════════════════
 // CONTINUAR FLUJO DESDE RESPUESTA DE BOTÓN
 // ════════════════════════════════════════════════════════════
 async function continueFlowFromButtonBaileys(flowId, pausedNodeId, userResponse, sock, jid, contactPhone, conversationId) {
@@ -378,6 +475,21 @@ async function continueFlowFromButtonBaileys(flowId, pausedNodeId, userResponse,
 
   const pausedNode = nodeMap[pausedNodeId];
   if (!pausedNode) return false;
+
+  // ── Nodo Agente IA con "caminos de ruteo" configurados ────────
+  // La IA (o un match simple de texto) decide cuál camino sigue
+  // según la respuesta del cliente. Funciona igual en QR y API,
+  // porque no depende de botones nativos — solo interpreta texto.
+  if (pausedNode.type === 'ai' || pausedNode.type === 'ai_agent') {
+    const paths = pausedNode.data?.paths || [];
+    if (paths.length > 0) {
+      const handled = await resolveAIPathBaileys(
+        flow, pausedNode, paths, userResponse,
+        sock, jid, contactPhone, conversationId, flowId
+      );
+      return handled;
+    }
+  }
 
   // Si el nodo pausado es de texto normal (no botones API), simplemente
   // avanza al siguiente nodo, pasando la respuesta del cliente como
