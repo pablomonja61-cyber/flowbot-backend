@@ -645,15 +645,8 @@ async function processIncomingImageBaileys(connectionId, userId, sock, contactPh
     return;
   }
 
-  await saveMsg(conversation.id, '[Imagen recibida - posible comprobante]', 'inbound', 'image');
-
-  if (conversation.flow_active === false) {
-    console.log(`[Baileys Payment] Flujo desactivado para ${conversation.id} — bot no responde más`);
-    return;
-  }
-
   // Descargar la imagen real usando Baileys
-  let imageBuffer;
+  let imageBuffer = null;
   try {
     imageBuffer = await downloadMediaMessage(
       rawMsg,
@@ -663,11 +656,44 @@ async function processIncomingImageBaileys(connectionId, userId, sock, contactPh
     );
   } catch (err) {
     console.error('[Baileys Payment] Error descargando imagen:', err.message);
+  }
+
+  const mimeType = rawMsg.message?.imageMessage?.mimetype || 'image/jpeg';
+
+  // Subir la imagen a Supabase Storage para poder mostrarla luego en la app
+  let publicMediaUrl = null;
+  if (imageBuffer) {
+    try {
+      const ext = (mimeType.split('/')[1] || 'jpg').split(';')[0];
+      const filePath = `${userId}/${conversation.id}/${Date.now()}.${ext}`;
+      const { error: uploadError } = await supabase.storage
+        .from('media')
+        .upload(filePath, imageBuffer, { contentType: mimeType, upsert: false });
+
+      if (uploadError) {
+        console.error('[Baileys Payment] Error subiendo imagen a Storage:', uploadError.message);
+      } else {
+        const { data: publicUrlData } = supabase.storage.from('media').getPublicUrl(filePath);
+        publicMediaUrl = publicUrlData?.publicUrl || null;
+      }
+    } catch (upErr) {
+      console.error('[Baileys Payment] Error subiendo imagen a Storage:', upErr.message);
+    }
+  }
+
+  await saveMsg(conversation.id, '[Imagen recibida - posible comprobante]', 'inbound', 'image', publicMediaUrl);
+
+  if (conversation.flow_active === false) {
+    console.log(`[Baileys Payment] Flujo desactivado para ${conversation.id} — bot no responde más`);
+    return;
+  }
+
+  if (!imageBuffer) {
+    console.log('[Baileys Payment] No se pudo descargar la imagen, se omite el análisis de pago');
     return;
   }
 
   const base64Image = imageBuffer.toString('base64');
-  const mimeType = rawMsg.message?.imageMessage?.mimetype || 'image/jpeg';
 
   const { data: paymentConfig } = await supabase
     .from('payment_config')
