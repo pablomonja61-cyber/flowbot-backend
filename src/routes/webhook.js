@@ -1,9 +1,11 @@
 const express = require('express');
 const router = express.Router();
 const supabase = require('../models/supabase');
-const { executeFlow, saveMessage, sendWhatsAppMessage, cancelFollowups, continueFlowFromButton } = require('../services/flowEngine');
+const {
+  executeFlow, saveMessage, isCountryBlocked,
+  checkOtherFlowTrigger, continueFlowFromButton, processIncomingImageCloud, respondWithAI
+} = require('../services/flowEngine');
 const { v4: uuidv4 } = require('uuid');
-const axios = require('axios');
 
 // ── GET /webhook/whatsapp — verificación de Meta ─────────────
 router.get('/whatsapp', (req, res) => {
@@ -21,6 +23,7 @@ router.get('/whatsapp', (req, res) => {
 
 // ── POST /webhook/whatsapp — mensajes entrantes ──────────────
 router.post('/whatsapp', async (req, res) => {
+  // Responder 200 inmediatamente a Meta (requiere <5s)
   res.status(200).send('EVENT_RECEIVED');
 
   try {
@@ -37,11 +40,9 @@ router.post('/whatsapp', async (req, res) => {
 
         for (const msg of value.messages || []) {
           const contactPhone = msg.from;
-          const referral = msg.referral || null;
 
           if (msg.type === 'image') {
-            console.log(`[Webhook] Imagen recibida de ${contactPhone}`);
-            processIncomingImage(phoneNumberId, contactPhone, msg.image, referral).catch(err => {
+            processIncomingImageMessage(phoneNumberId, contactPhone, msg).catch(err => {
               console.error('[Webhook] Error procesando imagen:', err.message);
             });
             continue;
@@ -53,13 +54,11 @@ router.post('/whatsapp', async (req, res) => {
             ? msg.text?.body || ''
             : msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || '';
 
-          const isButtonReply = msg.type === 'interactive';
-
           if (!userMessage) continue;
 
-          console.log(`[Webhook] Mensaje de ${contactPhone}: "${userMessage}" (botón: ${isButtonReply})`);
+          console.log(`[Webhook] Mensaje de ${contactPhone}: "${userMessage}"`);
 
-          processIncomingMessage(phoneNumberId, contactPhone, userMessage, isButtonReply, referral).catch(err => {
+          processIncomingMessage(phoneNumberId, contactPhone, userMessage).catch(err => {
             console.error('[Webhook] Error procesando mensaje:', err.message);
           });
         }
@@ -70,134 +69,10 @@ router.post('/whatsapp', async (req, res) => {
   }
 });
 
-function buildAdsFields(referral) {
-  if (!referral) return {};
-  return {
-    ad_id: referral.source_id || null,
-    ad_name: referral.headline || referral.body || null,
-    campaign_id: referral.ctwa_clid || null,
-    campaign_name: referral.source_url || null,
-    adset_name: referral.media_type || null,
-    source_ctwa: true
-  };
-}
-
 // ════════════════════════════════════════════════════════════
-// NUEVO: cuando el monto coincide con MÁS de una regla (porque
-// dos productos pueden costar lo mismo), se usa context_keyword
-// para desempatar, buscando esas palabras en los últimos
-// mensajes de la conversación (lo que ya se le mandó al cliente
-// dentro del flujo).
+// Procesar imagen entrante (posible comprobante de pago)
 // ════════════════════════════════════════════════════════════
-async function findMatchingPaymentRule(rules, monto, conversationId) {
-  const candidates = (rules || []).filter(r => Math.abs(Number(r.amount) - Number(monto)) < 0.5);
-  if (candidates.length === 0) return null;
-  if (candidates.length === 1) return candidates[0];
-
-  const { data: history } = await supabase
-    .from('messages')
-    .select('content')
-    .eq('conversation_id', conversationId)
-    .order('created_at', { ascending: false })
-    .limit(20);
-
-  const recentText = (history || []).map(m => m.content || '').join(' ').toLowerCase();
-
-  for (const rule of candidates) {
-    const keywords = (rule.context_keyword || '').toLowerCase().split(/\s+/).filter(Boolean);
-    if (keywords.length && keywords.some(kw => recentText.includes(kw))) {
-      console.log(`[Payment] Desempate por contexto: regla "${rule.context_keyword}" coincide con la conversación`);
-      return rule;
-    }
-  }
-
-  console.warn(`[Payment] Monto ${monto} coincide con ${candidates.length} reglas y ninguna coincide por contexto — usando la primera`);
-  return candidates[0];
-}
-
-// ════════════════════════════════════════════════════════════
-// NUEVO: verifica si esta conversación ya activó algún flujo
-// alguna vez (dijo una palabra activadora en el pasado).
-// Solo si esto es TRUE se permite usar la IA de dudas como
-// fallback. Si es FALSE, el bot debe quedarse en silencio.
-// ════════════════════════════════════════════════════════════
-async function hasActivatedFlow(conversationId) {
-  const { count } = await supabase
-    .from('trigger_executions')
-    .select('*', { count: 'exact', head: true })
-    .eq('conversation_id', conversationId);
-
-  return (count || 0) > 0;
-}
-
-// ════════════════════════════════════════════════════════════
-// Conversions API (CAPI): reportar venta a Meta
-// ════════════════════════════════════════════════════════════
-async function sendConversionEvent(userId, contactPhone, monto, ctwaClid) {
-  try {
-    const { data: adsConfig } = await supabase
-      .from('ads_config')
-      .select('pixel_id, access_token, currency, conversions_api')
-      .eq('user_id', userId)
-      .single();
-
-    if (!adsConfig || !adsConfig.conversions_api || !adsConfig.pixel_id) {
-      console.log('[CAPI] No hay config de CAPI activa, omitiendo evento');
-      return;
-    }
-
-    const currency = adsConfig.currency || 'PEN';
-    const pixelId = adsConfig.pixel_id;
-    const accessToken = adsConfig.access_token;
-
-    // Hashear el teléfono con SHA256 (requerido por Meta)
-    const crypto = require('crypto');
-    const phoneHash = crypto
-      .createHash('sha256')
-      .update(contactPhone.replace(/\D/g, ''))
-      .digest('hex');
-
-    const eventData = {
-      data: [
-        {
-          event_name: 'Purchase',
-          event_time: Math.floor(Date.now() / 1000),
-          action_source: 'business_messaging',
-          messaging_channel: 'whatsapp',
-          user_data: {
-            ph: [phoneHash]
-          },
-          custom_data: {
-            value: Number(monto),
-            currency: currency
-          },
-          ...(ctwaClid ? { referrer_url: ctwaClid } : {})
-        }
-      ]
-    };
-
-    // Si tenemos el ctwa_clid, lo mandamos como parte del user_data
-    if (ctwaClid) {
-      eventData.data[0].user_data.ctwa_clid = ctwaClid;
-    }
-
-    const response = await axios.post(
-      `https://graph.facebook.com/v19.0/${pixelId}/events`,
-      eventData,
-      {
-        params: { access_token: accessToken },
-        headers: { 'Content-Type': 'application/json' },
-        timeout: 10000
-      }
-    );
-
-    console.log(`[CAPI] Evento Purchase enviado a Meta. Respuesta:`, JSON.stringify(response.data));
-  } catch (err) {
-    console.error('[CAPI] Error enviando evento a Meta:', err.response?.data || err.message);
-  }
-}
-
-async function processIncomingImage(phoneNumberId, contactPhone, imageData, referral = null) {
+async function processIncomingImageMessage(phoneNumberId, contactPhone, msg) {
   const { data: connection } = await supabase
     .from('connections')
     .select('*')
@@ -205,12 +80,13 @@ async function processIncomingImage(phoneNumberId, contactPhone, imageData, refe
     .eq('is_active', true)
     .single();
 
-  if (!connection) {
-    console.warn(`[Webhook] No se encontró conexión para phoneNumberId: ${phoneNumberId}`);
+  if (!connection) return;
+  const userId = connection.user_id;
+
+  if (await isCountryBlocked(userId, contactPhone)) {
+    console.log(`[Webhook] 🚫 País bloqueado — ignorando imagen de ${contactPhone}`);
     return;
   }
-
-  const userId = connection.user_id;
 
   let { data: conversation } = await supabase
     .from('conversations')
@@ -224,261 +100,26 @@ async function processIncomingImage(phoneNumberId, contactPhone, imageData, refe
     const { data: newConv } = await supabase
       .from('conversations')
       .insert({
-        id: uuidv4(),
-        user_id: userId,
-        connection_id: connection.id,
-        contact_phone: contactPhone,
-        contact_name: contactPhone,
-        status: 'active',
-        unread_count: 1,
-        last_message: '[Imagen]',
-        last_message_at: new Date().toISOString(),
-        ...buildAdsFields(referral)
+        id: uuidv4(), user_id: userId, connection_id: connection.id,
+        contact_phone: contactPhone, contact_name: contactPhone,
+        status: 'active', unread_count: 1,
+        last_message: '[Imagen]', last_message_at: new Date().toISOString()
       })
-      .select()
-      .single();
+      .select().single();
     conversation = newConv;
   }
 
-  if (conversation.is_blocked) {
-    console.log(`[Webhook] Conversación ${conversation.id} bloqueada — ignorando imagen`);
-    return;
-  }
+  const mediaId = msg.image?.id;
+  if (!mediaId) return;
 
-  await saveMessage(conversation.id, '[Imagen recibida - posible comprobante]', 'inbound', 'image');
-
-  if (conversation.flow_active === false) {
-    console.log(`[Webhook] Flujo desactivado para ${conversation.id} — bot no responde más`);
-    return;
-  }
-
-  // NOTA: el análisis de comprobantes de pago (imagen) se mantiene
-  // SIEMPRE activo, sin importar si hubo trigger de texto o no,
-  // porque el cliente puede mandar el comprobante directamente
-  // sin escribir la palabra activadora. Esto es intencional.
-
-  let imageBuffer;
-  try {
-    const mediaInfo = await axios.get(
-      `https://graph.facebook.com/v19.0/${imageData.id}`,
-      { headers: { Authorization: `Bearer ${connection.access_token}` } }
-    );
-    const mediaUrl = mediaInfo.data.url;
-
-    const imageResponse = await axios.get(mediaUrl, {
-      headers: { Authorization: `Bearer ${connection.access_token}` },
-      responseType: 'arraybuffer'
-    });
-    imageBuffer = Buffer.from(imageResponse.data);
-  } catch (err) {
-    console.error('[Payment] Error descargando imagen:', err.response?.data || err.message);
-    return;
-  }
-
-  const base64Image = imageBuffer.toString('base64');
-  const mimeType = imageData.mime_type || 'image/jpeg';
-
-  const { data: paymentConfig } = await supabase
-    .from('payment_config')
-    .select('*')
-    .eq('user_id', userId)
-    .single();
-
-  const msgConfirmacion = paymentConfig?.msg_confirmacion ||
-    'Gracias por tu pago. Validaremos el comprobante y en breve te enviaremos el acceso.';
-  const msgNoValido = paymentConfig?.msg_no_valido ||
-    'Disculpa, no pudimos validar el comprobante. Por favor envía una foto más clara.';
-  const msgTitularInvalido =
-    'Disculpa, el comprobante no está dirigido a nuestra cuenta. Por favor verifica el destinatario e intenta de nuevo.';
-  const titularEsperado = (paymentConfig?.titular || '').toLowerCase().trim();
-
-  const apiKey = process.env.GROQ_API_KEY;
-  let analysisResult = null;
-
-  try {
-    const visionResponse = await axios.post(
-      'https://api.groq.com/openai/v1/chat/completions',
-      {
-        model: 'meta-llama/llama-4-scout-17b-16e-instruct',
-        max_tokens: 300,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'text',
-                text: 'Analiza esta imagen. \u00bfEs un comprobante de pago (Yape, Plin, transferencia bancaria u otro)?\nSi lo es, extrae el MONTO exacto pagado (solo el numero, sin moneda).\nExtrae tambien el NOMBRE DEL DESTINATARIO/TITULAR al que se realizo el pago (puede aparecer como "Destino", "Para", "Titular", "Nombre").\nResponde SOLO en formato JSON exacto, sin texto adicional:\n{"es_comprobante": true/false, "monto": numero_o_null, "titular_destino": "nombre_o_null"}'
-              },
-              {
-                type: 'image_url',
-                image_url: { url: `data:${mimeType};base64,${base64Image}` }
-              }
-            ]
-          }
-        ]
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-
-    const rawText = visionResponse.data.choices[0].message.content.trim();
-    console.log('[Payment Vision] Respuesta IA:', rawText);
-
-    const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      analysisResult = JSON.parse(jsonMatch[0]);
-    }
-  } catch (err) {
-    console.error('[Payment Vision error]', err.response?.data || err.message);
-  }
-
-  if (!analysisResult || !analysisResult.es_comprobante) {
-    console.log('[Payment] No es un comprobante válido');
-    await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, msgNoValido);
-    await saveMessage(conversation.id, msgNoValido, 'outbound', 'text');
-    return;
-  }
-
-  if (titularEsperado) {
-    const titularDetectado = (analysisResult.titular_destino || '').toLowerCase().trim();
-    console.log(`[Payment] Titular esperado: "${titularEsperado}" | Detectado: "${titularDetectado}"`);
-
-    if (titularDetectado && !titularDetectado.includes(titularEsperado) && !titularEsperado.includes(titularDetectado)) {
-      console.log('[Payment] Titular no coincide — rechazando comprobante');
-      await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, msgTitularInvalido);
-      await saveMessage(conversation.id, msgTitularInvalido, 'outbound', 'text');
-      return;
-    }
-  }
-
-  await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, msgConfirmacion);
-  await saveMessage(conversation.id, msgConfirmacion, 'outbound', 'text');
-
-  const monto = analysisResult.monto;
-  console.log(`[Payment] Comprobante válido, monto detectado: ${monto}`);
-
-  if (monto !== null && monto !== undefined) {
-    const { data: rules } = await supabase
-      .from('payment_rules')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('is_active', true);
-
-    const matchedRule = await findMatchingPaymentRule(rules, monto, conversation.id);
-
-    if (matchedRule) {
-      console.log(`[Payment] Regla encontrada para monto ${monto}, enviando acceso`);
-      await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, matchedRule.access_message);
-      await saveMessage(conversation.id, matchedRule.access_message, 'outbound', 'text');
-
-      await supabase.from('conversations').update({
-        is_sale: true,
-        sale_amount: monto,
-        sale_at: new Date().toISOString(),
-        flow_active: false
-      }).eq('id', conversation.id);
-
-      await cancelFollowups(conversation.id);
-
-      // Reportar venta a Meta Conversions API
-      const ctwaClid = conversation.campaign_id || null;
-      await sendConversionEvent(userId, contactPhone, monto, ctwaClid);
-
-      console.log(`[Payment] Conversación ${conversation.id} marcada como venta. Bot desactivado.`);
-    } else {
-      console.log(`[Payment] No hay regla configurada para monto ${monto}`);
-    }
-  }
+  await processIncomingImageCloud(connection, contactPhone, mediaId, conversation.id);
 }
 
-async function respondWithAI(userId, connection, contactPhone, userMessage, conversationId) {
-  try {
-    const { data: convData } = await supabase
-      .from('conversations')
-      .select('ai_config_id, active_price')
-      .eq('id', conversationId)
-      .single();
-
-    let aiConfig = null;
-
-    if (convData?.ai_config_id) {
-      const { data: specificConfig } = await supabase
-        .from('ai_config')
-        .select('*')
-        .eq('id', convData.ai_config_id)
-        .single();
-      aiConfig = specificConfig;
-      console.log('[AI Fallback] Usando config IA de la conversación:', convData.ai_config_id);
-    }
-
-    if (!aiConfig) {
-      const { data: globalConfig } = await supabase
-        .from('ai_config')
-        .select('*')
-        .eq('user_id', userId)
-        .eq('is_active', true)
-        .single();
-      aiConfig = globalConfig;
-    }
-
-    if (!aiConfig) {
-      console.log('[AI Fallback] Sin configuración activa para user:', userId);
-      return;
-    }
-
-    const apiKey = aiConfig.groq_api_key || process.env.GROQ_API_KEY;
-    const model = aiConfig.model || 'meta-llama/llama-4-scout-17b-16e-instruct';
-    let systemPrompt = aiConfig.system_prompt ||
-      'Eres un asistente de ventas amable y profesional. Responde en español de forma concisa.';
-
-    if (convData?.active_price) {
-      systemPrompt += `\n\n⚠️ PRECIO ACTUALIZADO: El precio actual es S/${convData.active_price}. Usa SIEMPRE este precio.`;
-    }
-
-    const { data: history } = await supabase
-      .from('messages')
-      .select('content, direction')
-      .eq('conversation_id', conversationId)
-      .order('created_at', { ascending: true })
-      .limit(10);
-
-    const messages = [
-      { role: 'system', content: systemPrompt },
-      ...(history || []).slice(-8).map(m => ({
-        role: m.direction === 'inbound' ? 'user' : 'assistant',
-        content: m.content
-      })),
-      { role: 'user', content: userMessage }
-    ];
-
-    const response = await axios.post(
-      'https://api.groq.com/openai/v1/chat/completions',
-      { model, max_tokens: 500, messages },
-      {
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: (aiConfig.response_time || 10) * 1000
-      }
-    );
-
-    const aiResponse = response.data.choices[0].message.content;
-    console.log('[AI Fallback] Respuesta IA:', aiResponse.slice(0, 100));
-
-    await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, contactPhone, aiResponse);
-    await saveMessage(conversationId, aiResponse, 'outbound', 'text');
-
-  } catch (err) {
-    console.error('[AI Fallback error]', err.response?.data || err.message);
-  }
-}
-
-async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, isButtonReply = false, referral = null) {
+// ════════════════════════════════════════════════════════════
+// Lógica principal: recibe msg → busca trigger → ejecuta flujo
+// ════════════════════════════════════════════════════════════
+async function processIncomingMessage(phoneNumberId, contactPhone, userMessage) {
+  // 1. Buscar la conexión por phone_number_id
   const { data: connection } = await supabase
     .from('connections')
     .select('*')
@@ -493,6 +134,13 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
 
   const userId = connection.user_id;
 
+  // 1.5 Bloqueo por país — ni se guarda ni activa flujos
+  if (await isCountryBlocked(userId, contactPhone)) {
+    console.log(`[Webhook] 🚫 País bloqueado — ignorando mensaje de ${contactPhone}`);
+    return;
+  }
+
+  // 2. Obtener o crear conversación
   let { data: conversation } = await supabase
     .from('conversations')
     .select('*')
@@ -513,59 +161,60 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
         status: 'active',
         unread_count: 1,
         last_message: userMessage.slice(0, 100),
-        last_message_at: new Date().toISOString(),
-        ...buildAdsFields(referral)
+        last_message_at: new Date().toISOString()
       })
       .select()
       .single();
     conversation = newConv;
   }
 
-  if (conversation.is_blocked) {
-    console.log(`[Webhook] Conversación ${conversation.id} bloqueada — ignorando mensaje`);
-    return;
-  }
+  // 3. Guardar mensaje entrante
+  await saveMessage(conversation.id, userMessage, 'inbound');
 
-  await saveMessage(conversation.id, userMessage, 'inbound', 'text');
+  // 3.5 ¿Hay un flujo pausado esperando respuesta en esta conversación?
+  if (conversation.current_flow_id && conversation.current_node_id) {
+    console.log(`[Webhook] Flujo pausado detectado en nodo: ${conversation.current_node_id}`);
 
-  if (conversation.flow_active === false) {
-    console.log(`[Webhook] Flujo desactivado para ${conversation.id} — bot no responde más`);
-    return;
-  }
+    const { data: pausedFlowData } = await supabase
+      .from('flows')
+      .select('nodes')
+      .eq('id', conversation.current_flow_id)
+      .single();
+    const pausedNode = (pausedFlowData?.nodes || []).find(n => n.id === conversation.current_node_id);
 
-  const normalizedMsg = userMessage.toLowerCase().trim();
+    if (pausedNode?.data?.triggerOtherFlows === true) {
+      const otherTrigger = await checkOtherFlowTrigger(userId, connection.id, contactPhone, userMessage);
+      if (otherTrigger) {
+        console.log(`[Webhook] "Activar otros flujos" activo — trigger "${otherTrigger.keyword}" coincide`);
+        await supabase.from('conversations').update({ current_flow_id: null, current_node_id: null }).eq('id', conversation.id);
 
-  // ── Respuesta de botón interactivo ────────────────────────
-  if (isButtonReply) {
-    console.log(`[Webhook] Respuesta de botón: "${userMessage}"`);
-
-    if (conversation.current_flow_id && conversation.current_node_id) {
-      try {
-        const handled = await continueFlowFromButton(
-          conversation.current_flow_id,
-          conversation.current_node_id,
-          userMessage,
-          contactPhone,
-          connection,
-          conversation.id
-        );
-        if (handled) {
-          console.log(`[Webhook] Flujo continuado desde botón "${userMessage}"`);
+        const { data: newFlow } = await supabase.from('flows').select('nodes').eq('id', otherTrigger.flow_id).single();
+        const startNode = (newFlow?.nodes || []).find(n => n.type === 'start');
+        if (startNode) {
+          await supabase.from('trigger_executions').insert({ trigger_id: otherTrigger.id, contact_phone: contactPhone });
+          await executeFlow(otherTrigger.flow_id, contactPhone, userMessage, connection, conversation.id, startNode.id);
           return;
         }
-      } catch (err) {
-        console.error('[Webhook] Error continuando flujo desde botón:', err.message);
       }
     }
 
-    // Un botón solo puede venir de un flujo que ya se activó,
-    // así que aquí siempre se permite el fallback de IA.
-    console.log('[Webhook] Sin flujo pausado, usando IA fallback para botón');
+    const handled = await continueFlowFromButton(
+      conversation.current_flow_id,
+      conversation.current_node_id,
+      userMessage,
+      connection, contactPhone,
+      conversation.id
+    );
+    if (handled) return;
+
+    console.log(`[Webhook] IA responde duda mientras flujo sigue pausado`);
     await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
     return;
   }
 
-  // ── Mensaje de texto normal ────────────────────────────────
+  // 4. Buscar trigger que coincida con el mensaje
+  const normalizedMsg = userMessage.toLowerCase().trim();
+
   const { data: triggers } = await supabase
     .from('triggers')
     .select('*, flows(id, nodes, edges, is_active)')
@@ -573,55 +222,66 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
     .eq('connection_id', connection.id)
     .eq('is_active', true);
 
-  const matchedTrigger = (triggers || []).find(t => {
+  if (!triggers?.length) {
+    console.log(`[Webhook] No hay triggers activos para user ${userId}`);
+    return;
+  }
+
+  // Buscar trigger que coincida (exact match o contains)
+  const matchedTrigger = triggers.find(t => {
     const kw = t.keyword.toLowerCase().trim();
     return normalizedMsg === kw || normalizedMsg.includes(kw);
   });
 
-  // Caso 1: el mensaje SÍ coincide con una palabra activadora → ejecutar flujo
-  if (matchedTrigger) {
-    if (!matchedTrigger.is_repeatable) {
-      const { count } = await supabase
-        .from('trigger_executions')
-        .select('*', { count: 'exact', head: true })
-        .eq('trigger_id', matchedTrigger.id)
-        .eq('contact_phone', contactPhone);
-
-      if (count > 0) {
-        // Ya se ejecutó antes → esto confirma que el flujo ya
-        // se activó en algún momento, así que sí usamos IA.
-        console.log(`[Webhook] Trigger "${matchedTrigger.name}" no repetible y ya ejecutado — usando IA fallback`);
-        await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
-        return;
-      }
+  if (!matchedTrigger) {
+    // Buscar si hay algún flujo con Agente IA como respuesta por defecto
+    const defaultTrigger = triggers.find(t => t.keyword === '*' || t.keyword === 'default');
+    if (!defaultTrigger) {
+      console.log(`[Webhook] Sin coincidencia para: "${normalizedMsg}"`);
+      return;
     }
-
-    await supabase.from('trigger_executions').insert({
-      id: uuidv4(),
-      trigger_id: matchedTrigger.id,
-      contact_phone: contactPhone,
-      conversation_id: conversation.id,
-      executed_at: new Date().toISOString()
-    });
-
-    console.log(`[Webhook] Ejecutando flujo para trigger "${matchedTrigger.name}"`);
-    await executeFlow(matchedTrigger.flow_id, contactPhone, userMessage, connection, conversation.id);
+    // Ejecutar flujo default
+    await executeFlow(
+      defaultTrigger.flow_id,
+      contactPhone,
+      userMessage,
+      connection,
+      conversation.id
+    );
     return;
   }
 
-  // Caso 2: NO coincide con ningún trigger.
-  // Solo respondemos con IA si esta conversación YA activó un
-  // flujo antes (dijo la palabra clave en algún mensaje previo).
-  // Si nunca la dijo, el bot se queda en silencio — no responde nada.
-  const yaActivo = await hasActivatedFlow(conversation.id);
-
-  if (!yaActivo) {
-    console.log(`[Webhook] "${normalizedMsg}" no coincide con ningún trigger y la conversación nunca activó un flujo — el bot NO responde`);
-    return;
+  // 5. Verificar si es repetible o ya fue ejecutado
+  if (!matchedTrigger.is_repeatable) {
+    const { count } = await supabase
+      .from('trigger_executions')
+      .select('*', { count: 'exact', head: true })
+      .eq('trigger_id', matchedTrigger.id)
+      .eq('contact_phone', contactPhone);
+    if (count > 0) {
+      console.log(`[Webhook] Trigger no repetible ya ejecutado para ${contactPhone}`);
+      return;
+    }
   }
 
-  console.log(`[Webhook] "${normalizedMsg}" no coincide con trigger, pero el flujo ya fue activado antes — usando IA fallback`);
-  await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
+  // 6. Registrar ejecución del trigger
+  await supabase.from('trigger_executions').insert({
+    id: uuidv4(),
+    trigger_id: matchedTrigger.id,
+    contact_phone: contactPhone,
+    conversation_id: conversation.id,
+    executed_at: new Date().toISOString()
+  });
+
+  // 7. Ejecutar el flujo
+  console.log(`[Webhook] Ejecutando flujo "${matchedTrigger.flows?.id}" para trigger "${matchedTrigger.name}"`);
+  await executeFlow(
+    matchedTrigger.flow_id,
+    contactPhone,
+    userMessage,
+    connection,
+    conversation.id
+  );
 }
 
 module.exports = router;
