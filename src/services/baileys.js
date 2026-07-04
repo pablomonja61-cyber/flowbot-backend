@@ -81,6 +81,53 @@ async function sendImage(sock, jid, url, caption, conversationId) {
   }
 }
 
+// ── Enviar video ─────────────────────────────────────────────
+async function sendVideoMsg(sock, jid, url, caption, conversationId) {
+  if (!url || url.startsWith('data:')) return;
+  try {
+    await sock.sendMessage(jid, { video: { url }, caption: caption || '' });
+    await saveMsg(conversationId, caption || '[Video]', 'outbound', 'video', url);
+    console.log(`[Baileys] ✓ Video enviado`);
+  } catch (e) {
+    console.error('[Baileys] Error enviando video:', e.message);
+  }
+}
+
+// ── Enviar audio ─────────────────────────────────────────────
+async function sendAudioMsg(sock, jid, url, conversationId, asVoiceNote = false) {
+  if (!url || url.startsWith('data:')) return;
+  try {
+    await sock.sendMessage(jid, { audio: { url }, mimetype: 'audio/mp4', ptt: !!asVoiceNote });
+    await saveMsg(conversationId, '[Audio]', 'outbound', 'audio', url);
+    console.log(`[Baileys] ✓ Audio enviado`);
+  } catch (e) {
+    console.error('[Baileys] Error enviando audio:', e.message);
+  }
+}
+
+// ── Enviar documento (PDF y otros archivos) ────────────────────
+async function sendDocumentMsg(sock, jid, url, fileName, conversationId) {
+  if (!url || url.startsWith('data:')) return;
+  try {
+    const nombre = fileName || url.split('/').pop().split('?')[0] || 'documento.pdf';
+    const ext = (nombre.split('.').pop() || 'pdf').toLowerCase();
+    const mimeMap = {
+      pdf: 'application/pdf',
+      doc: 'application/msword',
+      docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      xls: 'application/vnd.ms-excel',
+      xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      zip: 'application/zip'
+    };
+    const mimetype = mimeMap[ext] || 'application/octet-stream';
+    await sock.sendMessage(jid, { document: { url }, mimetype, fileName: nombre });
+    await saveMsg(conversationId, `[Documento: ${nombre}]`, 'outbound', 'document', url);
+    console.log(`[Baileys] ✓ Documento enviado: ${nombre}`);
+  } catch (e) {
+    console.error('[Baileys] Error enviando documento:', e.message);
+  }
+}
+
 // ════════════════════════════════════════════════════════════
 // RESPONDER CON IA
 // ════════════════════════════════════════════════════════════
@@ -228,19 +275,11 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
           } else if (tipo === 'image' || tipo === 'imagen') {
             await sendImage(sock, jid, item.url || '', item.caption || '', conversationId);
           } else if (tipo === 'video') {
-            if (item.url) {
-              try {
-                await sock.sendMessage(jid, { video: { url: item.url }, caption: item.caption || '' });
-                await saveMsg(conversationId, item.caption || '[Video]', 'outbound', 'video', item.url);
-              } catch (e) { console.error('[Baileys] Error enviando video:', e.message); }
-            }
+            await sendVideoMsg(sock, jid, item.url || '', item.caption || item.description || '', conversationId);
           } else if (tipo === 'audio') {
-            if (item.url) {
-              try {
-                await sock.sendMessage(jid, { audio: { url: item.url }, mimetype: 'audio/mp4' });
-                await saveMsg(conversationId, '[Audio]', 'outbound', 'audio', item.url);
-              } catch (e) { console.error('[Baileys] Error enviando audio:', e.message); }
-            }
+            await sendAudioMsg(sock, jid, item.url || '', conversationId, !!item.asVoiceNote);
+          } else if (tipo === 'doc' || tipo === 'document' || tipo === 'documento') {
+            await sendDocumentMsg(sock, jid, item.url || '', item.fileName || item.name || '', conversationId);
           }
 
           await sleep(600);
@@ -329,17 +368,18 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
           const precio = seg.precio || '';
           if (minutos > 0) {
             const sendAt = new Date(Date.now() + minutos * 60 * 1000).toISOString();
+            const connIdForSock = Object.keys(activeSessions).find(cid => activeSessions[cid] === sock) || null;
             await supabase.from('scheduled_followups').insert({
               id: uuidv4(),
               conversation_id: conversationId,
-              connection_id: null,
+              connection_id: connIdForSock,
               contact_phone: contactPhone,
               followup_data: seg,
               status: 'pending',
               send_at: sendAt,
               created_at: new Date().toISOString()
             });
-            console.log(`[Baileys Flow] Seguimiento programado para ${minutos} min`);
+            console.log(`[Baileys Flow] Seguimiento programado para ${minutos} min (conexión: ${connIdForSock})`);
           } else {
             if (precio) {
               await supabase.from('conversations').update({ active_price: precio }).eq('id', conversationId);
@@ -600,19 +640,115 @@ async function continueFlowFromButtonBaileys(flowId, pausedNodeId, userResponse,
 // ── Enviar contenido de seguimiento ─────────────────────────
 async function sendFollowupContent(sock, jid, contenido, conversationId) {
   const tipo = (contenido.tipo || '').toLowerCase();
-  if (tipo === 'texto') await sendText(sock, jid, contenido.texto || '', conversationId);
-  else if (tipo === 'imagen') await sendImage(sock, jid, contenido.url || '', contenido.caption || '', conversationId);
-  else if (tipo === 'pausa') await sleep((contenido.segundos || 1) * 1000);
+
+  if (tipo === 'texto') {
+    await sendText(sock, jid, contenido.texto || contenido.mensaje || '', conversationId);
+  } else if (tipo === 'imagen') {
+    await sendImage(sock, jid, contenido.url || '', contenido.caption || contenido.descripcion || '', conversationId);
+  } else if (tipo === 'pausa') {
+    await sleep((contenido.segundos || 1) * 1000);
+  } else if (tipo === 'botones') {
+    if (contenido.imagen_cabecera) {
+      await sendImage(sock, jid, contenido.imagen_cabecera, '', conversationId);
+      await sleep(800);
+    }
+    const botones = contenido.botones || [];
+    let fullText = contenido.mensaje || '';
+    if (botones.length > 0) {
+      fullText += '\n\n' + botones.map((b, i) => `${i + 1}. ${b}`).join('\n');
+    }
+    if (fullText) await sendText(sock, jid, fullText, conversationId);
+  } else if (tipo === 'audio') {
+    await sendAudioMsg(sock, jid, contenido.url || '', conversationId, !!contenido.asVoiceNote || !!contenido.notaVoz);
+  } else if (tipo === 'video') {
+    await sendVideoMsg(sock, jid, contenido.url || '', contenido.caption || contenido.descripcion || '', conversationId);
+  } else if (tipo === 'archivo' || tipo === 'documento' || tipo === 'doc') {
+    await sendDocumentMsg(sock, jid, contenido.url || '', contenido.fileName || contenido.nombre || '', conversationId);
+  }
+
   await sleep(500);
 }
 
 // ════════════════════════════════════════════════════════════
-// NUEVO: cuando el monto coincide con MÁS de una regla (porque
-// dos productos pueden costar lo mismo), se usa context_keyword
-// para desempatar, buscando esas palabras en los últimos
-// mensajes de la conversación (lo que ya se le mandó al cliente
-// dentro del flujo).
+// MOTOR DE SEGUIMIENTOS PROGRAMADOS
+// Revisa cada minuto la tabla scheduled_followups y envía los
+// que ya cumplieron su hora. Esta es la pieza que antes faltaba:
+// los seguimientos se guardaban pero nunca se disparaban.
 // ════════════════════════════════════════════════════════════
+async function processScheduledFollowups() {
+  try {
+    const nowIso = new Date().toISOString();
+
+    const { data: due, error } = await supabase
+      .from('scheduled_followups')
+      .select('*')
+      .eq('status', 'pending')
+      .lte('send_at', nowIso)
+      .limit(50);
+
+    if (error) {
+      console.error('[Followups] Error consultando scheduled_followups:', error.message);
+      return;
+    }
+
+    if (!due || due.length === 0) return;
+
+    console.log(`[Followups] ${due.length} seguimiento(s) pendiente(s) de enviar`);
+
+    for (const item of due) {
+      const sock = item.connection_id ? activeSessions[item.connection_id] : null;
+
+      if (!sock) {
+        // Sin conexión activa ahora mismo. Si lleva más de 24h vencido,
+        // se marca como expirado para no acumularlo indefinidamente;
+        // si no, se deja 'pending' para reintentar en el próximo ciclo.
+        const horasVencido = (Date.now() - new Date(item.send_at).getTime()) / 3600000;
+        if (horasVencido > 24) {
+          await supabase.from('scheduled_followups')
+            .update({ status: 'expired' })
+            .eq('id', item.id);
+          console.log(`[Followups] Seguimiento ${item.id} expirado (sin conexión activa por más de 24h)`);
+        } else {
+          console.log(`[Followups] Seguimiento ${item.id} pendiente — conexión ${item.connection_id} no activa aún`);
+        }
+        continue;
+      }
+
+      try {
+        const jid = `${item.contact_phone}@s.whatsapp.net`;
+        const seg = item.followup_data || {};
+
+        if (seg.precio) {
+          await supabase.from('conversations').update({ active_price: seg.precio }).eq('id', item.conversation_id);
+        }
+
+        for (const contenido of seg.contenidos || []) {
+          await sendFollowupContent(sock, jid, contenido, item.conversation_id);
+        }
+
+        await supabase.from('scheduled_followups')
+          .update({ status: 'sent', sent_at: new Date().toISOString() })
+          .eq('id', item.id);
+
+        console.log(`[Followups] ✅ Seguimiento ${item.id} enviado a ${item.contact_phone}`);
+      } catch (sendErr) {
+        console.error(`[Followups] Error enviando seguimiento ${item.id}:`, sendErr.message);
+        await supabase.from('scheduled_followups')
+          .update({ status: 'failed' })
+          .eq('id', item.id);
+      }
+    }
+  } catch (err) {
+    console.error('[Followups] Error general en processScheduledFollowups:', err.message);
+  }
+}
+
+// Revisa la tabla cada 60 segundos. Si el proceso se reinicia
+// (ej. redeploy en Railway), simplemente retoma en el próximo ciclo
+// — nada se pierde porque el estado vive en la base de datos.
+setInterval(processScheduledFollowups, 60 * 1000);
+
+
 async function findMatchingPaymentRule(rules, monto, conversationId) {
   const candidates = (rules || []).filter(r => Math.abs(Number(r.amount) - Number(monto)) < 0.5);
   if (candidates.length === 0) return null;
