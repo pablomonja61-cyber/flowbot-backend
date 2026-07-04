@@ -464,6 +464,43 @@ async function classifyResponseWithAI(userResponse, paths, aiConfigId) {
 }
 
 // ════════════════════════════════════════════════════════════
+// REVISAR SI OTRO TRIGGER APLICA (para nodos con "Activar otros flujos")
+// Se usa cuando un flujo está pausado esperando respuesta, pero el
+// nodo tiene el toggle "triggerOtherFlows" activado — en ese caso,
+// antes de tratar el mensaje como respuesta al nodo, se revisa si
+// coincide con la palabra activadora de OTRO flujo.
+// ════════════════════════════════════════════════════════════
+async function checkOtherFlowTrigger(userId, connectionId, contactPhone, userMessage) {
+  const normalizedMsg = (userMessage || '').toLowerCase().trim();
+  if (!normalizedMsg) return null;
+
+  const { data: triggers } = await supabase
+    .from('triggers')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('connection_id', connectionId)
+    .eq('is_active', true);
+
+  const matched = (triggers || []).find(t => {
+    const kw = (t.keyword || '').toLowerCase().trim();
+    return kw && (normalizedMsg === kw || normalizedMsg.includes(kw));
+  });
+
+  if (!matched) return null;
+
+  if (!matched.is_repeatable) {
+    const { count } = await supabase
+      .from('trigger_executions')
+      .select('*', { count: 'exact', head: true })
+      .eq('trigger_id', matched.id)
+      .eq('contact_phone', contactPhone);
+    if (count > 0) return null; // ya se ejecutó y no es repetible
+  }
+
+  return matched;
+}
+
+// ════════════════════════════════════════════════════════════
 // CONTINUAR FLUJO DESDE RESPUESTA DE BOTÓN
 // ════════════════════════════════════════════════════════════
 async function continueFlowFromButtonBaileys(flowId, pausedNodeId, userResponse, sock, jid, contactPhone, conversationId) {
@@ -603,12 +640,94 @@ async function findMatchingPaymentRule(rules, monto, conversationId) {
 }
 
 // ════════════════════════════════════════════════════════════
+// BLOQUEO POR PAÍS
+// Deduce el país del número de contacto por su prefijo telefónico
+// y revisa si el usuario lo tiene bloqueado en `blocked_countries`.
+// ════════════════════════════════════════════════════════════
+const CALLING_CODE_TO_ISO = [
+  // [prefijo, código ISO] — ordenado de más largo a más corto para
+  // que el match de prefijo más específico gane primero.
+  ['1809', 'DO'], ['1829', 'DO'], ['1849', 'DO'], // Rep. Dominicana (comparte +1 con USA/Canadá)
+  ['54', 'AR'], ['55', 'BR'], ['56', 'CL'], ['57', 'CO'], ['58', 'VE'],
+  ['51', 'PE'], ['52', 'MX'], ['53', 'CU'],
+  ['591', 'BO'], ['592', 'GY'], ['593', 'EC'], ['594', 'GF'], ['595', 'PY'],
+  ['596', 'MQ'], ['597', 'SR'], ['598', 'UY'], ['599', 'CW'],
+  ['502', 'GT'], ['503', 'SV'], ['504', 'HN'], ['505', 'NI'],
+  ['506', 'CR'], ['507', 'PA'], ['501', 'BZ'],
+  ['1', 'US'], // fallback genérico para +1 (US/Canadá) si no matchea otro código +1XXX
+];
+
+function getCountryCodeFromPhone(phone) {
+  const digits = (phone || '').replace(/\D/g, '');
+  // Prueba primero los prefijos más largos (4, luego 3, luego 2, luego 1 dígito)
+  const sorted = [...CALLING_CODE_TO_ISO].sort((a, b) => b[0].length - a[0].length);
+  for (const [prefix, iso] of sorted) {
+    if (digits.startsWith(prefix)) return iso;
+  }
+  return null;
+}
+
+async function isCountryBlocked(userId, contactPhone) {
+  try {
+    const iso = getCountryCodeFromPhone(contactPhone);
+    if (!iso) return false;
+
+    const { data } = await supabase
+      .from('blocked_countries')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('country_code', iso)
+      .maybeSingle();
+
+    return !!data;
+  } catch (err) {
+    console.error('[Baileys] Error revisando bloqueo por país:', err.message);
+    return false; // ante la duda, no bloquear (evita tumbar el bot por un error de red)
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// RESOLVER NODO "AGENTE IA" PAUSADO CON CAMINO "PAGO"
+// Si la conversación está esperando respuesta en un nodo con un
+// camino de tipo Pago, devuelve ese camino para validar contra él
+// en vez de la tabla global payment_config/payment_rules.
+// ════════════════════════════════════════════════════════════
+async function resolvePaidPathNode(conversation) {
+  if (!conversation?.current_flow_id || !conversation?.current_node_id) return null;
+
+  const { data: flow } = await supabase
+    .from('flows')
+    .select('id, nodes, edges')
+    .eq('id', conversation.current_flow_id)
+    .single();
+
+  if (!flow) return null;
+
+  const node = (flow.nodes || []).find(n => n.id === conversation.current_node_id);
+  if (!node || (node.type !== 'ai' && node.type !== 'ai_agent')) return null;
+
+  const paths = node.data?.paths || [];
+  const paidPaths = paths
+    .map((p, index) => ({ path: p, index }))
+    .filter(p => p.path.type === 'Pago');
+
+  if (paidPaths.length === 0) return null;
+
+  return { flow, node, paidPaths };
+}
+
+// ════════════════════════════════════════════════════════════
 // PROCESAR IMAGEN ENTRANTE (comprobante de pago)
 // Equivalente a processIncomingImage() de webhook.js, adaptado
 // para descargar el archivo con Baileys en vez de la Graph API.
 // ════════════════════════════════════════════════════════════
 async function processIncomingImageBaileys(connectionId, userId, sock, contactPhone, rawMsg, rawJid, contactName) {
   const jid = rawJid || `${contactPhone}@s.whatsapp.net`;
+
+  if (await isCountryBlocked(userId, contactPhone)) {
+    console.log(`[Baileys] 🚫 País bloqueado — ignorando imagen de ${contactPhone}`);
+    return;
+  }
 
   let { data: conversation } = await supabase
     .from('conversations')
@@ -695,6 +814,9 @@ async function processIncomingImageBaileys(connectionId, userId, sock, contactPh
 
   const base64Image = imageBuffer.toString('base64');
 
+  // ── Buscar si hay caminos "Pago" activos en el flujo pausado ──
+  const paidPathInfo = await resolvePaidPathNode(conversation);
+
   const { data: paymentConfig } = await supabase
     .from('payment_config')
     .select('*')
@@ -705,11 +827,18 @@ async function processIncomingImageBaileys(connectionId, userId, sock, contactPh
     'Gracias por tu pago. Validaremos el comprobante y en breve te enviaremos el acceso.';
   const msgNoValido = paymentConfig?.msg_no_valido ||
     'Disculpa, no pudimos validar el comprobante. Por favor envía una foto más clara.';
-  const msgTitularInvalido =
-    'Disculpa, el comprobante no está dirigido a nuestra cuenta. Por favor verifica el destinatario e intenta de nuevo.';
-  const titularEsperado = (paymentConfig?.titular || '').toLowerCase().trim();
 
   const apiKey = process.env.GROQ_API_KEY;
+  const hoyLima = new Intl.DateTimeFormat('es-PE', {
+    timeZone: 'America/Lima', year: 'numeric', month: '2-digit', day: '2-digit'
+  }).format(new Date());
+
+  // Instrucción extra de "Validar" (texto libre) de cualquiera de los
+  // caminos de pago del nodo, para que la IA la revise en la misma pasada.
+  const validarExtra = (paidPathInfo?.paidPaths || [])
+    .map(p => p.path.validar)
+    .filter(Boolean)[0];
+
   let analysisResult = null;
 
   try {
@@ -717,14 +846,24 @@ async function processIncomingImageBaileys(connectionId, userId, sock, contactPh
       'https://api.groq.com/openai/v1/chat/completions',
       {
         model: 'meta-llama/llama-4-scout-17b-16e-instruct',
-        max_tokens: 300,
+        max_tokens: 400,
         messages: [
           {
             role: 'user',
             content: [
               {
                 type: 'text',
-                text: 'Analiza esta imagen. \u00bfEs un comprobante de pago (Yape, Plin, transferencia bancaria u otro)?\nSi lo es, extrae el MONTO exacto pagado (solo el numero, sin moneda).\nExtrae tambien el NOMBRE DEL DESTINATARIO/TITULAR al que se realizo el pago (puede aparecer como "Destino", "Para", "Titular", "Nombre").\nResponde SOLO en formato JSON exacto, sin texto adicional:\n{"es_comprobante": true/false, "monto": numero_o_null, "titular_destino": "nombre_o_null"}'
+                text: `Analiza esta imagen. ¿Es un comprobante de pago (Yape, Plin, transferencia bancaria u otro)?
+Si lo es, extrae:
+- monto: el monto exacto pagado (solo el número, sin moneda)
+- titular_destino: el nombre del destinatario/titular al que se realizó el pago (puede aparecer como "Destino", "Para", "Titular", "Nombre")
+- numero_operacion: el número de operación/transacción del comprobante, si aparece
+- fecha_es_hoy: true si la fecha del comprobante es hoy (${hoyLima}, zona horaria Perú), false si es una fecha anterior, null si no se ve fecha
+- estado_pago: "confirmado" si el comprobante muestra un pago exitoso/completado, "pendiente" si muestra un estado pendiente/en proceso, "desconocido" si no es claro
+${validarExtra ? `- cumple_validacion_extra: true/false según si la imagen cumple con este criterio adicional: "${validarExtra}"` : ''}
+
+Responde SOLO en formato JSON exacto, sin texto adicional:
+{"es_comprobante": true/false, "monto": numero_o_null, "titular_destino": "nombre_o_null", "numero_operacion": "texto_o_null", "fecha_es_hoy": true/false/null, "estado_pago": "confirmado/pendiente/desconocido"${validarExtra ? ', "cumple_validacion_extra": true/false' : ''}}`
               },
               {
                 type: 'image_url',
@@ -759,23 +898,154 @@ async function processIncomingImageBaileys(connectionId, userId, sock, contactPh
     return;
   }
 
-  if (titularEsperado) {
-    const titularDetectado = (analysisResult.titular_destino || '').toLowerCase().trim();
-    console.log(`[Baileys Payment] Titular esperado: "${titularEsperado}" | Detectado: "${titularDetectado}"`);
+  const monto = analysisResult.monto;
+  console.log(`[Baileys Payment] Comprobante detectado, monto: ${monto}`);
 
-    if (titularDetectado && !titularDetectado.includes(titularEsperado) && !titularEsperado.includes(titularDetectado)) {
-      console.log('[Baileys Payment] Titular no coincide — rechazando comprobante');
-      await sendText(sock, jid, msgTitularInvalido, conversation.id);
+  // ── Camino A: hay un flujo pausado con camino(s) "Pago" ──
+  if (paidPathInfo && paidPathInfo.paidPaths.length > 0) {
+    // Elegir el camino cuyo monto coincida (si hay varios, ej. $5 y $7).
+    // Si solo hay uno, se usa ese directamente.
+    let selected = paidPathInfo.paidPaths[0];
+    if (paidPathInfo.paidPaths.length > 1 && monto !== null && monto !== undefined) {
+      const match = paidPathInfo.paidPaths.find(p => {
+        const esperado = parseFloat(p.path.monto);
+        return !isNaN(esperado) && Math.abs(parseFloat(monto) - esperado) <= 0.01;
+      });
+      if (match) selected = match;
+    }
+
+    const { path } = selected;
+    const fallas = [];
+
+    // Solo se revisa cada criterio si el usuario lo activó en el nodo.
+    if (path.monto) {
+      const esperado = parseFloat(path.monto);
+      if (!isNaN(esperado) && (monto === null || monto === undefined || Math.abs(parseFloat(monto) - esperado) > 0.01)) {
+        fallas.push(`el monto no coincide (esperado S/${esperado}, recibido ${monto ?? 'no detectado'})`);
+      }
+    }
+
+    if (path.nombre) {
+      const esperado = path.nombre.toLowerCase().trim();
+      const detectado = (analysisResult.titular_destino || '').toLowerCase().trim();
+      if (!detectado || (!detectado.includes(esperado) && !esperado.includes(detectado))) {
+        fallas.push('el titular del comprobante no coincide con el esperado');
+      }
+    }
+
+    if (path.confirmado === true) {
+      if (analysisResult.estado_pago !== 'confirmado') {
+        fallas.push('el comprobante no muestra un pago confirmado/exitoso');
+      }
+    }
+
+    if (path.fecha === true) {
+      if (analysisResult.fecha_es_hoy !== true) {
+        fallas.push('la fecha del comprobante no es de hoy (posible captura antigua o reutilizada)');
+      }
+    }
+
+    if (validarExtra && path.validar) {
+      if (analysisResult.cumple_validacion_extra !== true) {
+        fallas.push(`no cumple con el criterio adicional configurado: "${path.validar}"`);
+      }
+    }
+
+    let reusado = false;
+    if (path.reuso === true && analysisResult.numero_operacion) {
+      try {
+        const { data: existente } = await supabase
+          .from('used_payment_operations')
+          .select('id')
+          .eq('user_id', userId)
+          .eq('numero_operacion', analysisResult.numero_operacion)
+          .maybeSingle();
+        if (existente) {
+          reusado = true;
+          fallas.push('este comprobante ya fue usado anteriormente (número de operación repetido)');
+        }
+      } catch (err) {
+        console.log('[Baileys Payment] Tabla used_payment_operations no disponible, se omite chequeo de reúso:', err.message);
+      }
+    }
+
+    if (fallas.length > 0) {
+      console.log(`[Baileys Payment] Validación falló: ${fallas.join(' | ')}`);
+      if (paidPathInfo.node?.data?.respondIfNoMatch !== false) {
+        const contextoFalla = `El cliente envió un comprobante de pago, pero la validación falló por: ${fallas.join('; ')}. Explícale amablemente por qué no se pudo validar y qué debe hacer.`;
+        await respondWithAIBaileys(userId, sock, jid, contextoFalla, conversation.id);
+      } else {
+        console.log('[Baileys Payment] respondIfNoMatch desactivado — no se envía respuesta, queda pausado');
+      }
+      return; // se queda pausado en el mismo nodo, puede reintentar
+    }
+
+    console.log(`[Baileys Payment] Pago validado vía flujo — continuando por el camino "Pago"`);
+    await sendText(sock, jid, msgConfirmacion, conversation.id);
+
+    if (path.reuso === true && analysisResult.numero_operacion && !reusado) {
+      try {
+        await supabase.from('used_payment_operations').insert({
+          user_id: userId,
+          numero_operacion: analysisResult.numero_operacion,
+          conversation_id: conversation.id
+        });
+      } catch (err) {
+        console.log('[Baileys Payment] No se pudo registrar número de operación (tabla puede no existir aún):', err.message);
+      }
+    }
+
+    const matchedHandle = `path-${selected.index}`;
+    const matchedEdge = (paidPathInfo.flow.edges || []).find(
+      e => e.source === paidPathInfo.node.id && e.sourceHandle === matchedHandle
+    );
+
+    await supabase.from('conversations').update({
+      is_sale: true,
+      sale_amount: monto,
+      sale_at: new Date().toISOString(),
+      current_node_id: null,
+      current_flow_id: null
+    }).eq('id', conversation.id);
+
+    try {
+      await cancelFollowups(conversation.id);
+    } catch (e) {
+      console.error('[Baileys Payment] Error cancelando seguimientos:', e.message);
+    }
+
+    if (matchedEdge) {
+      await executeFlowBaileys(
+        paidPathInfo.flow.id || conversation.current_flow_id,
+        sock, jid, contactPhone, '', conversation.id, matchedEdge.target
+      );
+    } else {
+      console.log(`[Baileys Payment] Camino "${matchedHandle}" no tiene edge conectado en el editor`);
+    }
+
+    console.log(`[Baileys Payment] Conversación ${conversation.id} marcada como venta vía flujo.`);
+    return;
+  }
+
+  // ── Camino B (legado): sin flujo pausado, usar payment_config/payment_rules global ──
+  if (monto === null || monto === undefined) {
+    await sendText(sock, jid, msgConfirmacion, conversation.id);
+    return;
+  }
+
+  const titularEsperadoLegado = (paymentConfig?.titular || '').toLowerCase().trim();
+  if (titularEsperadoLegado) {
+    const titularDetectado = (analysisResult.titular_destino || '').toLowerCase().trim();
+    if (titularDetectado && !titularDetectado.includes(titularEsperadoLegado) && !titularEsperadoLegado.includes(titularDetectado)) {
+      console.log('[Baileys Payment] (legado) Titular no coincide — rechazando comprobante');
+      await sendText(sock, jid,
+        'Disculpa, el comprobante no está dirigido a nuestra cuenta. Por favor verifica el destinatario e intenta de nuevo.',
+        conversation.id);
       return;
     }
   }
 
   await sendText(sock, jid, msgConfirmacion, conversation.id);
-
-  const monto = analysisResult.monto;
-  console.log(`[Baileys Payment] Comprobante válido, monto detectado: ${monto}`);
-
-  if (monto === null || monto === undefined) return;
 
   const { data: rules } = await supabase
     .from('payment_rules')
@@ -806,7 +1076,7 @@ async function processIncomingImageBaileys(connectionId, userId, sock, contactPh
     console.error('[Baileys Payment] Error cancelando seguimientos:', e.message);
   }
 
-  console.log(`[Baileys Payment] Conversación ${conversation.id} marcada como venta. Bot desactivado — flujo terminado.`);
+  console.log(`[Baileys Payment] Conversación ${conversation.id} marcada como venta (sistema legado).`);
 }
 
 // ════════════════════════════════════════════════════════════
@@ -814,6 +1084,11 @@ async function processIncomingImageBaileys(connectionId, userId, sock, contactPh
 // ════════════════════════════════════════════════════════════
 async function processBaileysMessage(connectionId, userId, sock, contactPhone, userMessage, isImage, rawMsg, rawJid, contactName) {
   const jid = rawJid || `${contactPhone}@s.whatsapp.net`;
+
+  if (await isCountryBlocked(userId, contactPhone)) {
+    console.log(`[Baileys] 🚫 País bloqueado — ignorando mensaje de ${contactPhone}`);
+    return;
+  }
 
   let { data: conversation } = await supabase
     .from('conversations')
@@ -860,6 +1135,42 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
 
   if (conversation.current_flow_id && conversation.current_node_id) {
     console.log(`[Baileys] Flujo pausado detectado en nodo: ${conversation.current_node_id}`);
+
+    // Si el nodo pausado tiene "Activar otros flujos" activado, revisar
+    // primero si el mensaje coincide con la palabra activadora de OTRO
+    // flujo antes de tratarlo como respuesta al nodo actual.
+    const { data: pausedFlowData } = await supabase
+      .from('flows')
+      .select('nodes')
+      .eq('id', conversation.current_flow_id)
+      .single();
+    const pausedNode = (pausedFlowData?.nodes || []).find(n => n.id === conversation.current_node_id);
+
+    if (pausedNode?.data?.triggerOtherFlows === true) {
+      const otherTrigger = await checkOtherFlowTrigger(userId, connectionId, contactPhone, userMessage);
+      if (otherTrigger) {
+        console.log(`[Baileys] "Activar otros flujos" activo — trigger "${otherTrigger.keyword}" coincide, abandonando flujo pausado`);
+        await supabase.from('conversations').update({
+          current_flow_id: null,
+          current_node_id: null
+        }).eq('id', conversation.id);
+
+        const { data: newFlow } = await supabase
+          .from('flows')
+          .select('nodes')
+          .eq('id', otherTrigger.flow_id)
+          .single();
+        const startNode = (newFlow?.nodes || []).find(n => n.type === 'start');
+        if (startNode) {
+          await supabase.from('trigger_executions').insert({
+            trigger_id: otherTrigger.id, contact_phone: contactPhone
+          });
+          await executeFlowBaileys(otherTrigger.flow_id, sock, jid, contactPhone, userMessage, conversation.id, startNode.id);
+          return;
+        }
+      }
+    }
+
     const handled = await continueFlowFromButtonBaileys(
       conversation.current_flow_id,
       conversation.current_node_id,
