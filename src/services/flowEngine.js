@@ -790,22 +790,30 @@ async function resolveAIPath(flow, pausedNode, paths, userResponse, connection, 
   const pausedNodeId = pausedNode.id;
   const normalizedResponse = userResponse.toLowerCase().replace(/[^a-z0-9áéíóúñ ]/g, '').trim();
 
-  let matchedIndex = paths.findIndex(p => {
+  // Un camino tipo "Pago" solo puede cumplirse con una imagen de
+  // comprobante, nunca con texto — se excluye de este matching.
+  const textPaths = paths
+    .map((p, originalIndex) => ({ ...p, originalIndex }))
+    .filter(p => p.type !== 'Pago');
+
+  let matched = textPaths.find(p => {
     const label = (p.label || '').toLowerCase().replace(/[^a-z0-9áéíóúñ ]/g, '').trim();
     return label && (normalizedResponse.includes(label) || label.includes(normalizedResponse));
   });
 
-  if (matchedIndex === -1) {
-    matchedIndex = await classifyResponseWithAI(userResponse, paths, pausedNode.data?.ai_config_id);
+  if (!matched && textPaths.length > 0) {
+    const idx = await classifyResponseWithAI(userResponse, textPaths, pausedNode.data?.ai_config_id);
+    if (idx !== -1) matched = textPaths[idx];
   }
 
-  if (matchedIndex === -1) {
+  if (!matched) {
     if (pausedNode.data?.respondIfNoMatch !== false) {
       await respondWithAI(connection.user_id, connection, contactPhone, userResponse, conversationId, pausedNode.data?.ai_config_id);
     }
     return true;
   }
 
+  const matchedIndex = matched.originalIndex;
   const matchedHandle = `path-${matchedIndex}`;
   const matchedEdge = (flow.edges || []).find(e => e.source === pausedNodeId && e.sourceHandle === matchedHandle);
   if (!matchedEdge) return true;

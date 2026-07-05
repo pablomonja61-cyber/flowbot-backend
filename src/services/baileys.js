@@ -431,17 +431,26 @@ async function resolveAIPathBaileys(flow, pausedNode, paths, userResponse, sock,
   const pausedNodeId = pausedNode.id;
   const normalizedResponse = userResponse.toLowerCase().replace(/[^a-z0-9áéíóúñ ]/g, '').trim();
 
-  let matchedIndex = paths.findIndex(p => {
+  // Un camino tipo "Pago" SOLO puede cumplirse con una imagen de
+  // comprobante (ver processIncomingImageBaileys) — nunca con texto.
+  // Si se incluyera aquí, un mensaje ambiguo podría "colarse" como si
+  // el cliente ya hubiera pagado, sin validar nada.
+  const textPaths = paths
+    .map((p, originalIndex) => ({ ...p, originalIndex }))
+    .filter(p => p.type !== 'Pago');
+
+  let matched = textPaths.find(p => {
     const label = (p.label || '').toLowerCase().replace(/[^a-z0-9áéíóúñ ]/g, '').trim();
     return label && (normalizedResponse.includes(label) || label.includes(normalizedResponse));
   });
 
-  if (matchedIndex === -1) {
-    matchedIndex = await classifyResponseWithAI(userResponse, paths, pausedNode.data?.ai_config_id);
+  if (!matched && textPaths.length > 0) {
+    const idx = await classifyResponseWithAI(userResponse, textPaths, pausedNode.data?.ai_config_id);
+    if (idx !== -1) matched = textPaths[idx];
   }
 
-  if (matchedIndex === -1) {
-    console.log(`[Baileys Flow] "${userResponse}" no coincide con ningún camino de ${pausedNodeId}`);
+  if (!matched) {
+    console.log(`[Baileys Flow] "${userResponse}" no coincide con ningún camino de texto de ${pausedNodeId}`);
     if (pausedNode.data?.respondIfNoMatch !== false) {
       const { data: conv } = await supabase.from('conversations').select('user_id').eq('id', conversationId).single();
       if (conv?.user_id) {
@@ -452,6 +461,7 @@ async function resolveAIPathBaileys(flow, pausedNode, paths, userResponse, sock,
     return true;
   }
 
+  const matchedIndex = matched.originalIndex;
   const matchedHandle = `path-${matchedIndex}`;
   const matchedEdge = (flow.edges || []).find(e => e.source === pausedNodeId && e.sourceHandle === matchedHandle);
 
