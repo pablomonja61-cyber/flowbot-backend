@@ -179,7 +179,7 @@ async function isCountryBlocked(userId, contactPhone) {
 // ════════════════════════════════════════════════════════════
 // RESPONDER CON IA (Groq — igual que en QR)
 // ════════════════════════════════════════════════════════════
-async function respondWithAI(userId, connection, to, userMessage, conversationId) {
+async function respondWithAI(userId, connection, to, userMessage, conversationId, aiConfigIdOverride = null) {
   console.log(`[CloudAPI AI] Intentando responder con IA para user: ${userId}`);
   try {
     const { data: convData } = await supabase
@@ -189,8 +189,10 @@ async function respondWithAI(userId, connection, to, userMessage, conversationId
       .single();
 
     let aiConfig = null;
-    if (convData?.ai_config_id) {
-      const { data: c } = await supabase.from('ai_config').select('*').eq('id', convData.ai_config_id).single();
+    const preferredConfigId = aiConfigIdOverride || convData?.ai_config_id;
+
+    if (preferredConfigId) {
+      const { data: c } = await supabase.from('ai_config').select('*').eq('id', preferredConfigId).single();
       if (c) aiConfig = c;
     }
     if (!aiConfig) {
@@ -384,7 +386,7 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
       // ── Agente IA (con caminos de ruteo, igual que QR) ─────
       case 'ai':
       case 'ai_agent': {
-        await respondWithAI(connection.user_id, connection, to, userMessage, conversationId);
+        await respondWithAI(connection.user_id, connection, to, userMessage, conversationId, node.data?.ai_config_id);
 
         if (node.data?.paths?.length > 0) {
           await supabase.from('conversations').update({
@@ -710,7 +712,7 @@ Responde SOLO en formato JSON exacto:
       console.log(`[CloudAPI Payment] Validación falló: ${fallas.join(' | ')}`);
       if (paidPathInfo.node?.data?.respondIfNoMatch !== false) {
         const contexto = `El cliente envió un comprobante de pago, pero la validación falló por: ${fallas.join('; ')}. Explícale amablemente por qué no se pudo validar y qué debe hacer.`;
-        await respondWithAI(userId, connection, to, contexto, conversation.id);
+        await respondWithAI(userId, connection, to, contexto, conversation.id, paidPathInfo.node?.data?.ai_config_id);
       }
       return;
     }
@@ -799,7 +801,7 @@ async function resolveAIPath(flow, pausedNode, paths, userResponse, connection, 
 
   if (matchedIndex === -1) {
     if (pausedNode.data?.respondIfNoMatch !== false) {
-      await respondWithAI(connection.user_id, connection, contactPhone, userResponse, conversationId);
+      await respondWithAI(connection.user_id, connection, contactPhone, userResponse, conversationId, pausedNode.data?.ai_config_id);
     }
     return true;
   }

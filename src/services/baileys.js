@@ -131,7 +131,7 @@ async function sendDocumentMsg(sock, jid, url, fileName, conversationId) {
 // ════════════════════════════════════════════════════════════
 // RESPONDER CON IA
 // ════════════════════════════════════════════════════════════
-async function respondWithAIBaileys(userId, sock, jid, userMessage, conversationId) {
+async function respondWithAIBaileys(userId, sock, jid, userMessage, conversationId, aiConfigIdOverride = null) {
   console.log(`[Baileys AI] Intentando responder con IA para user: ${userId}`);
   try {
     const { data: convData } = await supabase
@@ -142,11 +142,15 @@ async function respondWithAIBaileys(userId, sock, jid, userMessage, conversation
 
     let aiConfig = null;
 
-    if (convData?.ai_config_id) {
+    // Prioridad: 1) config del nodo actual, 2) config guardada en la
+    // conversación, 3) config marcada como activa por defecto del usuario.
+    const preferredConfigId = aiConfigIdOverride || convData?.ai_config_id;
+
+    if (preferredConfigId) {
       const { data: c } = await supabase
         .from('ai_config')
         .select('*')
-        .eq('id', convData.ai_config_id)
+        .eq('id', preferredConfigId)
         .single();
       if (c) aiConfig = c;
     }
@@ -336,7 +340,7 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
           .eq('id', conversationId)
           .single();
         if (conv?.user_id) {
-          await respondWithAIBaileys(conv.user_id, sock, jid, userMessage, conversationId);
+          await respondWithAIBaileys(conv.user_id, sock, jid, userMessage, conversationId, node.data?.ai_config_id);
         }
 
         // Si tiene caminos de ruteo configurados, se pausa aquí y
@@ -441,7 +445,7 @@ async function resolveAIPathBaileys(flow, pausedNode, paths, userResponse, sock,
     if (pausedNode.data?.respondIfNoMatch !== false) {
       const { data: conv } = await supabase.from('conversations').select('user_id').eq('id', conversationId).single();
       if (conv?.user_id) {
-        await respondWithAIBaileys(conv.user_id, sock, jid, userResponse, conversationId);
+        await respondWithAIBaileys(conv.user_id, sock, jid, userResponse, conversationId, pausedNode.data?.ai_config_id);
       }
     }
     // Se mantiene pausado en el mismo nodo para que el cliente pueda reintentar
@@ -1109,7 +1113,7 @@ Responde SOLO en formato JSON exacto, sin texto adicional:
       console.log(`[Baileys Payment] Validación falló: ${fallas.join(' | ')}`);
       if (paidPathInfo.node?.data?.respondIfNoMatch !== false) {
         const contextoFalla = `El cliente envió un comprobante de pago, pero la validación falló por: ${fallas.join('; ')}. Explícale amablemente por qué no se pudo validar y qué debe hacer.`;
-        await respondWithAIBaileys(userId, sock, jid, contextoFalla, conversation.id);
+        await respondWithAIBaileys(userId, sock, jid, contextoFalla, conversation.id, paidPathInfo.node?.data?.ai_config_id);
       } else {
         console.log('[Baileys Payment] respondIfNoMatch desactivado — no se envía respuesta, queda pausado');
       }
