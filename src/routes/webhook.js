@@ -7,6 +7,26 @@ const {
 } = require('../services/flowEngine');
 const { v4: uuidv4 } = require('uuid');
 
+// ════════════════════════════════════════════════════════════
+// COLA DE PROCESAMIENTO POR CONTACTO
+// Cada mensaje entrante de Meta llega como una petición HTTP
+// separada, sin ningún orden garantizado entre sí — sin esta cola,
+// dos mensajes casi simultáneos del mismo cliente podrían procesarse
+// en paralelo y mezclar sus respuestas. Se declara UNA sola vez a
+// nivel de módulo (no dentro del handler, o se reiniciaría vacía en
+// cada petición y no serviría de nada).
+// ════════════════════════════════════════════════════════════
+const contactProcessingQueues = {};
+
+function enqueueForContact(queueKey, taskFn) {
+  const previous = contactProcessingQueues[queueKey] || Promise.resolve();
+  const next = previous
+    .catch(() => {})
+    .then(() => taskFn());
+  contactProcessingQueues[queueKey] = next;
+  return next;
+}
+
 // ── GET /webhook/whatsapp — verificación de Meta ─────────────
 router.get('/whatsapp', (req, res) => {
   const mode = req.query['hub.mode'];
@@ -40,9 +60,10 @@ router.post('/whatsapp', async (req, res) => {
 
         for (const msg of value.messages || []) {
           const contactPhone = msg.from;
+          const queueKey = `${phoneNumberId}:${contactPhone}`;
 
           if (msg.type === 'image') {
-            processIncomingImageMessage(phoneNumberId, contactPhone, msg).catch(err => {
+            enqueueForContact(queueKey, () => processIncomingImageMessage(phoneNumberId, contactPhone, msg)).catch(err => {
               console.error('[Webhook] Error procesando imagen:', err.message);
             });
             continue;
@@ -58,7 +79,7 @@ router.post('/whatsapp', async (req, res) => {
 
           console.log(`[Webhook] Mensaje de ${contactPhone}: "${userMessage}"`);
 
-          processIncomingMessage(phoneNumberId, contactPhone, userMessage).catch(err => {
+          enqueueForContact(queueKey, () => processIncomingMessage(phoneNumberId, contactPhone, userMessage)).catch(err => {
             console.error('[Webhook] Error procesando mensaje:', err.message);
           });
         }

@@ -11,6 +11,26 @@ const { cancelFollowups } = require('../services/flowEngine');
 const activeSessions = {};
 
 // ════════════════════════════════════════════════════════════
+// COLA DE PROCESAMIENTO POR CONTACTO
+// Evita que dos mensajes del mismo cliente (llegados casi al mismo
+// tiempo) se procesen en paralelo, lo cual puede mezclar mensajes
+// de un flujo en ejecución con una respuesta de IA de otro mensaje,
+// haciendo que parezca que "el bot mandó algo de la nada".
+// Cada contacto tiene su propia fila; contactos distintos sí se
+// siguen procesando en paralelo entre sí (no hay cuello de botella).
+// ════════════════════════════════════════════════════════════
+const contactProcessingQueues = {};
+
+function enqueueForContact(queueKey, taskFn) {
+  const previous = contactProcessingQueues[queueKey] || Promise.resolve();
+  const next = previous
+    .catch(() => {}) // un error previo no debe trabar la cola para siempre
+    .then(() => taskFn());
+  contactProcessingQueues[queueKey] = next;
+  return next;
+}
+
+// ════════════════════════════════════════════════════════════
 // NUEVO: verifica si esta conversación ya activó algún flujo
 // alguna vez (dijo una palabra activadora en el pasado).
 // Solo si esto es TRUE se permite usar la IA de dudas como
@@ -1575,13 +1595,19 @@ async function startQRSession(connectionId, userId) {
 
         console.log(`[Baileys] 📨 Mensaje de ${contactPhone} (${contactName}): "${userMessage}"${isImage ? ' [Imagen]' : ''}`);
 
+        const queueKey = `${connectionId}:${contactPhone}`;
+
         try {
           if (isImage) {
             // Las imágenes se procesan como posible comprobante de
             // pago, sin importar el estado del trigger/flujo actual.
-            await processIncomingImageBaileys(connectionId, userId, sock, contactPhone, msg, rawJid, contactName);
+            await enqueueForContact(queueKey, () =>
+              processIncomingImageBaileys(connectionId, userId, sock, contactPhone, msg, rawJid, contactName)
+            );
           } else {
-            await processBaileysMessage(connectionId, userId, sock, contactPhone, userMessage, isImage, msg, rawJid, contactName);
+            await enqueueForContact(queueKey, () =>
+              processBaileysMessage(connectionId, userId, sock, contactPhone, userMessage, isImage, msg, rawJid, contactName)
+            );
           }
         } catch (err) {
           console.error('[Baileys] Error procesando mensaje:', err.message);
