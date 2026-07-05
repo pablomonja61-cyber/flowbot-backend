@@ -1293,6 +1293,16 @@ Responde SOLO en formato JSON exacto, sin texto adicional:
 async function processBaileysMessage(connectionId, userId, sock, contactPhone, userMessage, isImage, rawMsg, rawJid, contactName) {
   const jid = rawJid || `${contactPhone}@s.whatsapp.net`;
 
+  // Ignorar mensajes vacíos/en blanco — no son texto real del cliente
+  // (suelen ser eventos internos de WhatsApp mal interpretados, como
+  // confirmaciones de lectura o ecos), y si se procesan como si fueran
+  // una respuesta real, pueden disparar una respuesta de IA fuera de
+  // lugar mientras el flujo normal sigue ejecutándose en paralelo.
+  if (!isImage && (!userMessage || !userMessage.trim())) {
+    console.log(`[Baileys] Mensaje vacío/en blanco de ${contactPhone} — ignorado`);
+    return;
+  }
+
   if (await isCountryBlocked(userId, contactPhone)) {
     console.log(`[Baileys] 🚫 País bloqueado — ignorando mensaje de ${contactPhone}`);
     return;

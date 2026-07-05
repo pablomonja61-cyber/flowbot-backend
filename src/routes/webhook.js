@@ -54,7 +54,7 @@ router.post('/whatsapp', async (req, res) => {
             ? msg.text?.body || ''
             : msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || '';
 
-          if (!userMessage) continue;
+          if (!userMessage || !userMessage.trim()) continue;
 
           console.log(`[Webhook] Mensaje de ${contactPhone}: "${userMessage}"`);
 
