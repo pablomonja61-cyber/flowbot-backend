@@ -227,7 +227,7 @@ async function respondWithAI(userId, connection, to, userMessage, conversationId
     ];
 
     const apiKey = aiConfig?.groq_api_key || process.env.GROQ_API_KEY;
-    const model = aiConfig?.model || 'meta-llama/llama-4-scout-17b-16e-instruct';
+    const model = aiConfig?.model || 'llama-3.3-70b-versatile';
 
     const response = await axios.post(
       'https://api.groq.com/openai/v1/chat/completions',
@@ -251,7 +251,7 @@ async function classifyResponseWithAI(userResponse, paths, aiConfigId) {
       if (c) aiConfig = c;
     }
     const apiKey = aiConfig?.groq_api_key || process.env.GROQ_API_KEY;
-    const model = aiConfig?.model || 'meta-llama/llama-4-scout-17b-16e-instruct';
+    const model = aiConfig?.model || 'llama-3.3-70b-versatile';
     const options = paths.map((p, i) => `${i}: ${p.label}`).join('\n');
 
     const response = await axios.post(
@@ -441,9 +441,16 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
       // ── Agente IA (con caminos de ruteo, igual que QR) ─────
       case 'ai':
       case 'ai_agent': {
-        await respondWithAI(connection.user_id, connection, to, userMessage, conversationId, node.data?.ai_config_id, node.data?.context);
+        const paths = node.data?.paths || [];
+        const soloEsperaPago = paths.length > 0 && paths.every(p => p.type === 'Pago');
 
-        if (node.data?.paths?.length > 0) {
+        if (!soloEsperaPago) {
+          await respondWithAI(connection.user_id, connection, to, userMessage, conversationId, node.data?.ai_config_id, node.data?.context);
+        } else {
+          console.log(`[Flow] ${node.id} solo espera comprobante — no genera respuesta al llegar`);
+        }
+
+        if (paths.length > 0) {
           await supabase.from('conversations').update({
             current_flow_id: flowId, current_node_id: node.id, flow_active: true
           }).eq('id', conversationId);

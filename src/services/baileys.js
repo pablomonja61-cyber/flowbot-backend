@@ -198,7 +198,7 @@ async function respondWithAIBaileys(userId, sock, jid, userMessage, conversation
     ];
 
     const apiKey = aiConfig?.groq_api_key || process.env.GROQ_API_KEY;
-    const model = aiConfig?.model || 'meta-llama/llama-4-scout-17b-16e-instruct';
+    const model = aiConfig?.model || 'llama-3.3-70b-versatile';
 
     const response = await axios.post(
       'https://api.groq.com/openai/v1/chat/completions',
@@ -399,18 +399,30 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
 
       case 'ai':
       case 'ai_agent': {
-        const { data: conv } = await supabase
-          .from('conversations')
-          .select('user_id')
-          .eq('id', conversationId)
-          .single();
-        if (conv?.user_id) {
-          await respondWithAIBaileys(conv.user_id, sock, jid, userMessage, conversationId, node.data?.ai_config_id, node.data?.context);
+        const paths = node.data?.paths || [];
+        // Si TODOS los caminos son tipo "Pago", este nodo solo existe
+        // para esperar en silencio la foto del comprobante — no debe
+        // generar un mensaje de la IA al llegar (evita preguntas
+        // repetidas/confusas justo después de que el cliente ya eligió
+        // método de pago en el nodo anterior).
+        const soloEsperaPago = paths.length > 0 && paths.every(p => p.type === 'Pago');
+
+        if (!soloEsperaPago) {
+          const { data: conv } = await supabase
+            .from('conversations')
+            .select('user_id')
+            .eq('id', conversationId)
+            .single();
+          if (conv?.user_id) {
+            await respondWithAIBaileys(conv.user_id, sock, jid, userMessage, conversationId, node.data?.ai_config_id, node.data?.context);
+          }
+        } else {
+          console.log(`[Baileys Flow] ${node.id} solo espera comprobante — no genera respuesta al llegar`);
         }
 
         // Si tiene caminos de ruteo configurados, se pausa aquí y
         // espera la respuesta del cliente para decidir el camino.
-        if (node.data?.paths?.length > 0) {
+        if (paths.length > 0) {
           await supabase.from('conversations').update({
             current_flow_id: flowId,
             current_node_id: node.id,
@@ -532,7 +544,7 @@ async function classifyResponseWithAI(userResponse, paths, aiConfigId) {
     }
 
     const apiKey = aiConfig?.groq_api_key || process.env.GROQ_API_KEY;
-    const model = aiConfig?.model || 'meta-llama/llama-4-scout-17b-16e-instruct';
+    const model = aiConfig?.model || 'llama-3.3-70b-versatile';
     const options = paths.map((p, i) => `${i}: ${p.label}`).join('\n');
 
     const response = await axios.post(
