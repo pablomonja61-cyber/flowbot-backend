@@ -131,7 +131,7 @@ async function sendDocumentMsg(sock, jid, url, fileName, conversationId) {
 // ════════════════════════════════════════════════════════════
 // RESPONDER CON IA
 // ════════════════════════════════════════════════════════════
-async function respondWithAIBaileys(userId, sock, jid, userMessage, conversationId, aiConfigIdOverride = null) {
+async function respondWithAIBaileys(userId, sock, jid, userMessage, conversationId, aiConfigIdOverride = null, nodePrompt = null) {
   console.log(`[Baileys AI] Intentando responder con IA para user: ${userId}`);
   try {
     const { data: convData } = await supabase
@@ -165,14 +165,16 @@ async function respondWithAIBaileys(userId, sock, jid, userMessage, conversation
       if (c) aiConfig = c;
     }
 
-    if (!aiConfig) {
-      console.log('[Baileys AI] No hay configuración de IA activa para este usuario');
+    // El "Prompt" escrito dentro del propio nodo Agente IA manda siempre
+    // sobre el system_prompt genérico de ai_config, si está presente.
+    if (!aiConfig && !nodePrompt) {
+      console.log('[Baileys AI] No hay configuración de IA ni prompt de nodo para este usuario');
       return;
     }
 
-    console.log(`[Baileys AI] Usando config: ${aiConfig.name || aiConfig.id}`);
+    console.log(`[Baileys AI] Usando ${nodePrompt ? 'prompt del nodo' : `config: ${aiConfig?.name || aiConfig?.id}`}`);
 
-    let systemPrompt = aiConfig.system_prompt ||
+    let systemPrompt = nodePrompt || aiConfig?.system_prompt ||
       'Eres un asistente de ventas amable y profesional. Responde en español de forma concisa.';
 
     if (convData?.active_price) {
@@ -195,8 +197,8 @@ async function respondWithAIBaileys(userId, sock, jid, userMessage, conversation
       { role: 'user', content: userMessage }
     ];
 
-    const apiKey = aiConfig.groq_api_key || process.env.GROQ_API_KEY;
-    const model = aiConfig.model || 'meta-llama/llama-4-scout-17b-16e-instruct';
+    const apiKey = aiConfig?.groq_api_key || process.env.GROQ_API_KEY;
+    const model = aiConfig?.model || 'meta-llama/llama-4-scout-17b-16e-instruct';
 
     const response = await axios.post(
       'https://api.groq.com/openai/v1/chat/completions',
@@ -340,7 +342,7 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
           .eq('id', conversationId)
           .single();
         if (conv?.user_id) {
-          await respondWithAIBaileys(conv.user_id, sock, jid, userMessage, conversationId, node.data?.ai_config_id);
+          await respondWithAIBaileys(conv.user_id, sock, jid, userMessage, conversationId, node.data?.ai_config_id, node.data?.context);
         }
 
         // Si tiene caminos de ruteo configurados, se pausa aquí y
@@ -454,7 +456,7 @@ async function resolveAIPathBaileys(flow, pausedNode, paths, userResponse, sock,
     if (pausedNode.data?.respondIfNoMatch !== false) {
       const { data: conv } = await supabase.from('conversations').select('user_id').eq('id', conversationId).single();
       if (conv?.user_id) {
-        await respondWithAIBaileys(conv.user_id, sock, jid, userResponse, conversationId, pausedNode.data?.ai_config_id);
+        await respondWithAIBaileys(conv.user_id, sock, jid, userResponse, conversationId, pausedNode.data?.ai_config_id, pausedNode.data?.context);
       }
     }
     // Se mantiene pausado en el mismo nodo para que el cliente pueda reintentar
@@ -1123,7 +1125,7 @@ Responde SOLO en formato JSON exacto, sin texto adicional:
       console.log(`[Baileys Payment] Validación falló: ${fallas.join(' | ')}`);
       if (paidPathInfo.node?.data?.respondIfNoMatch !== false) {
         const contextoFalla = `El cliente envió un comprobante de pago, pero la validación falló por: ${fallas.join('; ')}. Explícale amablemente por qué no se pudo validar y qué debe hacer.`;
-        await respondWithAIBaileys(userId, sock, jid, contextoFalla, conversation.id, paidPathInfo.node?.data?.ai_config_id);
+        await respondWithAIBaileys(userId, sock, jid, contextoFalla, conversation.id, paidPathInfo.node?.data?.ai_config_id, paidPathInfo.node?.data?.context);
       } else {
         console.log('[Baileys Payment] respondIfNoMatch desactivado — no se envía respuesta, queda pausado');
       }

@@ -179,7 +179,7 @@ async function isCountryBlocked(userId, contactPhone) {
 // ════════════════════════════════════════════════════════════
 // RESPONDER CON IA (Groq — igual que en QR)
 // ════════════════════════════════════════════════════════════
-async function respondWithAI(userId, connection, to, userMessage, conversationId, aiConfigIdOverride = null) {
+async function respondWithAI(userId, connection, to, userMessage, conversationId, aiConfigIdOverride = null, nodePrompt = null) {
   console.log(`[CloudAPI AI] Intentando responder con IA para user: ${userId}`);
   try {
     const { data: convData } = await supabase
@@ -199,12 +199,12 @@ async function respondWithAI(userId, connection, to, userMessage, conversationId
       const { data: c } = await supabase.from('ai_config').select('*').eq('user_id', userId).eq('is_active', true).single();
       if (c) aiConfig = c;
     }
-    if (!aiConfig) {
-      console.log('[CloudAPI AI] No hay configuración de IA activa para este usuario');
+    if (!aiConfig && !nodePrompt) {
+      console.log('[CloudAPI AI] No hay configuración de IA ni prompt de nodo para este usuario');
       return;
     }
 
-    let systemPrompt = aiConfig.system_prompt ||
+    let systemPrompt = nodePrompt || aiConfig?.system_prompt ||
       'Eres un asistente de ventas amable y profesional. Responde en español de forma concisa.';
     if (convData?.active_price) {
       systemPrompt += `\n\n⚠️ PRECIO ACTUALIZADO: El precio actual es S/${convData.active_price}. Usa SIEMPRE este precio.`;
@@ -226,8 +226,8 @@ async function respondWithAI(userId, connection, to, userMessage, conversationId
       { role: 'user', content: userMessage }
     ];
 
-    const apiKey = aiConfig.groq_api_key || process.env.GROQ_API_KEY;
-    const model = aiConfig.model || 'meta-llama/llama-4-scout-17b-16e-instruct';
+    const apiKey = aiConfig?.groq_api_key || process.env.GROQ_API_KEY;
+    const model = aiConfig?.model || 'meta-llama/llama-4-scout-17b-16e-instruct';
 
     const response = await axios.post(
       'https://api.groq.com/openai/v1/chat/completions',
@@ -386,7 +386,7 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
       // ── Agente IA (con caminos de ruteo, igual que QR) ─────
       case 'ai':
       case 'ai_agent': {
-        await respondWithAI(connection.user_id, connection, to, userMessage, conversationId, node.data?.ai_config_id);
+        await respondWithAI(connection.user_id, connection, to, userMessage, conversationId, node.data?.ai_config_id, node.data?.context);
 
         if (node.data?.paths?.length > 0) {
           await supabase.from('conversations').update({
@@ -712,7 +712,7 @@ Responde SOLO en formato JSON exacto:
       console.log(`[CloudAPI Payment] Validación falló: ${fallas.join(' | ')}`);
       if (paidPathInfo.node?.data?.respondIfNoMatch !== false) {
         const contexto = `El cliente envió un comprobante de pago, pero la validación falló por: ${fallas.join('; ')}. Explícale amablemente por qué no se pudo validar y qué debe hacer.`;
-        await respondWithAI(userId, connection, to, contexto, conversation.id, paidPathInfo.node?.data?.ai_config_id);
+        await respondWithAI(userId, connection, to, contexto, conversation.id, paidPathInfo.node?.data?.ai_config_id, paidPathInfo.node?.data?.context);
       }
       return;
     }
@@ -808,7 +808,7 @@ async function resolveAIPath(flow, pausedNode, paths, userResponse, connection, 
 
   if (!matched) {
     if (pausedNode.data?.respondIfNoMatch !== false) {
-      await respondWithAI(connection.user_id, connection, contactPhone, userResponse, conversationId, pausedNode.data?.ai_config_id);
+      await respondWithAI(connection.user_id, connection, contactPhone, userResponse, conversationId, pausedNode.data?.ai_config_id, pausedNode.data?.context);
     }
     return true;
   }
