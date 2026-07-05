@@ -281,6 +281,59 @@ async function classifyResponseWithAI(userResponse, paths, aiConfigId) {
 // ════════════════════════════════════════════════════════════
 // MOTOR DE FLUJOS — ejecuta nodo por nodo
 // ════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════
+// PROGRAMAR/ENVIAR LOS SEGUIMIENTOS DE UN NODO "Seguimiento"
+// ════════════════════════════════════════════════════════════
+async function scheduleSeguimientos(followupNode, connection, phoneNumberId, accessToken, to, contactPhone, conversationId) {
+  const seguimientos = followupNode.data?.seguimientos || [];
+  for (const seg of seguimientos) {
+    const minutos = seg.tiempo_minutos || 0;
+    const precio = seg.precio || '';
+    if (minutos > 0) {
+      const sendAt = new Date(Date.now() + minutos * 60 * 1000).toISOString();
+      await supabase.from('scheduled_followups').insert({
+        id: uuidv4(),
+        conversation_id: conversationId,
+        connection_id: connection.id,
+        contact_phone: contactPhone,
+        followup_data: seg,
+        status: 'pending',
+        send_at: sendAt,
+        created_at: new Date().toISOString()
+      });
+      console.log(`[Flow] Seguimiento programado para ${minutos} min (conexión: ${connection.id})`);
+    } else {
+      if (precio) {
+        await supabase.from('conversations').update({ active_price: precio }).eq('id', conversationId);
+      }
+      for (const contenido of seg.contenidos || []) {
+        await sendFollowupContentCloud(phoneNumberId, accessToken, to, contenido, conversationId);
+      }
+    }
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// BUSCAR Y PROGRAMAR SEGUIMIENTOS "ADJUNTOS" A UN NODO QUE SE PAUSA
+// (mismo mecanismo que en baileys.js — edge especial 'seguimiento-out')
+// ════════════════════════════════════════════════════════════
+async function scheduleAttachedFollowups(flow, nodeId, connection, phoneNumberId, accessToken, to, contactPhone, conversationId) {
+  const nodeMap = {};
+  (flow.nodes || []).forEach(n => { nodeMap[n.id] = n; });
+
+  const attachedEdges = (flow.edges || []).filter(
+    e => e.target === nodeId && e.sourceHandle === 'seguimiento-out'
+  );
+
+  for (const edge of attachedEdges) {
+    const followupNode = nodeMap[edge.source];
+    if (followupNode && (followupNode.type === 'followup' || followupNode.type === 'delay_followup')) {
+      console.log(`[Flow] Seguimiento adjunto encontrado (${followupNode.id}) para nodo pausado ${nodeId}`);
+      await scheduleSeguimientos(followupNode, connection, phoneNumberId, accessToken, to, contactPhone, conversationId);
+    }
+  }
+}
+
 async function executeFlow(flowId, contactPhone, userMessage, connection, conversationId, startNodeId = null) {
   const { data: flow } = await supabase.from('flows').select('*').eq('id', flowId).single();
   if (!flow || !flow.nodes?.length) return;
@@ -352,6 +405,7 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
             current_flow_id: flowId, current_node_id: node.id, flow_active: true
           }).eq('id', conversationId);
           console.log(`[Flow] ⏸ Pausado en ${node.id} (texto) esperando respuesta`);
+          await scheduleAttachedFollowups(flow, node.id, connection, phoneNumberId, accessToken, to, contactPhone, conversationId);
           shouldPause = true;
         }
         break;
@@ -376,6 +430,7 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
             current_flow_id: flowId, current_node_id: node.id, flow_active: true
           }).eq('id', conversationId);
           console.log(`[Flow] ⏸ Pausado en ${node.id} esperando selección de botón`);
+          await scheduleAttachedFollowups(flow, node.id, connection, phoneNumberId, accessToken, to, contactPhone, conversationId);
           shouldPause = true;
         } else if (text) {
           await sendWhatsAppMessage(phoneNumberId, accessToken, to, text, conversationId);
@@ -393,6 +448,7 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
             current_flow_id: flowId, current_node_id: node.id, flow_active: true
           }).eq('id', conversationId);
           console.log(`[Flow] ⏸ Pausado en ${node.id} (Agente IA) esperando respuesta para elegir camino`);
+          await scheduleAttachedFollowups(flow, node.id, connection, phoneNumberId, accessToken, to, contactPhone, conversationId);
           shouldPause = true;
         }
         break;
@@ -429,32 +485,7 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
       // ── Seguimiento (igual que QR: programa o envía inmediato) ──
       case 'followup':
       case 'delay_followup': {
-        const seguimientos = node.data?.seguimientos || [];
-        for (const seg of seguimientos) {
-          const minutos = seg.tiempo_minutos || 0;
-          const precio = seg.precio || '';
-          if (minutos > 0) {
-            const sendAt = new Date(Date.now() + minutos * 60 * 1000).toISOString();
-            await supabase.from('scheduled_followups').insert({
-              id: uuidv4(),
-              conversation_id: conversationId,
-              connection_id: connection.id,
-              contact_phone: contactPhone,
-              followup_data: seg,
-              status: 'pending',
-              send_at: sendAt,
-              created_at: new Date().toISOString()
-            });
-            console.log(`[Flow] Seguimiento programado para ${minutos} min (conexión: ${connection.id})`);
-          } else {
-            if (precio) {
-              await supabase.from('conversations').update({ active_price: precio }).eq('id', conversationId);
-            }
-            for (const contenido of seg.contenidos || []) {
-              await sendFollowupContentCloud(phoneNumberId, accessToken, to, contenido, conversationId);
-            }
-          }
-        }
+        await scheduleSeguimientos(node, connection, phoneNumberId, accessToken, to, contactPhone, conversationId);
         break;
       }
 
@@ -819,6 +850,7 @@ async function resolveAIPath(flow, pausedNode, paths, userResponse, connection, 
   if (!matchedEdge) return true;
 
   await supabase.from('conversations').update({ current_node_id: null, current_flow_id: null }).eq('id', conversationId);
+  try { await cancelFollowups(conversationId); } catch (e) { console.error('[Flow] Error cancelando seguimientos:', e.message); }
   await executeFlow(flow.id, contactPhone, userResponse, connection, conversationId, matchedEdge.target);
   return true;
 }
@@ -848,6 +880,7 @@ async function continueFlowFromButton(flowId, pausedNodeId, userResponse, connec
     if (!nextEdge) return false;
 
     await supabase.from('conversations').update({ current_node_id: null, current_flow_id: null }).eq('id', conversationId);
+    try { await cancelFollowups(conversationId); } catch (e) { console.error('[Flow] Error cancelando seguimientos:', e.message); }
     await executeFlow(flowId, contactPhone, userResponse, connection, conversationId, nextEdge.target);
     return true;
   }
@@ -876,6 +909,7 @@ async function continueFlowFromButton(flowId, pausedNodeId, userResponse, connec
   if (!matchedEdge) return false;
 
   await supabase.from('conversations').update({ current_node_id: null, current_flow_id: null }).eq('id', conversationId);
+  try { await cancelFollowups(conversationId); } catch (e) { console.error('[Flow] Error cancelando seguimientos:', e.message); }
   await executeFlow(flowId, contactPhone, userResponse, connection, conversationId, matchedEdge.target);
   return true;
 }

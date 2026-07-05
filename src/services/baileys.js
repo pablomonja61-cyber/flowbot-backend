@@ -224,6 +224,67 @@ async function respondWithAIBaileys(userId, sock, jid, userMessage, conversation
 // ════════════════════════════════════════════════════════════
 // MOTOR DE FLUJO PARA BAILEYS
 // ════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════
+// PROGRAMAR/ENVIAR LOS SEGUIMIENTOS DE UN NODO "Seguimiento"
+// (reutilizable: se usa tanto si el nodo va en secuencia normal,
+// como si está "adjunto" a un nodo que se pausa — ver más abajo)
+// ════════════════════════════════════════════════════════════
+async function scheduleSeguimientos(followupNode, sock, jid, contactPhone, conversationId) {
+  const seguimientos = followupNode.data?.seguimientos || [];
+  for (const seg of seguimientos) {
+    const minutos = seg.tiempo_minutos || 0;
+    const precio = seg.precio || '';
+    if (minutos > 0) {
+      const sendAt = new Date(Date.now() + minutos * 60 * 1000).toISOString();
+      const connIdForSock = Object.keys(activeSessions).find(cid => activeSessions[cid] === sock) || null;
+      await supabase.from('scheduled_followups').insert({
+        id: uuidv4(),
+        conversation_id: conversationId,
+        connection_id: connIdForSock,
+        contact_phone: contactPhone,
+        followup_data: seg,
+        status: 'pending',
+        send_at: sendAt,
+        created_at: new Date().toISOString()
+      });
+      console.log(`[Baileys Flow] Seguimiento programado para ${minutos} min (conexión: ${connIdForSock})`);
+    } else {
+      if (precio) {
+        await supabase.from('conversations').update({ active_price: precio }).eq('id', conversationId);
+      }
+      for (const contenido of seg.contenidos || []) {
+        await sendFollowupContent(sock, jid, contenido, conversationId);
+      }
+    }
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// BUSCAR Y PROGRAMAR SEGUIMIENTOS "ADJUNTOS" A UN NODO QUE SE PAUSA
+// En el editor, el botón "+ Seguimiento" adjunta un nodo Seguimiento
+// a un nodo (ej. Agente IA, Botones) mediante un edge especial:
+// source = nodo Seguimiento, sourceHandle = 'seguimiento-out',
+// target = el nodo al que está adjunto. Esto NO es un paso
+// secuencial del flujo — es "si este nodo se queda esperando y el
+// cliente no responde, dispara este recordatorio".
+// ════════════════════════════════════════════════════════════
+async function scheduleAttachedFollowups(flow, nodeId, sock, jid, contactPhone, conversationId) {
+  const nodeMap = {};
+  (flow.nodes || []).forEach(n => { nodeMap[n.id] = n; });
+
+  const attachedEdges = (flow.edges || []).filter(
+    e => e.target === nodeId && e.sourceHandle === 'seguimiento-out'
+  );
+
+  for (const edge of attachedEdges) {
+    const followupNode = nodeMap[edge.source];
+    if (followupNode && (followupNode.type === 'followup' || followupNode.type === 'delay_followup')) {
+      console.log(`[Baileys Flow] Seguimiento adjunto encontrado (${followupNode.id}) para nodo pausado ${nodeId}`);
+      await scheduleSeguimientos(followupNode, sock, jid, contactPhone, conversationId);
+    }
+  }
+}
+
 async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, conversationId, startNodeId = null) {
   const { data: flow } = await supabase.from('flows').select('*').eq('id', flowId).single();
   if (!flow?.nodes?.length) {
@@ -298,6 +359,7 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
             flow_active: true
           }).eq('id', conversationId);
           console.log(`[Baileys Flow] ⏸ Pausado en ${node.id} (texto) esperando respuesta`);
+          await scheduleAttachedFollowups(flow, node.id, sock, jid, contactPhone, conversationId);
           shouldPause = true;
         }
         break;
@@ -329,6 +391,7 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
           }).eq('id', conversationId);
 
           console.log(`[Baileys Flow] ⏸ Pausado en ${node.id} esperando selección de botón`);
+          await scheduleAttachedFollowups(flow, node.id, sock, jid, contactPhone, conversationId);
           shouldPause = true;
         }
         break;
@@ -354,6 +417,7 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
             flow_active: true
           }).eq('id', conversationId);
           console.log(`[Baileys Flow] ⏸ Pausado en ${node.id} (Agente IA) esperando respuesta para elegir camino`);
+          await scheduleAttachedFollowups(flow, node.id, sock, jid, contactPhone, conversationId);
           shouldPause = true;
         }
         break;
@@ -368,33 +432,7 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
 
       case 'followup':
       case 'delay_followup': {
-        const seguimientos = node.data?.seguimientos || [];
-        for (const seg of seguimientos) {
-          const minutos = seg.tiempo_minutos || 0;
-          const precio = seg.precio || '';
-          if (minutos > 0) {
-            const sendAt = new Date(Date.now() + minutos * 60 * 1000).toISOString();
-            const connIdForSock = Object.keys(activeSessions).find(cid => activeSessions[cid] === sock) || null;
-            await supabase.from('scheduled_followups').insert({
-              id: uuidv4(),
-              conversation_id: conversationId,
-              connection_id: connIdForSock,
-              contact_phone: contactPhone,
-              followup_data: seg,
-              status: 'pending',
-              send_at: sendAt,
-              created_at: new Date().toISOString()
-            });
-            console.log(`[Baileys Flow] Seguimiento programado para ${minutos} min (conexión: ${connIdForSock})`);
-          } else {
-            if (precio) {
-              await supabase.from('conversations').update({ active_price: precio }).eq('id', conversationId);
-            }
-            for (const contenido of seg.contenidos || []) {
-              await sendFollowupContent(sock, jid, contenido, conversationId);
-            }
-          }
-        }
+        await scheduleSeguimientos(node, sock, jid, contactPhone, conversationId);
         break;
       }
 
@@ -476,6 +514,8 @@ async function resolveAIPathBaileys(flow, pausedNode, paths, userResponse, sock,
     current_node_id: null,
     current_flow_id: null
   }).eq('id', conversationId);
+
+  try { await cancelFollowups(conversationId); } catch (e) { console.error('[Baileys Flow] Error cancelando seguimientos:', e.message); }
 
   console.log(`[Baileys Flow] ▶ Camino elegido: "${paths[matchedIndex].label}" → ${matchedEdge.target}`);
   await executeFlowBaileys(flowId, sock, jid, contactPhone, userResponse, conversationId, matchedEdge.target);
@@ -597,6 +637,8 @@ async function continueFlowFromButtonBaileys(flowId, pausedNodeId, userResponse,
       current_flow_id: null
     }).eq('id', conversationId);
 
+    try { await cancelFollowups(conversationId); } catch (e) { console.error('[Baileys Flow] Error cancelando seguimientos:', e.message); }
+
     console.log(`[Baileys Flow] ▶ Continuando (texto) → ${nextEdge.target}`);
     await executeFlowBaileys(flowId, sock, jid, contactPhone, userResponse, conversationId, nextEdge.target);
     return true;
@@ -647,6 +689,8 @@ async function continueFlowFromButtonBaileys(flowId, pausedNodeId, userResponse,
     current_node_id: null,
     current_flow_id: null
   }).eq('id', conversationId);
+
+  try { await cancelFollowups(conversationId); } catch (e) { console.error('[Baileys Flow] Error cancelando seguimientos:', e.message); }
 
   console.log(`[Baileys Flow] ▶ Continuando: ${matchedHandle} → ${matchedEdge.target}`);
   await executeFlowBaileys(flowId, sock, jid, contactPhone, userResponse, conversationId, matchedEdge.target);
@@ -1306,6 +1350,8 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
           current_flow_id: null,
           current_node_id: null
         }).eq('id', conversation.id);
+
+        try { await cancelFollowups(conversation.id); } catch (e) { console.error('[Baileys] Error cancelando seguimientos:', e.message); }
 
         const { data: newFlow } = await supabase
           .from('flows')

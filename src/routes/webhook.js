@@ -3,7 +3,7 @@ const router = express.Router();
 const supabase = require('../models/supabase');
 const {
   executeFlow, saveMessage, isCountryBlocked,
-  checkOtherFlowTrigger, continueFlowFromButton, processIncomingImageCloud, respondWithAI
+  checkOtherFlowTrigger, continueFlowFromButton, processIncomingImageCloud, respondWithAI, cancelFollowups
 } = require('../services/flowEngine');
 const { v4: uuidv4 } = require('uuid');
 
@@ -187,6 +187,7 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage) 
       if (otherTrigger) {
         console.log(`[Webhook] "Activar otros flujos" activo — trigger "${otherTrigger.keyword}" coincide`);
         await supabase.from('conversations').update({ current_flow_id: null, current_node_id: null }).eq('id', conversation.id);
+        try { await cancelFollowups(conversation.id); } catch (e) { console.error('[Webhook] Error cancelando seguimientos:', e.message); }
 
         const { data: newFlow } = await supabase.from('flows').select('nodes').eq('id', otherTrigger.flow_id).single();
         const startNode = (newFlow?.nodes || []).find(n => n.type === 'start');
