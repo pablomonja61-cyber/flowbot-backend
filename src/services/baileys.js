@@ -9,6 +9,7 @@ const fs = require('fs');
 const { cancelFollowups } = require('../services/flowEngine');
 
 const activeSessions = {};
+const connectingLocks = {};
 
 // ════════════════════════════════════════════════════════════
 // COLA DE PROCESAMIENTO POR CONTACTO
@@ -257,7 +258,7 @@ async function scheduleSeguimientos(followupNode, sock, jid, contactPhone, conve
     if (minutos > 0) {
       const sendAt = new Date(Date.now() + minutos * 60 * 1000).toISOString();
       const connIdForSock = Object.keys(activeSessions).find(cid => activeSessions[cid] === sock) || null;
-      await supabase.from('scheduled_followups').insert({
+      const { error: insertError } = await supabase.from('scheduled_followups').insert({
         id: uuidv4(),
         conversation_id: conversationId,
         connection_id: connIdForSock,
@@ -267,7 +268,11 @@ async function scheduleSeguimientos(followupNode, sock, jid, contactPhone, conve
         send_at: sendAt,
         created_at: new Date().toISOString()
       });
-      console.log(`[Baileys Flow] Seguimiento programado para ${minutos} min (conexión: ${connIdForSock})`);
+      if (insertError) {
+        console.error(`[Baileys Flow] ❌ ERROR guardando seguimiento en la base de datos:`, insertError.message);
+      } else {
+        console.log(`[Baileys Flow] Seguimiento programado para ${minutos} min (conexión: ${connIdForSock})`);
+      }
     } else {
       if (precio) {
         await supabase.from('conversations').update({ active_price: precio }).eq('id', conversationId);
@@ -819,7 +824,7 @@ async function processScheduledFollowups() {
         }
 
         await supabase.from('scheduled_followups')
-          .update({ status: 'sent', sent_at: new Date().toISOString() })
+          .update({ status: 'sent' })
           .eq('id', item.id);
 
         console.log(`[Followups] ✅ Seguimiento ${item.id} enviado a ${item.contact_phone}`);
@@ -1491,11 +1496,24 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
 // SESIÓN QR
 // ════════════════════════════════════════════════════════════
 async function startQRSession(connectionId, userId) {
+  // Evita que dos llamadas casi simultáneas (ej. doble clic en
+  // "Conectar", o un reintento automático que se cruza con uno manual)
+  // terminen creando DOS sockets activos para la misma conexión — eso
+  // causaría que cada mensaje entrante se procese dos veces.
+  if (connectingLocks[connectionId]) {
+    console.log(`[Baileys] Ya hay una conexión en curso para ${connectionId}, se omite esta llamada duplicada`);
+    return;
+  }
+  connectingLocks[connectionId] = true;
+
   try {
     console.log(`[Baileys] Iniciando sesión: ${connectionId}`);
 
     if (activeSessions[connectionId]) {
-      try { activeSessions[connectionId].end(); } catch (e) {}
+      try {
+        activeSessions[connectionId].ev.removeAllListeners();
+        activeSessions[connectionId].end();
+      } catch (e) {}
       delete activeSessions[connectionId];
     }
 
@@ -1533,6 +1551,7 @@ async function startQRSession(connectionId, userId) {
           phone_number: phoneNumber,
           is_active: true
         }).eq('id', connectionId);
+        delete connectingLocks[connectionId];
       }
 
       if (connection === 'close') {
@@ -1546,6 +1565,7 @@ async function startQRSession(connectionId, userId) {
         }).eq('id', connectionId);
 
         delete activeSessions[connectionId];
+        delete connectingLocks[connectionId];
 
         if (shouldReconnect) {
           setTimeout(() => startQRSession(connectionId, userId), 5000);
@@ -1618,6 +1638,7 @@ async function startQRSession(connectionId, userId) {
     return { success: true };
   } catch (err) {
     console.error('[Baileys] Error iniciando sesión:', err.message);
+    delete connectingLocks[connectionId];
     return { success: false, error: err.message };
   }
 }
@@ -1629,9 +1650,13 @@ async function getQRCode(connectionId) {
 
 async function closeQRSession(connectionId) {
   if (activeSessions[connectionId]) {
-    try { await activeSessions[connectionId].logout(); } catch (e) {}
+    try {
+      activeSessions[connectionId].ev.removeAllListeners();
+      await activeSessions[connectionId].logout();
+    } catch (e) {}
     delete activeSessions[connectionId];
   }
+  delete connectingLocks[connectionId];
   await supabase.from('connections').update({ qr_status: 'disconnected', qr_code: null, is_active: false }).eq('id', connectionId);
 }
 
