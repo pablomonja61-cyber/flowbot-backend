@@ -296,7 +296,7 @@ async function scheduleSeguimientos(followupNode, connection, phoneNumberId, acc
         conversation_id: conversationId,
         connection_id: connection.id,
         contact_phone: contactPhone,
-        followup_data: seg,
+        seg_data: seg,
         status: 'pending',
         send_at: sendAt,
         created_at: new Date().toISOString()

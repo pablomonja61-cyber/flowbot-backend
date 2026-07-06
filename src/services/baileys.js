@@ -263,7 +263,7 @@ async function scheduleSeguimientos(followupNode, sock, jid, contactPhone, conve
         conversation_id: conversationId,
         connection_id: connIdForSock,
         contact_phone: contactPhone,
-        followup_data: seg,
+        seg_data: seg,
         status: 'pending',
         send_at: sendAt,
         created_at: new Date().toISOString()
@@ -813,7 +813,7 @@ async function processScheduledFollowups() {
 
       try {
         const jid = `${item.contact_phone}@s.whatsapp.net`;
-        const seg = item.followup_data || {};
+        const seg = item.seg_data || {};
 
         if (seg.precio) {
           await supabase.from('conversations').update({ active_price: seg.precio }).eq('id', item.conversation_id);
