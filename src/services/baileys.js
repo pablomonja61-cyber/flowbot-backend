@@ -425,14 +425,14 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
       case 'ai':
       case 'ai_agent': {
         const paths = node.data?.paths || [];
-        // Si TODOS los caminos son tipo "Pago", este nodo solo existe
-        // para esperar en silencio la foto del comprobante — no debe
-        // generar un mensaje de la IA al llegar (evita preguntas
-        // repetidas/confusas justo después de que el cliente ya eligió
-        // método de pago en el nodo anterior).
-        const soloEsperaPago = paths.length > 0 && paths.every(p => p.type === 'Pago');
+        // Si el nodo tiene caminos configurados (Texto o Pago), su
+        // único trabajo es esperar en silencio y analizar la respuesta
+        // del cliente cuando llegue — el mensaje/pregunta ya lo dijo el
+        // nodo anterior (Contenido, API, etc). No debe generar nada al
+        // llegar, sin importar el tipo de camino.
+        const tieneCaminos = paths.length > 0;
 
-        if (!soloEsperaPago) {
+        if (!tieneCaminos) {
           const { data: conv } = await supabase
             .from('conversations')
             .select('user_id')
@@ -442,12 +442,12 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
             await respondWithAIBaileys(conv.user_id, sock, jid, userMessage, conversationId, node.data?.ai_config_id, node.data?.context);
           }
         } else {
-          console.log(`[Baileys Flow] ${node.id} solo espera comprobante — no genera respuesta al llegar`);
+          console.log(`[Baileys Flow] ${node.id} tiene caminos — se pausa en silencio, sin generar mensaje al llegar`);
         }
 
         // Si tiene caminos de ruteo configurados, se pausa aquí y
         // espera la respuesta del cliente para decidir el camino.
-        if (paths.length > 0) {
+        if (tieneCaminos) {
           await supabase.from('conversations').update({
             current_flow_id: flowId,
             current_node_id: node.id,

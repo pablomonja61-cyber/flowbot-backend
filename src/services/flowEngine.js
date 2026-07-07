@@ -442,15 +442,18 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
       case 'ai':
       case 'ai_agent': {
         const paths = node.data?.paths || [];
-        const soloEsperaPago = paths.length > 0 && paths.every(p => p.type === 'Pago');
+        // Si tiene caminos configurados, solo espera en silencio y
+        // analiza la respuesta del cliente cuando llegue — el mensaje
+        // ya lo dijo el nodo anterior.
+        const tieneCaminos = paths.length > 0;
 
-        if (!soloEsperaPago) {
+        if (!tieneCaminos) {
           await respondWithAI(connection.user_id, connection, to, userMessage, conversationId, node.data?.ai_config_id, node.data?.context);
         } else {
-          console.log(`[Flow] ${node.id} solo espera comprobante — no genera respuesta al llegar`);
+          console.log(`[Flow] ${node.id} tiene caminos — se pausa en silencio, sin generar mensaje al llegar`);
         }
 
-        if (paths.length > 0) {
+        if (tieneCaminos) {
           await supabase.from('conversations').update({
             current_flow_id: flowId, current_node_id: node.id, flow_active: true
           }).eq('id', conversationId);
