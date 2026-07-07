@@ -769,7 +769,15 @@ Responde SOLO en formato JSON exacto:
     }
 
     const matchedHandle = `path-${selected.index}`;
-    const matchedEdge = (paidPathInfo.flow.edges || []).find(e => e.source === paidPathInfo.node.id && e.sourceHandle === matchedHandle);
+    let matchedEdge = (paidPathInfo.flow.edges || []).find(e => e.source === paidPathInfo.node.id && e.sourceHandle === matchedHandle);
+
+    if (!matchedEdge && (paidPathInfo.node.data?.paths || []).length === 1) {
+      const edgesFromNode = (paidPathInfo.flow.edges || []).filter(e => e.source === paidPathInfo.node.id);
+      if (edgesFromNode.length === 1) {
+        console.log(`[CloudAPI Payment] Usando respaldo: nodo con un solo camino, edge sin sourceHandle etiquetado`);
+        matchedEdge = edgesFromNode[0];
+      }
+    }
 
     await supabase.from('conversations').update({
       is_sale: true, sale_amount: monto, sale_at: new Date().toISOString(),
@@ -856,7 +864,16 @@ async function resolveAIPath(flow, pausedNode, paths, userResponse, connection, 
 
   const matchedIndex = matched.originalIndex;
   const matchedHandle = `path-${matchedIndex}`;
-  const matchedEdge = (flow.edges || []).find(e => e.source === pausedNodeId && e.sourceHandle === matchedHandle);
+  let matchedEdge = (flow.edges || []).find(e => e.source === pausedNodeId && e.sourceHandle === matchedHandle);
+
+  if (!matchedEdge && textPaths.length === 1) {
+    const edgesFromNode = (flow.edges || []).filter(e => e.source === pausedNodeId);
+    if (edgesFromNode.length === 1) {
+      console.log(`[Flow] Usando respaldo: nodo con un solo camino, edge sin sourceHandle etiquetado`);
+      matchedEdge = edgesFromNode[0];
+    }
+  }
+
   if (!matchedEdge) {
     console.log(`[Flow] ⚠️ Camino "${matchedHandle}" (${matched.label}) no tiene edge conectado en el editor — revisa esa conexión en el flujo. Respondiendo con IA para no dejar al cliente sin respuesta.`);
     await respondWithAI(connection.user_id, connection, contactPhone, userResponse, conversationId, pausedNode.data?.ai_config_id, pausedNode.data?.context);
@@ -919,7 +936,15 @@ async function continueFlowFromButton(flowId, pausedNodeId, userResponse, connec
   if (matchedIndex === -1) return false;
 
   const matchedHandle = `btn_${matchedIndex}`;
-  const matchedEdge = (flow.edges || []).find(e => e.source === pausedNodeId && e.sourceHandle === matchedHandle);
+  let matchedEdge = (flow.edges || []).find(e => e.source === pausedNodeId && e.sourceHandle === matchedHandle);
+
+  if (!matchedEdge && buttons.length === 1) {
+    const edgesFromNode = (flow.edges || []).filter(e => e.source === pausedNodeId);
+    if (edgesFromNode.length === 1) {
+      console.log(`[Flow] Usando respaldo: nodo con un solo botón, edge sin sourceHandle etiquetado`);
+      matchedEdge = edgesFromNode[0];
+    }
+  }
   if (!matchedEdge) {
     console.log(`[Flow] ⚠️ Botón "${buttons[matchedIndex]}" no tiene edge conectado en el editor — revisa esa conexión en el flujo. Respondiendo con IA para no dejar al cliente sin respuesta.`);
     await respondWithAI(connection.user_id, connection, contactPhone, userResponse, conversationId, pausedNode.data?.ai_config_id, pausedNode.data?.context);

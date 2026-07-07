@@ -540,7 +540,19 @@ async function resolveAIPathBaileys(flow, pausedNode, paths, userResponse, sock,
 
   const matchedIndex = matched.originalIndex;
   const matchedHandle = `path-${matchedIndex}`;
-  const matchedEdge = (flow.edges || []).find(e => e.source === pausedNodeId && e.sourceHandle === matchedHandle);
+  let matchedEdge = (flow.edges || []).find(e => e.source === pausedNodeId && e.sourceHandle === matchedHandle);
+
+  // Respaldo: si el nodo tiene un solo camino y el editor no le puso
+  // el sourceHandle esperado (bug conocido: nodos de un solo camino
+  // guardan el edge con sourceHandle en null), usa el único edge que
+  // sale del nodo — no hay ambigüedad posible con un solo camino.
+  if (!matchedEdge && textPaths.length === 1) {
+    const edgesFromNode = (flow.edges || []).filter(e => e.source === pausedNodeId);
+    if (edgesFromNode.length === 1) {
+      console.log(`[Baileys Flow] Usando respaldo: nodo con un solo camino, edge sin sourceHandle etiquetado`);
+      matchedEdge = edgesFromNode[0];
+    }
+  }
 
   if (!matchedEdge) {
     console.log(`[Baileys Flow] ⚠️ Camino "${matchedHandle}" (${paths[matchedIndex]?.label}) no tiene edge conectado en el editor — revisa esa conexión en el flujo. Respondiendo con IA para no dejar al cliente sin respuesta.`);
@@ -717,9 +729,17 @@ async function continueFlowFromButtonBaileys(flowId, pausedNodeId, userResponse,
     return false;
   }
 
-  const matchedEdge = (flow.edges || []).find(e =>
+  let matchedEdge = (flow.edges || []).find(e =>
     e.source === pausedNodeId && e.sourceHandle === matchedHandle
   );
+
+  if (!matchedEdge && buttons.length === 1) {
+    const edgesFromNode = (flow.edges || []).filter(e => e.source === pausedNodeId);
+    if (edgesFromNode.length === 1) {
+      console.log(`[Baileys Flow] Usando respaldo: nodo con un solo botón, edge sin sourceHandle etiquetado`);
+      matchedEdge = edgesFromNode[0];
+    }
+  }
 
   if (!matchedEdge) {
     console.log(`[Baileys Flow] No hay edge para ${matchedHandle}`);
@@ -1233,9 +1253,19 @@ Responde SOLO en formato JSON exacto, sin texto adicional:
     }
 
     const matchedHandle = `path-${selected.index}`;
-    const matchedEdge = (paidPathInfo.flow.edges || []).find(
+    let matchedEdge = (paidPathInfo.flow.edges || []).find(
       e => e.source === paidPathInfo.node.id && e.sourceHandle === matchedHandle
     );
+
+    // Mismo respaldo: nodo con un solo camino total (no solo de pago),
+    // edge guardado sin sourceHandle etiquetado.
+    if (!matchedEdge && (paidPathInfo.node.data?.paths || []).length === 1) {
+      const edgesFromNode = (paidPathInfo.flow.edges || []).filter(e => e.source === paidPathInfo.node.id);
+      if (edgesFromNode.length === 1) {
+        console.log(`[Baileys Payment] Usando respaldo: nodo con un solo camino, edge sin sourceHandle etiquetado`);
+        matchedEdge = edgesFromNode[0];
+      }
+    }
 
     await supabase.from('conversations').update({
       is_sale: true,
