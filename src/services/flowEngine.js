@@ -857,7 +857,11 @@ async function resolveAIPath(flow, pausedNode, paths, userResponse, connection, 
   const matchedIndex = matched.originalIndex;
   const matchedHandle = `path-${matchedIndex}`;
   const matchedEdge = (flow.edges || []).find(e => e.source === pausedNodeId && e.sourceHandle === matchedHandle);
-  if (!matchedEdge) return true;
+  if (!matchedEdge) {
+    console.log(`[Flow] ⚠️ Camino "${matchedHandle}" (${matched.label}) no tiene edge conectado en el editor — revisa esa conexión en el flujo. Respondiendo con IA para no dejar al cliente sin respuesta.`);
+    await respondWithAI(connection.user_id, connection, contactPhone, userResponse, conversationId, pausedNode.data?.ai_config_id, pausedNode.data?.context);
+    return true;
+  }
 
   await supabase.from('conversations').update({ current_node_id: null, current_flow_id: null }).eq('id', conversationId);
   try { await cancelFollowups(conversationId); } catch (e) { console.error('[Flow] Error cancelando seguimientos:', e.message); }
@@ -916,7 +920,11 @@ async function continueFlowFromButton(flowId, pausedNodeId, userResponse, connec
 
   const matchedHandle = `btn_${matchedIndex}`;
   const matchedEdge = (flow.edges || []).find(e => e.source === pausedNodeId && e.sourceHandle === matchedHandle);
-  if (!matchedEdge) return false;
+  if (!matchedEdge) {
+    console.log(`[Flow] ⚠️ Botón "${buttons[matchedIndex]}" no tiene edge conectado en el editor — revisa esa conexión en el flujo. Respondiendo con IA para no dejar al cliente sin respuesta.`);
+    await respondWithAI(connection.user_id, connection, contactPhone, userResponse, conversationId, pausedNode.data?.ai_config_id, pausedNode.data?.context);
+    return true;
+  }
 
   await supabase.from('conversations').update({ current_node_id: null, current_flow_id: null }).eq('id', conversationId);
   try { await cancelFollowups(conversationId); } catch (e) { console.error('[Flow] Error cancelando seguimientos:', e.message); }

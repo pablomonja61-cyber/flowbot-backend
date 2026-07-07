@@ -543,7 +543,11 @@ async function resolveAIPathBaileys(flow, pausedNode, paths, userResponse, sock,
   const matchedEdge = (flow.edges || []).find(e => e.source === pausedNodeId && e.sourceHandle === matchedHandle);
 
   if (!matchedEdge) {
-    console.log(`[Baileys Flow] Camino "${matchedHandle}" (${paths[matchedIndex]?.label}) no tiene edge conectado en el editor`);
+    console.log(`[Baileys Flow] ⚠️ Camino "${matchedHandle}" (${paths[matchedIndex]?.label}) no tiene edge conectado en el editor — revisa esa conexión en el flujo. Respondiendo con IA para no dejar al cliente sin respuesta.`);
+    const { data: conv } = await supabase.from('conversations').select('user_id').eq('id', conversationId).single();
+    if (conv?.user_id) {
+      await respondWithAIBaileys(conv.user_id, sock, jid, userResponse, conversationId, pausedNode.data?.ai_config_id, pausedNode.data?.context);
+    }
     return true;
   }
 
@@ -1253,7 +1257,7 @@ Responde SOLO en formato JSON exacto, sin texto adicional:
         sock, jid, contactPhone, '', conversation.id, matchedEdge.target
       );
     } else {
-      console.log(`[Baileys Payment] Camino "${matchedHandle}" no tiene edge conectado en el editor`);
+      console.log(`[Baileys Payment] ⚠️ Camino "${matchedHandle}" no tiene edge conectado en el editor — revisa esa conexión en el flujo (el cliente ya recibió el mensaje de confirmación, pero no el contenido de acceso).`);
     }
 
     console.log(`[Baileys Payment] Conversación ${conversation.id} marcada como venta vía flujo.`);
