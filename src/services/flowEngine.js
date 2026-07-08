@@ -8,6 +8,29 @@ const GRAPH_VERSION = 'v19.0';
 // ENVÍO DE MENSAJES (WhatsApp Cloud API)
 // ════════════════════════════════════════════════════════════
 
+// ── Mostrar "escribiendo..." + marcar como leído (Cloud API) ──
+// Meta permite mostrar el indicador de escritura junto con marcar el
+// mensaje como leído. Dura hasta 25 segundos o hasta que se envíe la
+// respuesta real, lo que ocurra primero.
+async function showTypingCloud(phoneNumberId, accessToken, messageId) {
+  if (!messageId) return;
+  try {
+    await axios.post(
+      `https://graph.facebook.com/${GRAPH_VERSION}/${phoneNumberId}/messages`,
+      {
+        messaging_product: 'whatsapp',
+        status: 'read',
+        message_id: messageId,
+        typing_indicator: { type: 'text' }
+      },
+      { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
+    );
+  } catch (err) {
+    // No es crítico si falla (ej. cuenta sin este feature habilitado aún)
+    console.log('[CloudAPI] No se pudo mostrar indicador de escritura:', err.response?.data?.error?.message || err.message);
+  }
+}
+
 async function sendWhatsAppMessage(phoneNumberId, accessToken, to, message, conversationId) {
   if (!message || !message.trim()) return;
   try {
@@ -1015,5 +1038,6 @@ module.exports = {
   checkOtherFlowTrigger,
   continueFlowFromButton,
   processIncomingImageCloud,
-  respondWithAI
+  respondWithAI,
+  showTypingCloud
 };

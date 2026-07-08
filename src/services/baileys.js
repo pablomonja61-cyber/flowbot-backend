@@ -78,9 +78,21 @@ async function saveMsg(conversationId, content, direction, msgType = 'text', med
 }
 
 // ── Enviar texto ─────────────────────────────────────────────
+// ── Mostrar "escribiendo..." antes de enviar (efecto natural) ──
+async function showTyping(sock, jid, textLength = 0) {
+  try {
+    await sock.sendPresenceUpdate('composing', jid);
+    const delay = Math.min(300 + textLength * 8, 1800);
+    await sleep(delay);
+  } catch (e) {
+    // No es crítico si falla — se ignora, el mensaje se manda igual.
+  }
+}
+
 async function sendText(sock, jid, text, conversationId) {
   if (!text || !text.trim()) return;
   try {
+    await showTyping(sock, jid, text.length);
     await sock.sendMessage(jid, { text });
     await saveMsg(conversationId, text, 'outbound', 'text');
     console.log(`[Baileys] ✓ Texto: ${text.slice(0, 60)}`);
@@ -93,6 +105,7 @@ async function sendText(sock, jid, text, conversationId) {
 async function sendImage(sock, jid, url, caption, conversationId) {
   if (!url || url.startsWith('data:')) return;
   try {
+    await showTyping(sock, jid, 200);
     await sock.sendMessage(jid, { image: { url }, caption: caption || '' });
     await saveMsg(conversationId, caption || '[Imagen]', 'outbound', 'image', url);
     console.log(`[Baileys] ✓ Imagen enviada`);
@@ -106,6 +119,7 @@ async function sendImage(sock, jid, url, caption, conversationId) {
 async function sendVideoMsg(sock, jid, url, caption, conversationId) {
   if (!url || url.startsWith('data:')) return;
   try {
+    await showTyping(sock, jid, 200);
     await sock.sendMessage(jid, { video: { url }, caption: caption || '' });
     await saveMsg(conversationId, caption || '[Video]', 'outbound', 'video', url);
     console.log(`[Baileys] ✓ Video enviado`);
@@ -118,6 +132,7 @@ async function sendVideoMsg(sock, jid, url, caption, conversationId) {
 async function sendAudioMsg(sock, jid, url, conversationId, asVoiceNote = false) {
   if (!url || url.startsWith('data:')) return;
   try {
+    await showTyping(sock, jid, 200);
     await sock.sendMessage(jid, { audio: { url }, mimetype: 'audio/mp4', ptt: !!asVoiceNote });
     await saveMsg(conversationId, '[Audio]', 'outbound', 'audio', url);
     console.log(`[Baileys] ✓ Audio enviado`);
@@ -141,6 +156,7 @@ async function sendDocumentMsg(sock, jid, url, fileName, conversationId) {
       zip: 'application/zip'
     };
     const mimetype = mimeMap[ext] || 'application/octet-stream';
+    await showTyping(sock, jid, 200);
     await sock.sendMessage(jid, { document: { url }, mimetype, fileName: nombre });
     await saveMsg(conversationId, `[Documento: ${nombre}]`, 'outbound', 'document', url);
     console.log(`[Baileys] ✓ Documento enviado: ${nombre}`);

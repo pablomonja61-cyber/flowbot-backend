@@ -3,7 +3,7 @@ const router = express.Router();
 const supabase = require('../models/supabase');
 const {
   executeFlow, saveMessage, isCountryBlocked,
-  checkOtherFlowTrigger, continueFlowFromButton, processIncomingImageCloud, respondWithAI, cancelFollowups
+  checkOtherFlowTrigger, continueFlowFromButton, processIncomingImageCloud, respondWithAI, cancelFollowups, showTypingCloud
 } = require('../services/flowEngine');
 const { v4: uuidv4 } = require('uuid');
 
@@ -79,7 +79,7 @@ router.post('/whatsapp', async (req, res) => {
 
           console.log(`[Webhook] Mensaje de ${contactPhone}: "${userMessage}"`);
 
-          enqueueForContact(queueKey, () => processIncomingMessage(phoneNumberId, contactPhone, userMessage)).catch(err => {
+          enqueueForContact(queueKey, () => processIncomingMessage(phoneNumberId, contactPhone, userMessage, msg.id)).catch(err => {
             console.error('[Webhook] Error procesando mensaje:', err.message);
           });
         }
@@ -139,7 +139,7 @@ async function processIncomingImageMessage(phoneNumberId, contactPhone, msg) {
 // ════════════════════════════════════════════════════════════
 // Lógica principal: recibe msg → busca trigger → ejecuta flujo
 // ════════════════════════════════════════════════════════════
-async function processIncomingMessage(phoneNumberId, contactPhone, userMessage) {
+async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, messageId) {
   // 1. Buscar la conexión por phone_number_id
   const { data: connection } = await supabase
     .from('connections')
@@ -154,6 +154,11 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage) 
   }
 
   const userId = connection.user_id;
+
+  // Mostrar "escribiendo..." de inmediato, apenas se confirma la
+  // conexión — así el cliente ve la reacción del bot al instante,
+  // mientras se procesa el resto en segundo plano.
+  showTypingCloud(phoneNumberId, connection.access_token, messageId).catch(() => {});
 
   // 1.5 Bloqueo por país — ni se guarda ni activa flujos
   if (await isCountryBlocked(userId, contactPhone)) {
@@ -281,7 +286,10 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage) 
       .eq('trigger_id', matchedTrigger.id)
       .eq('contact_phone', contactPhone);
     if (count > 0) {
-      console.log(`[Webhook] Trigger no repetible ya ejecutado para ${contactPhone}`);
+      // Ya se ejecutó antes → no reinicia el flujo desde cero, solo
+      // continúa la conversación con la IA (igual que en QR).
+      console.log(`[Webhook] Trigger "${matchedTrigger.keyword}" no repetible y ya ejecutado — usando IA fallback`);
+      await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
       return;
     }
   }
