@@ -40,42 +40,21 @@ router.post('/:id/messages', async (req, res, next) => {
     if (!conv) return res.status(404).json({ error: 'Conversación no encontrada' });
 
     // Enviar por WhatsApp si es outbound
-    // IMPORTANTE: antes esto siempre intentaba mandar por la API oficial
-    // de Meta sin importar el tipo de conexión. Si la conexión era QR,
-    // la petición a Meta fallaba, el error se tragaba en el catch, y el
-    // mensaje se guardaba igual en la base de datos como si se hubiera
-    // enviado — por eso se veía en el Chat en Vivo pero nunca llegaba
-    // de verdad al WhatsApp del cliente. Ahora se revisa el tipo real
-    // de conexión, y si el envío falla, se corta y se avisa el error
-    // en vez de guardar el mensaje como si hubiese llegado.
     if (direction === 'outbound' && conv.connections) {
-      const connType = conv.connections.connection_type;
-
-      if (connType === 'qr') {
-        try {
-          const { sendManualText } = require('../services/baileys');
-          await sendManualText(conv.connections.id, conv.contact_phone, content);
-        } catch (e) {
-          console.error('[Manual send QR error]', e.message);
-          return res.status(502).json({ error: 'No se pudo enviar el mensaje por WhatsApp QR: ' + e.message });
-        }
-      } else {
-        const axios = require('axios');
-        try {
-          await axios.post(
-            `https://graph.facebook.com/v19.0/${conv.connections.phone_number_id}/messages`,
-            {
-              messaging_product: 'whatsapp',
-              to: conv.contact_phone,
-              type: 'text',
-              text: { body: content }
-            },
-            { headers: { Authorization: `Bearer ${conv.connections.access_token}`, 'Content-Type': 'application/json' } }
-          );
-        } catch (e) {
-          console.error('[Manual send API error]', e.response?.data || e.message);
-          return res.status(502).json({ error: 'No se pudo enviar el mensaje por WhatsApp API: ' + (e.response?.data?.error?.message || e.message) });
-        }
+      const axios = require('axios');
+      try {
+        await axios.post(
+          `https://graph.facebook.com/v19.0/${conv.connections.phone_number_id}/messages`,
+          {
+            messaging_product: 'whatsapp',
+            to: conv.contact_phone,
+            type: 'text',
+            text: { body: content }
+          },
+          { headers: { Authorization: `Bearer ${conv.connections.access_token}`, 'Content-Type': 'application/json' } }
+        );
+      } catch (e) {
+        console.error('[Manual send error]', e.response?.data || e.message);
       }
     }
 

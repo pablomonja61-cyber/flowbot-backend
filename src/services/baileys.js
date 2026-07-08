@@ -1731,18 +1731,4 @@ async function restoreActiveSessions() {
   }
 }
 
-// ════════════════════════════════════════════════════════════
-// ENVÍO MANUAL (usado por el Chat en Vivo cuando un agente
-// humano escribe y manda un mensaje directamente, no por flujo)
-// ════════════════════════════════════════════════════════════
-async function sendManualText(connectionId, phone, text) {
-  const sock = activeSessions[connectionId];
-  if (!sock) {
-    throw new Error('La sesión QR no está activa. Reconecta el WhatsApp QR e intenta de nuevo.');
-  }
-  const jid = `${phone}@s.whatsapp.net`;
-  await showTyping(sock, jid, text.length);
-  await sock.sendMessage(jid, { text });
-}
-
-module.exports = { startQRSession, getQRCode, closeQRSession, restoreActiveSessions, sendManualText };
+module.exports = { startQRSession, getQRCode, closeQRSession, restoreActiveSessions };
