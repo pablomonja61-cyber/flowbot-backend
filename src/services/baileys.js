@@ -280,6 +280,7 @@ async function scheduleSeguimientos(followupNode, sock, jid, contactPhone, conve
         connection_id: connIdForSock,
         contact_phone: contactPhone,
         seg_data: seg,
+        vars: { jid },
         status: 'pending',
         send_at: sendAt,
         created_at: new Date().toISOString()
@@ -852,7 +853,7 @@ async function processScheduledFollowups() {
       }
 
       try {
-        const jid = `${item.contact_phone}@s.whatsapp.net`;
+        const jid = item.vars?.jid || `${item.contact_phone}@s.whatsapp.net`;
         const seg = item.seg_data || {};
 
         if (seg.precio) {
