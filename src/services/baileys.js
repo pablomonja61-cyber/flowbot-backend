@@ -1732,4 +1732,22 @@ async function restoreActiveSessions() {
   }
 }
 
-module.exports = { startQRSession, getQRCode, closeQRSession, restoreActiveSessions };
+// ════════════════════════════════════════════════════════════
+// ENVÍO MANUAL (usado por el panel "Chat en Vivo" cuando el
+// negocio le responde a un cliente a mano, no vía flujo)
+// ════════════════════════════════════════════════════════════
+async function sendManualTextBaileys(connectionId, contactPhone, text, conversationId, rawJid = null) {
+  const sock = activeSessions[connectionId];
+  if (!sock) {
+    return { success: false, error: 'No hay una sesión de WhatsApp QR activa para esta conexión' };
+  }
+  const jid = rawJid || `${contactPhone}@s.whatsapp.net`;
+  try {
+    await sendText(sock, jid, text, conversationId);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+module.exports = { startQRSession, getQRCode, closeQRSession, restoreActiveSessions, sendManualTextBaileys, activeSessions };

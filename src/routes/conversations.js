@@ -2,9 +2,9 @@ const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
 const supabase = require('../models/supabase');
-
+const axios = require('axios');
+const { sendManualTextBaileys } = require('../services/baileys');
 router.use(auth);
-
 // ── GET /api/conversations ────────────────────────────────────
 router.get('/', async (req, res, next) => {
   try {
@@ -39,22 +39,35 @@ router.post('/:id/messages', async (req, res, next) => {
       .single();
     if (!conv) return res.status(404).json({ error: 'Conversación no encontrada' });
 
-    // Enviar por WhatsApp si es outbound
+    // Enviar por WhatsApp si es outbound — detecta el TIPO de conexión
+    // (QR/Baileys vs WhatsApp Cloud API) y usa el canal correcto.
+    // Antes esto SIEMPRE intentaba mandar por Cloud API sin importar
+    // el tipo, así que para conexiones QR nunca llegaba de verdad,
+    // aunque el mensaje sí se guardaba como si hubiera funcionado.
     if (direction === 'outbound' && conv.connections) {
-      const axios = require('axios');
-      try {
-        await axios.post(
-          `https://graph.facebook.com/v19.0/${conv.connections.phone_number_id}/messages`,
-          {
-            messaging_product: 'whatsapp',
-            to: conv.contact_phone,
-            type: 'text',
-            text: { body: content }
-          },
-          { headers: { Authorization: `Bearer ${conv.connections.access_token}`, 'Content-Type': 'application/json' } }
-        );
-      } catch (e) {
-        console.error('[Manual send error]', e.response?.data || e.message);
+      const esCloudAPI = !!(conv.connections.phone_number_id && conv.connections.access_token);
+
+      if (esCloudAPI) {
+        try {
+          await axios.post(
+            `https://graph.facebook.com/v19.0/${conv.connections.phone_number_id}/messages`,
+            {
+              messaging_product: 'whatsapp',
+              to: conv.contact_phone,
+              type: 'text',
+              text: { body: content }
+            },
+            { headers: { Authorization: `Bearer ${conv.connections.access_token}`, 'Content-Type': 'application/json' } }
+          );
+        } catch (e) {
+          console.error('[Manual send error - Cloud API]', e.response?.data || e.message);
+        }
+      } else {
+        // Conexión QR (Baileys)
+        const result = await sendManualTextBaileys(conv.connection_id, conv.contact_phone, content, req.params.id);
+        if (!result.success) {
+          console.error('[Manual send error - QR]', result.error);
+        }
       }
     }
 
@@ -68,7 +81,6 @@ router.post('/:id/messages', async (req, res, next) => {
       })
       .select()
       .single();
-
     if (error) throw error;
 
     await supabase.from('conversations').update({
@@ -90,14 +102,12 @@ router.get('/:id/messages', async (req, res, next) => {
       .eq('user_id', req.user.id)
       .single();
     if (!conv) return res.status(404).json({ error: 'Conversación no encontrada' });
-
     const { data, error } = await supabase
       .from('messages')
       .select('*')
       .eq('conversation_id', req.params.id)
       .order('created_at', { ascending: true });
     if (error) throw error;
-
     await supabase.from('conversations').update({ unread_count: 0 }).eq('id', req.params.id);
     res.json(data);
   } catch (err) { next(err); }
@@ -111,7 +121,6 @@ router.get('/stats/summary', async (req, res, next) => {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
     thirtyDaysAgo.setHours(0, 0, 0, 0);
-
     const [
       { count: total },
       { count: today_count },
@@ -123,13 +132,11 @@ router.get('/stats/summary', async (req, res, next) => {
       supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).eq('status', 'active'),
       supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).gte('created_at', thirtyDaysAgo.toISOString())
     ]);
-
     const { count: msgs_today } = await supabase
       .from('messages')
       .select('conversations!inner(user_id)', { count: 'exact', head: true })
       .eq('conversations.user_id', req.user.id)
       .gte('created_at', today.toISOString());
-
     res.json({ total, today: today_count, active, messages_today: msgs_today, last_30_days: last30 });
   } catch (err) { next(err); }
 });
@@ -142,76 +149,57 @@ router.get('/dashboard/stats', async (req, res, next) => {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
     thirtyDaysAgo.setHours(0, 0, 0, 0);
-
-    // Conversaciones totales
     const { count: total_conversations } = await supabase
       .from('conversations')
       .select('*', { count: 'exact', head: true })
       .eq('user_id', req.user.id);
-
-    // Conversaciones hoy
     const { count: conversations_today } = await supabase
       .from('conversations')
       .select('*', { count: 'exact', head: true })
       .eq('user_id', req.user.id)
       .gte('created_at', today.toISOString());
-
-    // Conversaciones últimos 30 días
     const { count: conversations_30d } = await supabase
       .from('conversations')
       .select('*', { count: 'exact', head: true })
       .eq('user_id', req.user.id)
       .gte('created_at', thirtyDaysAgo.toISOString());
-
-    // Mensajes totales de hoy
     const { count: messages_today } = await supabase
       .from('messages')
       .select('conversations!inner(user_id)', { count: 'exact', head: true })
       .eq('conversations.user_id', req.user.id)
       .gte('created_at', today.toISOString());
-
-    // Mensajes últimos 30 días
     const { count: messages_30d } = await supabase
       .from('messages')
       .select('conversations!inner(user_id)', { count: 'exact', head: true })
       .eq('conversations.user_id', req.user.id)
       .gte('created_at', thirtyDaysAgo.toISOString());
-
-    // Conversaciones activas
     const { count: active_conversations } = await supabase
       .from('conversations')
       .select('*', { count: 'exact', head: true })
       .eq('user_id', req.user.id)
       .eq('status', 'active');
-
-    // Ventas (conversaciones marcadas como sale=true)
     const { count: sales_total } = await supabase
       .from('conversations')
       .select('*', { count: 'exact', head: true })
       .eq('user_id', req.user.id)
       .eq('is_sale', true);
-
     const { count: sales_today } = await supabase
       .from('conversations')
       .select('*', { count: 'exact', head: true })
       .eq('user_id', req.user.id)
       .eq('is_sale', true)
       .gte('sale_at', today.toISOString());
-
     const { count: sales_30d } = await supabase
       .from('conversations')
       .select('*', { count: 'exact', head: true })
       .eq('user_id', req.user.id)
       .eq('is_sale', true)
       .gte('sale_at', thirtyDaysAgo.toISOString());
-
-    // Ingresos
     const { data: salesData } = await supabase
       .from('conversations')
       .select('sale_amount, sale_at')
       .eq('user_id', req.user.id)
       .eq('is_sale', true);
-
     const total_revenue = (salesData || []).reduce((sum, s) => sum + (s.sale_amount || 0), 0);
     const revenue_30d = (salesData || [])
       .filter(s => s.sale_at && new Date(s.sale_at) >= thirtyDaysAgo)
@@ -219,18 +207,14 @@ router.get('/dashboard/stats', async (req, res, next) => {
     const revenue_today = (salesData || [])
       .filter(s => s.sale_at && new Date(s.sale_at) >= today)
       .reduce((sum, s) => sum + (s.sale_amount || 0), 0);
-
     const avg_ticket = sales_total > 0 ? total_revenue / sales_total : 0;
     const conversion_rate = conversations_30d > 0 ? ((sales_30d / conversations_30d) * 100).toFixed(1) : 0;
-
-    // Gráfica: conversaciones por día últimos 30 días
     const { data: convByDay } = await supabase
       .from('conversations')
       .select('created_at')
       .eq('user_id', req.user.id)
       .gte('created_at', thirtyDaysAgo.toISOString())
       .order('created_at', { ascending: true });
-
     const dailyMap = {};
     for (let i = 0; i < 30; i++) {
       const d = new Date(thirtyDaysAgo);
@@ -247,10 +231,7 @@ router.get('/dashboard/stats', async (req, res, next) => {
       const key = s.sale_at.split('T')[0];
       if (dailyMap[key]) dailyMap[key].sales++;
     });
-
     const daily_chart = Object.values(dailyMap);
-
-    // Ventas por día de la semana
     const weekdays = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
     const byWeekday = weekdays.map(day => ({ day, sales: 0, conversations: 0 }));
     (convByDay || []).forEach(c => {
@@ -262,29 +243,21 @@ router.get('/dashboard/stats', async (req, res, next) => {
       const wd = new Date(s.sale_at).getDay();
       byWeekday[wd].sales++;
     });
-
     res.json({
-      // Métricas principales
       total_conversations,
       conversations_today,
       conversations_30d,
       active_conversations,
       messages_today,
       messages_30d,
-
-      // Ventas
       sales_total: sales_total || 0,
       sales_today: sales_today || 0,
       sales_30d: sales_30d || 0,
-
-      // Ingresos
       total_revenue,
       revenue_today,
       revenue_30d,
       avg_ticket,
       conversion_rate: parseFloat(conversion_rate),
-
-      // Gráficas
       daily_chart,
       by_weekday: byWeekday
     });
@@ -295,7 +268,6 @@ router.get('/dashboard/stats', async (req, res, next) => {
 });
 
 // ── PATCH /api/conversations/:id/sale ─────────────────────────
-// Marcar conversación como venta
 router.patch('/:id/sale', async (req, res, next) => {
   try {
     const { is_sale, sale_amount } = req.body;
