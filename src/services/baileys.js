@@ -505,7 +505,12 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
         if (notifyPhone && msg) {
           try {
             await sock.sendMessage(`${notifyPhone}@s.whatsapp.net`, { text: msg });
-          } catch (e) {}
+            console.log(`[Baileys Flow] ✓ Notificación enviada a ${notifyPhone}`);
+          } catch (e) {
+            console.error(`[Baileys Flow] ❌ Error enviando notificación a ${notifyPhone}:`, e.message);
+          }
+        } else {
+          console.log(`[Baileys Flow] Nodo de notificación sin número o mensaje configurado — se omite`);
         }
         break;
       }
