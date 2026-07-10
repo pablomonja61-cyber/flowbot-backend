@@ -46,32 +46,45 @@ async function sendWhatsAppMessage(phoneNumberId, accessToken, to, message, conv
   }
 }
 
-async function sendWhatsAppButtons(phoneNumberId, accessToken, to, bodyText, buttons, conversationId) {
+async function sendWhatsAppButtons(phoneNumberId, accessToken, to, bodyText, buttons, conversationId, header = null, footerText = null) {
   try {
+    const interactive = {
+      type: 'button',
+      body: { text: bodyText },
+      action: {
+        buttons: buttons.slice(0, 3).map((btn, i) => ({
+          type: 'reply',
+          reply: { id: `btn_${i}`, title: String(btn).slice(0, 20) }
+        }))
+      }
+    };
+
+    // Header opcional: texto, imagen, video o documento (formato real
+    // de Meta para mensajes interactivos con botones).
+    if (header?.type === 'text' && header.text) {
+      interactive.header = { type: 'text', text: header.text.slice(0, 60) };
+    } else if (header?.type === 'image' && header.url) {
+      interactive.header = { type: 'image', image: { link: header.url } };
+    } else if (header?.type === 'video' && header.url) {
+      interactive.header = { type: 'video', video: { link: header.url } };
+    } else if (header?.type === 'document' && header.url) {
+      interactive.header = { type: 'document', document: { link: header.url, filename: header.filename || 'documento.pdf' } };
+    }
+
+    if (footerText) {
+      interactive.footer = { text: footerText.slice(0, 60) };
+    }
+
     await axios.post(
       `https://graph.facebook.com/${GRAPH_VERSION}/${phoneNumberId}/messages`,
-      {
-        messaging_product: 'whatsapp',
-        to,
-        type: 'interactive',
-        interactive: {
-          type: 'button',
-          body: { text: bodyText },
-          action: {
-            buttons: buttons.slice(0, 3).map((btn, i) => ({
-              type: 'reply',
-              reply: { id: `btn_${i}`, title: String(btn).slice(0, 20) }
-            }))
-          }
-        }
-      },
+      { messaging_product: 'whatsapp', to, type: 'interactive', interactive },
       { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
     );
     if (conversationId) {
       const fullText = bodyText + '\n\n' + buttons.map((b, i) => `${i + 1}. ${b}`).join('\n');
       await saveMessage(conversationId, fullText, 'outbound', 'text');
     }
-    console.log(`[CloudAPI] ✓ Botones enviados`);
+    console.log(`[CloudAPI] ✓ Botones enviados${header ? ` (header: ${header.type})` : ''}`);
   } catch (err) {
     console.error('[WhatsApp buttons error]', err.response?.data || err.message);
     const text = bodyText + '\n\n' + buttons.map((b, i) => `${i + 1}. ${b}`).join('\n');
@@ -440,15 +453,22 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
       case 'api_message': {
         const text = node.data?.body || node.data?.text || '';
         const buttons = node.data?.buttons || [];
-        const headerImage = node.data?.headerType === 'Imagen' ? (node.data?.headerImage || '') : '';
+        const headerType = (node.data?.headerType || 'Sin header').toLowerCase();
+        const footerText = node.data?.footer || null;
 
-        if (headerImage) {
-          await sendWhatsAppImage(phoneNumberId, accessToken, to, headerImage, '', conversationId);
-          await sleep(600);
+        let header = null;
+        if (headerType === 'texto' && node.data?.headerText) {
+          header = { type: 'text', text: node.data.headerText };
+        } else if (headerType === 'imagen' && node.data?.headerImage) {
+          header = { type: 'image', url: node.data.headerImage };
+        } else if (headerType === 'video' && node.data?.headerVideo) {
+          header = { type: 'video', url: node.data.headerVideo };
+        } else if (headerType === 'documento' && node.data?.headerDocument) {
+          header = { type: 'document', url: node.data.headerDocument, filename: node.data?.headerFileName };
         }
 
         if (buttons.length > 0) {
-          await sendWhatsAppButtons(phoneNumberId, accessToken, to, text, buttons, conversationId);
+          await sendWhatsAppButtons(phoneNumberId, accessToken, to, text, buttons, conversationId, header, footerText);
           await supabase.from('conversations').update({
             current_flow_id: flowId, current_node_id: node.id, flow_active: true
           }).eq('id', conversationId);
@@ -456,6 +476,12 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
           await scheduleAttachedFollowups(flow, node.id, connection, phoneNumberId, accessToken, to, contactPhone, conversationId);
           shouldPause = true;
         } else if (text) {
+          // Sin botones: si hay header de imagen configurado, mándalo
+          // aparte antes del texto (no aplica el formato interactivo).
+          if (header?.type === 'image') {
+            await sendWhatsAppImage(phoneNumberId, accessToken, to, header.url, '', conversationId);
+            await sleep(600);
+          }
           await sendWhatsAppMessage(phoneNumberId, accessToken, to, text, conversationId);
         }
         break;
