@@ -197,6 +197,45 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
   // 3. Guardar mensaje entrante
   await saveMessage(conversation.id, userMessage, 'inbound');
 
+  // Antes de revisar si hay un flujo pausado, chequear si el mensaje
+  // coincide con un disparador REPETIBLE — tiene prioridad sobre
+  // cualquier pausa activa: reinicia el flujo desde cero.
+  const normalizedMsgEarly = userMessage.toLowerCase().trim();
+  const { data: repeatableTriggers } = await supabase
+    .from('triggers')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('connection_id', connection.id)
+    .eq('is_active', true)
+    .eq('is_repeatable', true);
+
+  const repeatableMatch = (repeatableTriggers || []).find(t => {
+    const kw = (t.keyword || '').toLowerCase().trim();
+    return kw && (normalizedMsgEarly === kw || normalizedMsgEarly.includes(kw));
+  });
+
+  if (repeatableMatch) {
+    console.log(`[Webhook] Trigger repetible "${repeatableMatch.keyword}" coincide — reinicia el flujo, sin importar pausa activa`);
+
+    await supabase.from('conversations').update({
+      current_flow_id: null,
+      current_node_id: null
+    }).eq('id', conversation.id);
+
+    try { await cancelFollowups(conversation.id); } catch (e) { console.error('[Webhook] Error cancelando seguimientos:', e.message); }
+
+    await supabase.from('trigger_executions').insert({
+      id: uuidv4(),
+      trigger_id: repeatableMatch.id,
+      contact_phone: contactPhone,
+      conversation_id: conversation.id,
+      executed_at: new Date().toISOString()
+    });
+
+    await executeFlow(repeatableMatch.flow_id, contactPhone, userMessage, connection, conversation.id);
+    return;
+  }
+
   // 3.5 ¿Hay un flujo pausado esperando respuesta en esta conversación?
   if (conversation.current_flow_id && conversation.current_node_id) {
     console.log(`[Webhook] Flujo pausado detectado en nodo: ${conversation.current_node_id}`);

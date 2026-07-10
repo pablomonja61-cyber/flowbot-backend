@@ -1447,6 +1447,46 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
     return;
   }
 
+  // Antes de revisar si hay un flujo pausado, chequear si el mensaje
+  // coincide con un disparador marcado como REPETIBLE — ese caso tiene
+  // prioridad sobre cualquier pausa activa: reinicia el flujo desde
+  // cero sin importar en qué nodo se había quedado esperando.
+  const normalizedMsgEarly = userMessage.toLowerCase().trim();
+  const { data: repeatableTriggers } = await supabase
+    .from('triggers')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('connection_id', connectionId)
+    .eq('is_active', true)
+    .eq('is_repeatable', true);
+
+  const repeatableMatch = (repeatableTriggers || []).find(t => {
+    const kw = (t.keyword || '').toLowerCase().trim();
+    return kw && (normalizedMsgEarly === kw || normalizedMsgEarly.includes(kw));
+  });
+
+  if (repeatableMatch) {
+    console.log(`[Baileys] Trigger repetible "${repeatableMatch.keyword}" coincide — reinicia el flujo, sin importar pausa activa`);
+
+    await supabase.from('conversations').update({
+      current_flow_id: null,
+      current_node_id: null
+    }).eq('id', conversation.id);
+
+    try { await cancelFollowups(conversation.id); } catch (e) { console.error('[Baileys] Error cancelando seguimientos:', e.message); }
+
+    await supabase.from('trigger_executions').insert({
+      id: uuidv4(),
+      trigger_id: repeatableMatch.id,
+      contact_phone: contactPhone,
+      conversation_id: conversation.id,
+      executed_at: new Date().toISOString()
+    });
+
+    await executeFlowBaileys(repeatableMatch.flow_id, sock, jid, contactPhone, userMessage, conversation.id);
+    return;
+  }
+
   if (conversation.current_flow_id && conversation.current_node_id) {
     console.log(`[Baileys] Flujo pausado detectado en nodo: ${conversation.current_node_id}`);
 
