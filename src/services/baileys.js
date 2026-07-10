@@ -515,6 +515,26 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
         break;
       }
 
+      // ── Activar otro flujo (ej. order bump al final de una venta) ──
+      case 'activate_flow':
+      case 'trigger_flow': {
+        const targetFlowId = node.data?.flowId || node.data?.flow_id;
+        if (targetFlowId) {
+          const { data: targetFlow } = await supabase.from('flows').select('nodes').eq('id', targetFlowId).single();
+          const startNode = (targetFlow?.nodes || []).find(n => n.type === 'start');
+          if (startNode) {
+            console.log(`[Baileys Flow] ▶ Activando flujo "${targetFlowId}" desde nodo ${node.id}`);
+            await executeFlowBaileys(targetFlowId, sock, jid, contactPhone, userMessage, conversationId, startNode.id);
+          } else {
+            console.log(`[Baileys Flow] ⚠️ El flujo "${targetFlowId}" no tiene nodo de Inicio — no se pudo activar`);
+          }
+        } else {
+          console.log(`[Baileys Flow] ⚠️ Nodo "Activar Flujo" sin ningún flujo seleccionado — revisa su configuración`);
+        }
+        currentNodeId = null;
+        continue;
+      }
+
       case 'end':
         console.log('[Baileys Flow] Fin del flujo');
         currentNodeId = null;
