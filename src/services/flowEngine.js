@@ -215,6 +215,52 @@ async function isCountryBlocked(userId, contactPhone) {
 // ════════════════════════════════════════════════════════════
 // RESPONDER CON IA (Groq — igual que en QR)
 // ════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════
+// CONVERSIONS API DE META — manda el evento de venta real para
+// que Meta pueda optimizar la entrega de anuncios hacia ventas.
+// ════════════════════════════════════════════════════════════
+async function sendPurchaseEventToMeta(userId, conversation, saleAmount) {
+  try {
+    const { data: config } = await supabase
+      .from('ads_config')
+      .select('*')
+      .eq('user_id', userId)
+      .single();
+
+    if (!config || !config.conversions_api || !config.pixel_id || !config.access_token) {
+      return; // el usuario no tiene esto configurado/activado — no hacer nada
+    }
+
+    const crypto = require('crypto');
+    const cleanPhone = (conversation.contact_phone || '').replace(/\D/g, '');
+    const hashedPhone = crypto.createHash('sha256').update(cleanPhone).digest('hex');
+
+    const userData = { ph: [hashedPhone] };
+    if (conversation.ctwa_clid) userData.ctwa_clid = conversation.ctwa_clid;
+
+    await axios.post(
+      `https://graph.facebook.com/${GRAPH_VERSION}/${config.pixel_id}/events`,
+      {
+        data: [{
+          event_name: 'Purchase',
+          event_time: Math.floor(Date.now() / 1000),
+          action_source: 'business_messaging',
+          messaging_channel: 'whatsapp',
+          value: parseFloat(saleAmount) || 0,
+          currency: config.currency || 'PEN',
+          user_data: userData
+        }],
+        access_token: config.access_token
+      },
+      { timeout: 10000 }
+    );
+
+    console.log(`[Meta Conversions API] ✓ Evento de compra enviado (pixel ${config.pixel_id}, S/${saleAmount})`);
+  } catch (err) {
+    console.error('[Meta Conversions API] Error enviando evento:', err.response?.data?.error?.message || err.message);
+  }
+}
+
 async function respondWithAI(userId, connection, to, userMessage, conversationId, aiConfigIdOverride = null, nodePrompt = null) {
   console.log(`[CloudAPI AI] Intentando responder con IA para user: ${userId}`);
   try {
@@ -834,6 +880,8 @@ Responde SOLO en formato JSON exacto:
       current_node_id: null, current_flow_id: null
     }).eq('id', conversation.id);
 
+    sendPurchaseEventToMeta(userId, conversation, monto).catch(() => {});
+
     try { await cancelFollowups(conversation.id); } catch (e) { console.error('[CloudAPI Payment] Error cancelando seguimientos:', e.message); }
 
     if (matchedEdge) {
@@ -865,6 +913,7 @@ Responde SOLO en formato JSON exacto:
 
   await sendWhatsAppMessage(phoneNumberId, accessToken, to, matchedRule.access_message, conversation.id);
   await supabase.from('conversations').update({ is_sale: true, sale_amount: monto, sale_at: new Date().toISOString(), flow_active: false }).eq('id', conversation.id);
+  sendPurchaseEventToMeta(userId, conversation, monto).catch(() => {});
   try { await cancelFollowups(conversation.id); } catch (e) { console.error('[CloudAPI Payment] Error cancelando seguimientos:', e.message); }
 }
 
@@ -1067,5 +1116,6 @@ module.exports = {
   processIncomingImageCloud,
   respondWithAI,
   showTypingCloud,
-  sendFollowupContentCloud
+  sendFollowupContentCloud,
+  sendPurchaseEventToMeta
 };

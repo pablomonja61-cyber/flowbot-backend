@@ -79,7 +79,13 @@ router.post('/whatsapp', async (req, res) => {
 
           console.log(`[Webhook] Mensaje de ${contactPhone}: "${userMessage}"`);
 
-          enqueueForContact(queueKey, () => processIncomingMessage(phoneNumberId, contactPhone, userMessage, msg.id)).catch(err => {
+          // Si el mensaje viene de un clic en un anuncio "Enviar mensaje"
+          // (Click to WhatsApp), Meta manda este dato en el primer mensaje.
+          const referral = msg.referral
+            ? { ad_id: msg.referral.source_id || null, ctwa_clid: msg.referral.ctwa_clid || null }
+            : null;
+
+          enqueueForContact(queueKey, () => processIncomingMessage(phoneNumberId, contactPhone, userMessage, msg.id, referral)).catch(err => {
             console.error('[Webhook] Error procesando mensaje:', err.message);
           });
         }
@@ -139,7 +145,7 @@ async function processIncomingImageMessage(phoneNumberId, contactPhone, msg) {
 // ════════════════════════════════════════════════════════════
 // Lógica principal: recibe msg → busca trigger → ejecuta flujo
 // ════════════════════════════════════════════════════════════
-async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, messageId) {
+async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, messageId, referral = null) {
   // 1. Buscar la conexión por phone_number_id
   const { data: connection } = await supabase
     .from('connections')
@@ -176,6 +182,9 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
     .single();
 
   if (!conversation) {
+    if (referral) {
+      console.log(`[Webhook] 📢 Conversación iniciada desde anuncio: ad_id=${referral.ad_id}, ctwa_clid=${referral.ctwa_clid ? 'sí' : 'no'}`);
+    }
     const { data: newConv } = await supabase
       .from('conversations')
       .insert({
@@ -186,6 +195,8 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
         contact_name: contactPhone,
         status: 'active',
         unread_count: 1,
+        ad_id: referral?.ad_id || null,
+        ctwa_clid: referral?.ctwa_clid || null,
         last_message: userMessage.slice(0, 100),
         last_message_at: new Date().toISOString()
       })

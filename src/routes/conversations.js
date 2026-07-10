@@ -284,6 +284,14 @@ router.patch('/:id/sale', async (req, res, next) => {
       .select()
       .single();
     if (error) throw error;
+
+    // Si se marcó como venta y la conexión es WhatsApp API, avisarle
+    // a Meta (Conversions API) para que pueda optimizar los anuncios.
+    if (is_sale && data) {
+      const { sendPurchaseEventToMeta } = require('../services/flowEngine');
+      sendPurchaseEventToMeta(req.user.id, data, sale_amount || 0).catch(() => {});
+    }
+
     res.json(data);
   } catch (err) { next(err); }
 });
