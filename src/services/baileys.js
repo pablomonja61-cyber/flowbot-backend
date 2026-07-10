@@ -89,6 +89,14 @@ async function showTyping(sock, jid, textLength = 0) {
   }
 }
 
+// ── Enviar texto SIN guardar en DB (para cuando quien llama ya
+// se encarga de guardar el mensaje, ej. el envío manual) ──────
+async function sendRawTextBaileys(sock, jid, text) {
+  if (!text || !text.trim()) return;
+  await showTyping(sock, jid, text.length);
+  await sock.sendMessage(jid, { text });
+}
+
 async function sendText(sock, jid, text, conversationId) {
   if (!text || !text.trim()) return;
   try {
@@ -1038,6 +1046,10 @@ async function processIncomingImageBaileys(connectionId, userId, sock, contactPh
     return;
   }
 
+  if (conversation.last_jid !== jid) {
+    supabase.from('conversations').update({ last_jid: jid }).eq('id', conversation.id).then(() => {}).catch(() => {});
+  }
+
   // Descargar la imagen real usando Baileys
   let imageBuffer = null;
   try {
@@ -1418,6 +1430,14 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
   if (!conversation) return;
   if (conversation.is_blocked) return;
 
+  // Guarda el jid exacto (puede ser @s.whatsapp.net o @lid) para que
+  // el envío manual desde "Chat en Vivo" y otras funciones puedan
+  // usar el identificador correcto más adelante, en vez de reconstruirlo
+  // a lo bruto desde el número de teléfono (lo cual falla con @lid).
+  if (conversation.last_jid !== jid) {
+    supabase.from('conversations').update({ last_jid: jid }).eq('id', conversation.id).then(() => {}).catch(() => {});
+  }
+
   await saveMsg(conversation.id, isImage ? '[Imagen recibida]' : userMessage, 'inbound', isImage ? 'image' : 'text');
 
   if (conversation.flow_active === false) {
@@ -1743,7 +1763,7 @@ async function sendManualTextBaileys(connectionId, contactPhone, text, conversat
   }
   const jid = rawJid || `${contactPhone}@s.whatsapp.net`;
   try {
-    await sendText(sock, jid, text, conversationId);
+    await sendRawTextBaileys(sock, jid, text);
     return { success: true };
   } catch (err) {
     return { success: false, error: err.message };

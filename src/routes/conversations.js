@@ -63,8 +63,9 @@ router.post('/:id/messages', async (req, res, next) => {
           console.error('[Manual send error - Cloud API]', e.response?.data || e.message);
         }
       } else {
-        // Conexión QR (Baileys)
-        const result = await sendManualTextBaileys(conv.connection_id, conv.contact_phone, content, req.params.id);
+        // Conexión QR (Baileys) — usa el jid exacto guardado (puede ser
+        // @lid en vez de @s.whatsapp.net), si ya lo tenemos registrado.
+        const result = await sendManualTextBaileys(conv.connection_id, conv.contact_phone, content, req.params.id, conv.last_jid);
         if (!result.success) {
           console.error('[Manual send error - QR]', result.error);
         }
