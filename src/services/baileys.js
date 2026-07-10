@@ -6,7 +6,7 @@ const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
-const { cancelFollowups } = require('../services/flowEngine');
+const { cancelFollowups, sendFollowupContentCloud } = require('../services/flowEngine');
 
 const activeSessions = {};
 const connectingLocks = {};
@@ -845,9 +845,39 @@ async function processScheduledFollowups() {
       const sock = item.connection_id ? activeSessions[item.connection_id] : null;
 
       if (!sock) {
-        // Sin conexión activa ahora mismo. Si lleva más de 24h vencido,
-        // se marca como expirado para no acumularlo indefinidamente;
-        // si no, se deja 'pending' para reintentar en el próximo ciclo.
+        // Sin sesión de QR activa — puede ser que la conexión sea
+        // WhatsApp API (Cloud API), que no usa activeSessions. Revisar.
+        let esCloudAPI = false;
+        if (item.connection_id) {
+          const { data: conn } = await supabase
+            .from('connections')
+            .select('phone_number_id, access_token')
+            .eq('id', item.connection_id)
+            .single();
+          esCloudAPI = !!(conn?.phone_number_id && conn?.access_token);
+
+          if (esCloudAPI) {
+            try {
+              const seg = item.seg_data || {};
+              if (seg.precio) {
+                await supabase.from('conversations').update({ active_price: seg.precio }).eq('id', item.conversation_id);
+              }
+              for (const contenido of seg.contenidos || []) {
+                await sendFollowupContentCloud(conn.phone_number_id, conn.access_token, item.contact_phone, contenido, item.conversation_id);
+              }
+              await supabase.from('scheduled_followups').update({ status: 'sent' }).eq('id', item.id);
+              console.log(`[Followups] ✅ Seguimiento ${item.id} enviado a ${item.contact_phone} (Cloud API)`);
+            } catch (sendErr) {
+              console.error(`[Followups] Error enviando seguimiento ${item.id} (Cloud API):`, sendErr.message);
+              await supabase.from('scheduled_followups').update({ status: 'failed' }).eq('id', item.id);
+            }
+            continue;
+          }
+        }
+
+        // No es Cloud API y tampoco hay sesión QR activa ahora mismo.
+        // Si lleva más de 24h vencido, se marca como expirado para no
+        // acumularlo indefinidamente; si no, se reintenta en el próximo ciclo.
         const horasVencido = (Date.now() - new Date(item.send_at).getTime()) / 3600000;
         if (horasVencido > 24) {
           await supabase.from('scheduled_followups')

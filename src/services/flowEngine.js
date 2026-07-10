@@ -1039,5 +1039,6 @@ module.exports = {
   continueFlowFromButton,
   processIncomingImageCloud,
   respondWithAI,
-  showTypingCloud
+  showTypingCloud,
+  sendFollowupContentCloud
 };
