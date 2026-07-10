@@ -516,6 +516,7 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
       }
 
       // ── Activar otro flujo (ej. order bump al final de una venta) ──
+      case 'activate':
       case 'activate_flow':
       case 'trigger_flow': {
         const targetFlowId = node.data?.flowId || node.data?.flow_id;

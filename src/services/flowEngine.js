@@ -572,6 +572,7 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
       }
 
       // ── Activar otro flujo ─────────────────────────────────
+      case 'activate':
       case 'activate_flow':
       case 'trigger_flow': {
         const targetFlowId = node.data?.flowId || node.data?.flow_id;
