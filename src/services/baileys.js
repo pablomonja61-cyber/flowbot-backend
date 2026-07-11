@@ -89,6 +89,17 @@ async function showTyping(sock, jid, textLength = 0) {
   }
 }
 
+// ── Mostrar "grabando audio..." antes de enviar una nota de voz
+// (solo QR — WhatsApp Cloud API no tiene este estado, solo "escribiendo") ──
+async function showRecording(sock, jid) {
+  try {
+    await sock.sendPresenceUpdate('recording', jid);
+    await sleep(1200);
+  } catch (e) {
+    // No es crítico si falla.
+  }
+}
+
 // ── Enviar texto SIN guardar en DB (para cuando quien llama ya
 // se encarga de guardar el mensaje, ej. el envío manual) ──────
 async function sendRawTextBaileys(sock, jid, text) {
@@ -140,7 +151,7 @@ async function sendVideoMsg(sock, jid, url, caption, conversationId) {
 async function sendAudioMsg(sock, jid, url, conversationId, asVoiceNote = false) {
   if (!url || url.startsWith('data:')) return;
   try {
-    await showTyping(sock, jid, 200);
+    await showRecording(sock, jid);
     await sock.sendMessage(jid, { audio: { url }, mimetype: 'audio/mp4', ptt: !!asVoiceNote });
     await saveMsg(conversationId, '[Audio]', 'outbound', 'audio', url);
     console.log(`[Baileys] ✓ Audio enviado`);
@@ -176,6 +187,59 @@ async function sendDocumentMsg(sock, jid, url, fileName, conversationId) {
 // ════════════════════════════════════════════════════════════
 // RESPONDER CON IA
 // ════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════
+// CALLAR A CUALQUIER PROVEEDOR DE IA (Groq, OpenAI, o Claude)
+// Cada usuario puede elegir cuál usar en "Integraciones" — esta
+// función unifica el formato de llamada, ya que Claude usa una
+// estructura de API distinta a Groq/OpenAI (que son casi idénticas
+// entre sí, compatibles con el formato "OpenAI chat completions").
+// ════════════════════════════════════════════════════════════
+async function callAIProvider(provider, apiKey, model, systemPrompt, conversationMessages, maxTokens = 500) {
+  const prov = (provider || 'groq').toLowerCase();
+
+  if (prov === 'claude' || prov === 'anthropic') {
+    const response = await axios.post(
+      'https://api.anthropic.com/v1/messages',
+      {
+        model: model || 'claude-sonnet-4-6',
+        max_tokens: maxTokens,
+        system: systemPrompt,
+        messages: conversationMessages // solo role: 'user'/'assistant', sin 'system'
+      },
+      {
+        headers: {
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          'Content-Type': 'application/json'
+        },
+        timeout: 15000
+      }
+    );
+    return response.data.content?.[0]?.text || '';
+  }
+
+  // Groq y OpenAI comparten el mismo formato ("OpenAI-compatible")
+  const baseUrl = prov === 'openai'
+    ? 'https://api.openai.com/v1/chat/completions'
+    : 'https://api.groq.com/openai/v1/chat/completions';
+
+  const defaultModel = prov === 'openai' ? 'gpt-4o-mini' : 'llama-3.3-70b-versatile';
+
+  const response = await axios.post(
+    baseUrl,
+    {
+      model: model || defaultModel,
+      max_tokens: maxTokens,
+      messages: [{ role: 'system', content: systemPrompt }, ...conversationMessages]
+    },
+    {
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      timeout: 15000
+    }
+  );
+  return response.data.choices?.[0]?.message?.content || '';
+}
+
 async function respondWithAIBaileys(userId, sock, jid, userMessage, conversationId, aiConfigIdOverride = null, nodePrompt = null) {
   console.log(`[Baileys AI] Intentando responder con IA para user: ${userId}`);
   try {
@@ -233,8 +297,9 @@ async function respondWithAIBaileys(userId, sock, jid, userMessage, conversation
       .order('created_at', { ascending: true })
       .limit(10);
 
-    const messages = [
-      { role: 'system', content: systemPrompt },
+    // El "system" se manda por separado (Claude lo requiere así, y
+    // Groq/OpenAI también lo aceptan dentro del mismo array).
+    const conversationMessages = [
       ...(history || []).slice(-8).map(m => ({
         role: m.direction === 'inbound' ? 'user' : 'assistant',
         content: m.content
@@ -242,22 +307,11 @@ async function respondWithAIBaileys(userId, sock, jid, userMessage, conversation
       { role: 'user', content: userMessage }
     ];
 
+    const provider = aiConfig?.provider || 'groq';
     const apiKey = aiConfig?.groq_api_key || process.env.GROQ_API_KEY;
-    const model = aiConfig?.model || 'llama-3.3-70b-versatile';
+    const model = aiConfig?.model || null;
 
-    const response = await axios.post(
-      'https://api.groq.com/openai/v1/chat/completions',
-      { model, max_tokens: 500, messages },
-      {
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 15000
-      }
-    );
-
-    const aiResponse = response.data.choices[0].message.content;
+    const aiResponse = await callAIProvider(provider, apiKey, model, systemPrompt, conversationMessages);
     console.log(`[Baileys AI] Respuesta: ${aiResponse.slice(0, 80)}`);
     await sendText(sock, jid, aiResponse, conversationId);
 
@@ -1526,7 +1580,8 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
 
     await supabase.from('conversations').update({
       current_flow_id: null,
-      current_node_id: null
+      current_node_id: null,
+      tag: repeatableMatch.tag || null
     }).eq('id', conversation.id);
 
     try { await cancelFollowups(conversation.id); } catch (e) { console.error('[Baileys] Error cancelando seguimientos:', e.message); }
@@ -1574,6 +1629,7 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
           .single();
         const startNode = (newFlow?.nodes || []).find(n => n.type === 'start');
         if (startNode) {
+          await supabase.from('conversations').update({ tag: otherTrigger.tag || null }).eq('id', conversation.id);
           await supabase.from('trigger_executions').insert({
             trigger_id: otherTrigger.id, contact_phone: contactPhone
           });
@@ -1630,6 +1686,8 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
         return;
       }
     }
+
+    await supabase.from('conversations').update({ tag: matchedTrigger.tag || null }).eq('id', conversation.id);
 
     await supabase.from('trigger_executions').insert({
       id: uuidv4(),
@@ -1866,4 +1924,30 @@ async function sendManualTextBaileys(connectionId, contactPhone, text, conversat
   }
 }
 
-module.exports = { startQRSession, getQRCode, closeQRSession, restoreActiveSessions, sendManualTextBaileys, activeSessions };
+// ── Envío manual de un archivo (imagen/video/audio/documento) ──
+// mediaType: 'image' | 'video' | 'audio' | 'document'
+async function sendManualMediaBaileys(connectionId, contactPhone, mediaType, url, extra = {}, rawJid = null) {
+  const sock = activeSessions[connectionId];
+  if (!sock) {
+    return { success: false, error: 'No hay una sesión de WhatsApp QR activa para esta conexión' };
+  }
+  const jid = rawJid || `${contactPhone}@s.whatsapp.net`;
+  try {
+    if (mediaType === 'image') {
+      await sendImage(sock, jid, url, extra.caption || '', null);
+    } else if (mediaType === 'video') {
+      await sendVideoMsg(sock, jid, url, extra.caption || '', null);
+    } else if (mediaType === 'audio') {
+      await sendAudioMsg(sock, jid, url, null, !!extra.asVoiceNote);
+    } else if (mediaType === 'document') {
+      await sendDocumentMsg(sock, jid, url, extra.fileName || '', null);
+    } else {
+      return { success: false, error: `Tipo de archivo no soportado: ${mediaType}` };
+    }
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+module.exports = { startQRSession, getQRCode, closeQRSession, restoreActiveSessions, sendManualTextBaileys, sendManualMediaBaileys, activeSessions };

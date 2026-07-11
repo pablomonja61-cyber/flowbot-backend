@@ -261,6 +261,50 @@ async function sendPurchaseEventToMeta(userId, conversation, saleAmount) {
   }
 }
 
+// ════════════════════════════════════════════════════════════
+// CALLAR A CUALQUIER PROVEEDOR DE IA (Groq, OpenAI, o Claude)
+// ════════════════════════════════════════════════════════════
+async function callAIProvider(provider, apiKey, model, systemPrompt, conversationMessages, maxTokens = 500) {
+  const prov = (provider || 'groq').toLowerCase();
+
+  if (prov === 'claude' || prov === 'anthropic') {
+    const response = await axios.post(
+      'https://api.anthropic.com/v1/messages',
+      {
+        model: model || 'claude-sonnet-4-6',
+        max_tokens: maxTokens,
+        system: systemPrompt,
+        messages: conversationMessages
+      },
+      {
+        headers: {
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          'Content-Type': 'application/json'
+        },
+        timeout: 15000
+      }
+    );
+    return response.data.content?.[0]?.text || '';
+  }
+
+  const baseUrl = prov === 'openai'
+    ? 'https://api.openai.com/v1/chat/completions'
+    : 'https://api.groq.com/openai/v1/chat/completions';
+  const defaultModel = prov === 'openai' ? 'gpt-4o-mini' : 'llama-3.3-70b-versatile';
+
+  const response = await axios.post(
+    baseUrl,
+    {
+      model: model || defaultModel,
+      max_tokens: maxTokens,
+      messages: [{ role: 'system', content: systemPrompt }, ...conversationMessages]
+    },
+    { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 15000 }
+  );
+  return response.data.choices?.[0]?.message?.content || '';
+}
+
 async function respondWithAI(userId, connection, to, userMessage, conversationId, aiConfigIdOverride = null, nodePrompt = null) {
   console.log(`[CloudAPI AI] Intentando responder con IA para user: ${userId}`);
   try {
@@ -299,8 +343,7 @@ async function respondWithAI(userId, connection, to, userMessage, conversationId
       .order('created_at', { ascending: true })
       .limit(10);
 
-    const messages = [
-      { role: 'system', content: systemPrompt },
+    const conversationMessages = [
       ...(history || []).slice(-8).map(m => ({
         role: m.direction === 'inbound' ? 'user' : 'assistant',
         content: m.content
@@ -308,16 +351,11 @@ async function respondWithAI(userId, connection, to, userMessage, conversationId
       { role: 'user', content: userMessage }
     ];
 
+    const provider = aiConfig?.provider || 'groq';
     const apiKey = aiConfig?.groq_api_key || process.env.GROQ_API_KEY;
-    const model = aiConfig?.model || 'llama-3.3-70b-versatile';
+    const model = aiConfig?.model || null;
 
-    const response = await axios.post(
-      'https://api.groq.com/openai/v1/chat/completions',
-      { model, max_tokens: 500, messages },
-      { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 15000 }
-    );
-
-    const aiResponse = response.data.choices[0].message.content;
+    const aiResponse = await callAIProvider(provider, apiKey, model, systemPrompt, conversationMessages);
     await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, to, aiResponse, conversationId);
   } catch (err) {
     console.error('[CloudAPI AI] Error:', err.response?.data || err.message);
@@ -1109,6 +1147,10 @@ module.exports = {
   executeFlow,
   saveMessage,
   sendWhatsAppMessage,
+  sendWhatsAppImage,
+  sendWhatsAppVideo,
+  sendWhatsAppAudio,
+  sendWhatsAppDocument,
   cancelFollowups,
   isCountryBlocked,
   checkOtherFlowTrigger,

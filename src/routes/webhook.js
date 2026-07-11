@@ -208,6 +208,13 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
   // 3. Guardar mensaje entrante
   await saveMessage(conversation.id, userMessage, 'inbound');
 
+  if (conversation.flow_active === false) {
+    // El botón "IA" está apagado para esta conversación — el negocio
+    // responde manualmente, el bot se queda en silencio (igual que en QR).
+    console.log(`[Webhook] IA desactivada para ${conversation.id} — bot no responde`);
+    return;
+  }
+
   // Antes de revisar si hay un flujo pausado, chequear si el mensaje
   // coincide con un disparador REPETIBLE — tiene prioridad sobre
   // cualquier pausa activa: reinicia el flujo desde cero.
@@ -230,7 +237,8 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
 
     await supabase.from('conversations').update({
       current_flow_id: null,
-      current_node_id: null
+      current_node_id: null,
+      tag: repeatableMatch.tag || null
     }).eq('id', conversation.id);
 
     try { await cancelFollowups(conversation.id); } catch (e) { console.error('[Webhook] Error cancelando seguimientos:', e.message); }
@@ -268,6 +276,7 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
         const { data: newFlow } = await supabase.from('flows').select('nodes').eq('id', otherTrigger.flow_id).single();
         const startNode = (newFlow?.nodes || []).find(n => n.type === 'start');
         if (startNode) {
+          await supabase.from('conversations').update({ tag: otherTrigger.tag || null }).eq('id', conversation.id);
           await supabase.from('trigger_executions').insert({ trigger_id: otherTrigger.id, contact_phone: contactPhone });
           await executeFlow(otherTrigger.flow_id, contactPhone, userMessage, connection, conversation.id, startNode.id);
           return;
@@ -345,6 +354,7 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
   }
 
   // 6. Registrar ejecución del trigger
+  await supabase.from('conversations').update({ tag: matchedTrigger.tag || null }).eq('id', conversation.id);
   await supabase.from('trigger_executions').insert({
     id: uuidv4(),
     trigger_id: matchedTrigger.id,

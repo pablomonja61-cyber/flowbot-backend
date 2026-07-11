@@ -3,7 +3,10 @@ const router = express.Router();
 const auth = require('../middleware/auth');
 const supabase = require('../models/supabase');
 const axios = require('axios');
-const { sendManualTextBaileys } = require('../services/baileys');
+const { sendManualTextBaileys, sendManualMediaBaileys } = require('../services/baileys');
+const {
+  sendWhatsAppImage, sendWhatsAppVideo, sendWhatsAppAudio, sendWhatsAppDocument, sendPurchaseEventToMeta
+} = require('../services/flowEngine');
 router.use(auth);
 // ── GET /api/conversations ────────────────────────────────────
 router.get('/', async (req, res, next) => {
@@ -28,8 +31,9 @@ router.get('/', async (req, res, next) => {
 // ── POST /api/conversations/:id/messages (envío manual) ───────
 router.post('/:id/messages', async (req, res, next) => {
   try {
-    const { content, direction = 'outbound' } = req.body;
-    if (!content) return res.status(400).json({ error: 'content requerido' });
+    const { content, direction = 'outbound', media_url, media_type, file_name } = req.body;
+    const esMedia = !!media_url;
+    if (!content && !esMedia) return res.status(400).json({ error: 'content o media_url requerido' });
 
     const { data: conv } = await supabase
       .from('conversations')
@@ -49,23 +53,28 @@ router.post('/:id/messages', async (req, res, next) => {
 
       if (esCloudAPI) {
         try {
-          await axios.post(
-            `https://graph.facebook.com/v19.0/${conv.connections.phone_number_id}/messages`,
-            {
-              messaging_product: 'whatsapp',
-              to: conv.contact_phone,
-              type: 'text',
-              text: { body: content }
-            },
-            { headers: { Authorization: `Bearer ${conv.connections.access_token}`, 'Content-Type': 'application/json' } }
-          );
+          if (esMedia) {
+            const { phone_number_id: pnid, access_token: tok } = conv.connections;
+            if (media_type === 'image') await sendWhatsAppImage(pnid, tok, conv.contact_phone, media_url, content || '', null);
+            else if (media_type === 'video') await sendWhatsAppVideo(pnid, tok, conv.contact_phone, media_url, content || '', null);
+            else if (media_type === 'audio') await sendWhatsAppAudio(pnid, tok, conv.contact_phone, media_url, null);
+            else if (media_type === 'document') await sendWhatsAppDocument(pnid, tok, conv.contact_phone, media_url, file_name || '', null);
+          } else {
+            await axios.post(
+              `https://graph.facebook.com/v19.0/${conv.connections.phone_number_id}/messages`,
+              { messaging_product: 'whatsapp', to: conv.contact_phone, type: 'text', text: { body: content } },
+              { headers: { Authorization: `Bearer ${conv.connections.access_token}`, 'Content-Type': 'application/json' } }
+            );
+          }
         } catch (e) {
           console.error('[Manual send error - Cloud API]', e.response?.data || e.message);
         }
       } else {
         // Conexión QR (Baileys) — usa el jid exacto guardado (puede ser
         // @lid en vez de @s.whatsapp.net), si ya lo tenemos registrado.
-        const result = await sendManualTextBaileys(conv.connection_id, conv.contact_phone, content, req.params.id, conv.last_jid);
+        const result = esMedia
+          ? await sendManualMediaBaileys(conv.connection_id, conv.contact_phone, media_type, media_url, { caption: content, fileName: file_name }, conv.last_jid)
+          : await sendManualTextBaileys(conv.connection_id, conv.contact_phone, content, req.params.id, conv.last_jid);
         if (!result.success) {
           console.error('[Manual send error - QR]', result.error);
         }
@@ -76,8 +85,10 @@ router.post('/:id/messages', async (req, res, next) => {
       .from('messages')
       .insert({
         conversation_id: req.params.id,
-        content,
+        content: content || (media_type === 'document' ? `[Documento: ${file_name || 'archivo'}]` : `[${(media_type || 'Media').replace(/^\w/, c => c.toUpperCase())}]`),
         direction,
+        msg_type: esMedia ? media_type : 'text',
+        media_url: esMedia ? media_url : null,
         created_at: new Date().toISOString()
       })
       .select()
@@ -288,10 +299,32 @@ router.patch('/:id/sale', async (req, res, next) => {
     // Si se marcó como venta y la conexión es WhatsApp API, avisarle
     // a Meta (Conversions API) para que pueda optimizar los anuncios.
     if (is_sale && data) {
-      const { sendPurchaseEventToMeta } = require('../services/flowEngine');
       sendPurchaseEventToMeta(req.user.id, data, sale_amount || 0).catch(() => {});
     }
 
+    res.json(data);
+  } catch (err) { next(err); }
+});
+
+// ── PATCH /api/conversations/:id/ai-toggle ─────────────────────
+// Prende/apaga el botón "IA" de una conversación específica.
+// Cuando está apagado (flow_active = false), el bot se queda en
+// silencio y el negocio responde manualmente. Ya funciona así en
+// el backend (QR y API) — esta ruta solo expone el interruptor.
+router.patch('/:id/ai-toggle', async (req, res, next) => {
+  try {
+    const { active } = req.body;
+    if (typeof active !== 'boolean') {
+      return res.status(400).json({ error: 'El campo "active" (true/false) es requerido' });
+    }
+    const { data, error } = await supabase
+      .from('conversations')
+      .update({ flow_active: active })
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id)
+      .select()
+      .single();
+    if (error) throw error;
     res.json(data);
   } catch (err) { next(err); }
 });
