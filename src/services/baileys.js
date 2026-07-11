@@ -1140,7 +1140,7 @@ async function processIncomingImageBaileys(connectionId, userId, sock, contactPh
         contact_name: contactName || contactPhone,
         status: 'active',
         unread_count: 1,
-        flow_active: true,
+        flow_active: false,
         last_message: '[Imagen]',
         last_message_at: new Date().toISOString()
       })
@@ -1525,7 +1525,7 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
         contact_name: contactName || contactPhone,
         status: 'active',
         unread_count: 1,
-        flow_active: true,
+        flow_active: false,
         last_message: isImage ? '[Imagen]' : userMessage.slice(0, 100),
         last_message_at: new Date().toISOString()
       })
@@ -1581,7 +1581,8 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
     await supabase.from('conversations').update({
       current_flow_id: null,
       current_node_id: null,
-      tag: repeatableMatch.tag || null
+      tag: repeatableMatch.tag || null,
+      flow_active: true
     }).eq('id', conversation.id);
 
     try { await cancelFollowups(conversation.id); } catch (e) { console.error('[Baileys] Error cancelando seguimientos:', e.message); }
@@ -1629,7 +1630,7 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
           .single();
         const startNode = (newFlow?.nodes || []).find(n => n.type === 'start');
         if (startNode) {
-          await supabase.from('conversations').update({ tag: otherTrigger.tag || null }).eq('id', conversation.id);
+          await supabase.from('conversations').update({ tag: otherTrigger.tag || null, flow_active: true }).eq('id', conversation.id);
           await supabase.from('trigger_executions').insert({
             trigger_id: otherTrigger.id, contact_phone: contactPhone
           });
@@ -1687,7 +1688,7 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
       }
     }
 
-    await supabase.from('conversations').update({ tag: matchedTrigger.tag || null }).eq('id', conversation.id);
+    await supabase.from('conversations').update({ tag: matchedTrigger.tag || null, flow_active: true }).eq('id', conversation.id);
 
     await supabase.from('trigger_executions').insert({
       id: uuidv4(),
@@ -1950,4 +1951,4 @@ async function sendManualMediaBaileys(connectionId, contactPhone, mediaType, url
   }
 }
 
-module.exports = { startQRSession, getQRCode, closeQRSession, restoreActiveSessions, sendManualTextBaileys, sendManualMediaBaileys, activeSessions };
+module.exports = { startQRSession, getQRCode, closeQRSession, restoreActiveSessions, sendManualTextBaileys, sendManualMediaBaileys, executeFlowBaileys, activeSessions };

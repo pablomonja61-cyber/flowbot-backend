@@ -129,7 +129,7 @@ async function processIncomingImageMessage(phoneNumberId, contactPhone, msg) {
       .insert({
         id: uuidv4(), user_id: userId, connection_id: connection.id,
         contact_phone: contactPhone, contact_name: contactPhone,
-        status: 'active', unread_count: 1,
+        status: 'active', unread_count: 1, flow_active: false,
         last_message: '[Imagen]', last_message_at: new Date().toISOString()
       })
       .select().single();
@@ -195,6 +195,7 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
         contact_name: contactPhone,
         status: 'active',
         unread_count: 1,
+        flow_active: false,
         ad_id: referral?.ad_id || null,
         ctwa_clid: referral?.ctwa_clid || null,
         last_message: userMessage.slice(0, 100),
@@ -238,7 +239,8 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
     await supabase.from('conversations').update({
       current_flow_id: null,
       current_node_id: null,
-      tag: repeatableMatch.tag || null
+      tag: repeatableMatch.tag || null,
+      flow_active: true
     }).eq('id', conversation.id);
 
     try { await cancelFollowups(conversation.id); } catch (e) { console.error('[Webhook] Error cancelando seguimientos:', e.message); }
@@ -276,7 +278,7 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
         const { data: newFlow } = await supabase.from('flows').select('nodes').eq('id', otherTrigger.flow_id).single();
         const startNode = (newFlow?.nodes || []).find(n => n.type === 'start');
         if (startNode) {
-          await supabase.from('conversations').update({ tag: otherTrigger.tag || null }).eq('id', conversation.id);
+          await supabase.from('conversations').update({ tag: otherTrigger.tag || null, flow_active: true }).eq('id', conversation.id);
           await supabase.from('trigger_executions').insert({ trigger_id: otherTrigger.id, contact_phone: contactPhone });
           await executeFlow(otherTrigger.flow_id, contactPhone, userMessage, connection, conversation.id, startNode.id);
           return;
@@ -354,7 +356,7 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
   }
 
   // 6. Registrar ejecución del trigger
-  await supabase.from('conversations').update({ tag: matchedTrigger.tag || null }).eq('id', conversation.id);
+  await supabase.from('conversations').update({ tag: matchedTrigger.tag || null, flow_active: true }).eq('id', conversation.id);
   await supabase.from('trigger_executions').insert({
     id: uuidv4(),
     trigger_id: matchedTrigger.id,

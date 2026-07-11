@@ -3,9 +3,9 @@ const router = express.Router();
 const auth = require('../middleware/auth');
 const supabase = require('../models/supabase');
 const axios = require('axios');
-const { sendManualTextBaileys, sendManualMediaBaileys } = require('../services/baileys');
+const { sendManualTextBaileys, sendManualMediaBaileys, executeFlowBaileys, activeSessions } = require('../services/baileys');
 const {
-  sendWhatsAppImage, sendWhatsAppVideo, sendWhatsAppAudio, sendWhatsAppDocument, sendPurchaseEventToMeta
+  sendWhatsAppImage, sendWhatsAppVideo, sendWhatsAppAudio, sendWhatsAppDocument, sendPurchaseEventToMeta, executeFlow
 } = require('../services/flowEngine');
 router.use(auth);
 // ── GET /api/conversations ────────────────────────────────────
@@ -326,6 +326,76 @@ router.patch('/:id/ai-toggle', async (req, res, next) => {
       .single();
     if (error) throw error;
     res.json(data);
+  } catch (err) { next(err); }
+});
+
+// ── GET /api/conversations/:id/flows-list ──────────────────────
+// Lista los flujos del usuario, para el selector del botón que
+// reemplazó al de emojis en el Chat en Vivo.
+router.get('/:id/flows-list', async (req, res, next) => {
+  try {
+    const { data, error } = await supabase
+      .from('flows')
+      .select('id, name')
+      .eq('user_id', req.user.id)
+      .order('name', { ascending: true });
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) { next(err); }
+});
+
+// ── POST /api/conversations/:id/activate-flow ───────────────────
+// Manda un flujo COMPLETO a un cliente manualmente (sin que haya
+// escrito ninguna palabra activadora) — usado cuando el negocio
+// entra al chat y elige un flujo del selector. Activa el flujo
+// (incluyendo sus pausas y seguimientos adjuntos, igual que un
+// disparador automático) y prende el botón "IA" de la conversación.
+router.post('/:id/activate-flow', async (req, res, next) => {
+  try {
+    const { flow_id } = req.body;
+    if (!flow_id) return res.status(400).json({ error: 'flow_id requerido' });
+
+    const { data: conv } = await supabase
+      .from('conversations')
+      .select('*, connections(*)')
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id)
+      .single();
+    if (!conv) return res.status(404).json({ error: 'Conversación no encontrada' });
+
+    const { data: flow } = await supabase
+      .from('flows')
+      .select('nodes')
+      .eq('id', flow_id)
+      .eq('user_id', req.user.id)
+      .single();
+    if (!flow) return res.status(404).json({ error: 'Flujo no encontrado' });
+
+    const startNode = (flow.nodes || []).find(n => n.type === 'start');
+    if (!startNode) return res.status(400).json({ error: 'Ese flujo no tiene un nodo de Inicio configurado' });
+
+    // Prender el botón IA — a partir de ahora el bot sí participa
+    // en esta conversación (seguimientos, pausas, todo lo normal).
+    await supabase.from('conversations').update({ flow_active: true }).eq('id', conv.id);
+
+    const esCloudAPI = !!(conv.connections?.phone_number_id && conv.connections?.access_token);
+
+    if (esCloudAPI) {
+      executeFlow(flow_id, conv.contact_phone, '', conv.connections, conv.id, startNode.id).catch(err => {
+        console.error('[Activar flujo manual - Cloud API]', err.message);
+      });
+    } else {
+      const sock = activeSessions[conv.connection_id];
+      if (!sock) {
+        return res.status(400).json({ error: 'No hay una sesión de WhatsApp QR activa para esta conexión ahora mismo' });
+      }
+      const jid = conv.last_jid || `${conv.contact_phone}@s.whatsapp.net`;
+      executeFlowBaileys(flow_id, sock, jid, conv.contact_phone, '', conv.id, startNode.id).catch(err => {
+        console.error('[Activar flujo manual - QR]', err.message);
+      });
+    }
+
+    res.json({ success: true });
   } catch (err) { next(err); }
 });
 
