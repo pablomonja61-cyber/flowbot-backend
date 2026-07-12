@@ -12,7 +12,7 @@ router.get('/', async (req, res, next) => {
   try {
     const { data, error } = await supabase
       .from('connections')
-      .select('id, name, phone_number, waba_id, is_active, created_at')
+      .select('id, name, phone_number, waba_id, is_active, connection_type, qr_status, created_at')
       .eq('user_id', req.user.id);
     if (error) throw error;
     res.json(data);
