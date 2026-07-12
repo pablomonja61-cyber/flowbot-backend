@@ -330,7 +330,33 @@ async function respondWithAIBaileys(userId, sock, jid, userMessage, conversation
 // ════════════════════════════════════════════════════════════
 async function scheduleSeguimientos(followupNode, sock, jid, contactPhone, conversationId) {
   const seguimientos = followupNode.data?.seguimientos || [];
+
+  // Revisar cuáles etapas de ESTE nodo ya se mandaron antes en esta
+  // conversación — si el cliente vuelve a pasar por el mismo punto de
+  // pausa (ej. responde algo y el flujo lo trae de vuelta aquí), no
+  // hay que reiniciar desde la primera etapa, solo continuar con la
+  // siguiente que todavía no se le mandó.
+  const segIds = seguimientos.map(s => s.id).filter(Boolean);
+  let yaEnviados = new Set();
+  if (segIds.length > 0) {
+    const { data: enviosPrevios } = await supabase
+      .from('scheduled_followups')
+      .select('seg_data')
+      .eq('conversation_id', conversationId)
+      .eq('status', 'sent');
+    yaEnviados = new Set(
+      (enviosPrevios || [])
+        .map(e => e.seg_data?.id)
+        .filter(id => id && segIds.includes(id))
+    );
+  }
+
   for (const seg of seguimientos) {
+    if (seg.id && yaEnviados.has(seg.id)) {
+      console.log(`[Baileys Flow] Seguimiento "${seg.id}" ya se envió antes en esta conversación — se omite, no se reinicia`);
+      continue;
+    }
+
     const minutos = seg.tiempo_minutos || 0;
     const precio = seg.precio || '';
     if (minutos > 0) {

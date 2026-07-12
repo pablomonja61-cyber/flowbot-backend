@@ -406,7 +406,28 @@ async function classifyResponseWithAI(userResponse, paths, aiConfigId) {
 // ════════════════════════════════════════════════════════════
 async function scheduleSeguimientos(followupNode, connection, phoneNumberId, accessToken, to, contactPhone, conversationId) {
   const seguimientos = followupNode.data?.seguimientos || [];
+
+  const segIds = seguimientos.map(s => s.id).filter(Boolean);
+  let yaEnviados = new Set();
+  if (segIds.length > 0) {
+    const { data: enviosPrevios } = await supabase
+      .from('scheduled_followups')
+      .select('seg_data')
+      .eq('conversation_id', conversationId)
+      .eq('status', 'sent');
+    yaEnviados = new Set(
+      (enviosPrevios || [])
+        .map(e => e.seg_data?.id)
+        .filter(id => id && segIds.includes(id))
+    );
+  }
+
   for (const seg of seguimientos) {
+    if (seg.id && yaEnviados.has(seg.id)) {
+      console.log(`[Flow] Seguimiento "${seg.id}" ya se envió antes en esta conversación — se omite, no se reinicia`);
+      continue;
+    }
+
     const minutos = seg.tiempo_minutos || 0;
     const precio = seg.precio || '';
     if (minutos > 0) {
