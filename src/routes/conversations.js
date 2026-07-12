@@ -81,11 +81,13 @@ router.post('/:id/messages', async (req, res, next) => {
       }
     }
 
+    const contentGuardado = content || (media_type === 'document' ? `[Documento: ${file_name || 'archivo'}]` : `[${(media_type || 'Media').replace(/^\w/, c => c.toUpperCase())}]`);
+
     const { data: msg, error } = await supabase
       .from('messages')
       .insert({
         conversation_id: req.params.id,
-        content: content || (media_type === 'document' ? `[Documento: ${file_name || 'archivo'}]` : `[${(media_type || 'Media').replace(/^\w/, c => c.toUpperCase())}]`),
+        content: contentGuardado,
         direction,
         msg_type: esMedia ? media_type : 'text',
         media_url: esMedia ? media_url : null,
@@ -96,7 +98,7 @@ router.post('/:id/messages', async (req, res, next) => {
     if (error) throw error;
 
     await supabase.from('conversations').update({
-      last_message: content.slice(0, 100),
+      last_message: contentGuardado.slice(0, 100),
       last_message_at: new Date().toISOString()
     }).eq('id', req.params.id);
 
