@@ -380,6 +380,18 @@ async function scheduleAttachedFollowups(flow, nodeId, sock, jid, contactPhone, 
     e => e.target === nodeId && e.sourceHandle === 'seguimiento-out'
   );
 
+  if (attachedEdges.length === 0) return;
+
+  // Antes de programar nuevos, cancela cualquier seguimiento pendiente
+  // de esta conversación — evita que se acumulen copias duplicadas si
+  // el cliente vuelve a pasar por el mismo punto de pausa (ej. si
+  // responde algo que lo hace re-elegir el mismo camino otra vez).
+  try {
+    await cancelFollowups(conversationId);
+  } catch (e) {
+    console.error('[Baileys Flow] Error cancelando seguimientos previos:', e.message);
+  }
+
   for (const edge of attachedEdges) {
     const followupNode = nodeMap[edge.source];
     if (followupNode && (followupNode.type === 'followup' || followupNode.type === 'delay_followup')) {

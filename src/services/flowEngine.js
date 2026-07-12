@@ -445,6 +445,14 @@ async function scheduleAttachedFollowups(flow, nodeId, connection, phoneNumberId
     e => e.target === nodeId && e.sourceHandle === 'seguimiento-out'
   );
 
+  if (attachedEdges.length === 0) return;
+
+  try {
+    await cancelFollowups(conversationId);
+  } catch (e) {
+    console.error('[Flow] Error cancelando seguimientos previos:', e.message);
+  }
+
   for (const edge of attachedEdges) {
     const followupNode = nodeMap[edge.source];
     if (followupNode && (followupNode.type === 'followup' || followupNode.type === 'delay_followup')) {
