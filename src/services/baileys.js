@@ -77,6 +77,29 @@ async function saveMsg(conversationId, content, direction, msgType = 'text', med
   }
 }
 
+// ── Foto de perfil real del cliente (solo disponible por QR — la API
+// oficial de Meta no permite acceder a la foto de perfil por política
+// de privacidad). Se intenta traer una sola vez por conversación y se
+// guarda en Supabase; si el cliente no tiene foto o la tiene privada,
+// sock.profilePictureUrl devuelve null y simplemente no se guarda nada
+// (el frontend debe mostrar su ícono por defecto en ese caso). No es
+// bloqueante — se dispara en paralelo, sin detener el procesamiento
+// del mensaje si tarda o falla.
+function updateProfilePicIfMissing(sock, jid, conversationId, currentUrl) {
+  if (currentUrl) return; // ya la tenemos, no hace falta pedirla de nuevo
+  sock.profilePictureUrl(jid, 'image')
+    .then(url => {
+      if (url) {
+        supabase.from('conversations').update({ profile_pic_url: url }).eq('id', conversationId)
+          .then(() => {}).catch(() => {});
+      }
+    })
+    .catch(() => {
+      // Sin foto de perfil, o el cliente tiene la privacidad restringida
+      // a "Nadie" — no es un error real, simplemente no hay nada que guardar.
+    });
+}
+
 // ── Enviar texto ─────────────────────────────────────────────
 // ── Mostrar "escribiendo..." antes de enviar (efecto natural) ──
 async function showTyping(sock, jid, textLength = 0) {
@@ -1198,6 +1221,8 @@ async function processIncomingImageBaileys(connectionId, userId, sock, contactPh
     supabase.from('conversations').update({ last_jid: jid }).eq('id', conversation.id).then(() => {}).catch(() => {});
   }
 
+  updateProfilePicIfMissing(sock, jid, conversation.id, conversation.profile_pic_url);
+
   // Descargar la imagen real usando Baileys
   let imageBuffer = null;
   try {
@@ -1585,6 +1610,8 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
   if (conversation.last_jid !== jid) {
     supabase.from('conversations').update({ last_jid: jid }).eq('id', conversation.id).then(() => {}).catch(() => {});
   }
+
+  updateProfilePicIfMissing(sock, jid, conversation.id, conversation.profile_pic_url);
 
   await saveMsg(conversation.id, isImage ? '[Imagen recibida]' : userMessage, 'inbound', isImage ? 'image' : 'text');
 
