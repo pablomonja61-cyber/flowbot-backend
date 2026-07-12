@@ -17,7 +17,7 @@ router.get('/', async (req, res, next) => {
       .from('conversations')
       .select(`
         id, contact_phone, contact_name, last_message,
-        last_message_at, unread_count, status, connection_id, tag, profile_pic_url,
+        last_message_at, unread_count, status, connection_id, tag, profile_pic_url, flow_active,
         connections(name)
       `, { count: 'exact' })
       .eq('user_id', req.user.id)
@@ -313,8 +313,18 @@ router.patch('/:id/sale', async (req, res, next) => {
 // el backend (QR y API) — esta ruta solo expone el interruptor.
 router.patch('/:id/ai-toggle', async (req, res, next) => {
   try {
-    const { active } = req.body;
-    if (typeof active !== 'boolean') {
+    const raw = req.body.active;
+    // Acepta boolean real (true/false), string ("true"/"false", "1"/"0")
+    // o número (1/0) — algunos frontends serializan distinto según cómo
+    // arman el request, así que no hay que ser estrictos con el tipo,
+    // solo con el significado.
+    let active;
+    if (typeof raw === 'boolean') active = raw;
+    else if (typeof raw === 'string') active = raw.toLowerCase() === 'true' || raw === '1';
+    else if (typeof raw === 'number') active = raw === 1;
+    else active = undefined;
+
+    if (active === undefined) {
       return res.status(400).json({ error: 'El campo "active" (true/false) es requerido' });
     }
     const { data, error } = await supabase
