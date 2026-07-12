@@ -1822,6 +1822,22 @@ async function startQRSession(connectionId, userId) {
 
     sock.ev.on('creds.update', saveCreds);
 
+    // WhatsApp envuelve las fotos "ver una vez" (view once) y las
+    // enviadas con mensajes temporales/efímeros activados en un
+    // contenedor distinto al normal (imageMessage directo). Si no se
+    // desenvuelve, el bot no detecta que es una imagen y el mensaje
+    // se descarta en silencio — el cliente manda una foto (ej. un
+    // comprobante de pago) y nunca se guarda ni aparece en el chat.
+    function unwrapWhatsAppMessage(message) {
+      if (!message) return message;
+      const wrapper =
+        message.ephemeralMessage?.message ||
+        message.viewOnceMessage?.message ||
+        message.viewOnceMessageV2?.message ||
+        message.viewOnceMessageV2Extension?.message;
+      return wrapper ? unwrapWhatsAppMessage(wrapper) : message;
+    }
+
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
       if (type !== 'notify') return;
 
@@ -1853,12 +1869,17 @@ async function startQRSession(connectionId, userId) {
         // Nombre real del contacto (pushName de WhatsApp)
         const contactName = msg.pushName || contactPhone;
 
-        const userMessage =
-          msg.message.conversation ||
-          msg.message.extendedTextMessage?.text ||
-          msg.message.imageMessage?.caption || '';
+        // Desenvolver el mensaje real (por si viene como "ver una vez"
+        // o efímero) antes de leer su contenido/tipo.
+        const innerMessage = unwrapWhatsAppMessage(msg.message);
+        const normalizedMsg = innerMessage === msg.message ? msg : { ...msg, message: innerMessage };
 
-        const isImage = !!msg.message.imageMessage;
+        const userMessage =
+          innerMessage.conversation ||
+          innerMessage.extendedTextMessage?.text ||
+          innerMessage.imageMessage?.caption || '';
+
+        const isImage = !!innerMessage.imageMessage;
 
         console.log(`[Baileys] 📨 Mensaje de ${contactPhone} (${contactName}): "${userMessage}"${isImage ? ' [Imagen]' : ''}`);
 
@@ -1869,11 +1890,11 @@ async function startQRSession(connectionId, userId) {
             // Las imágenes se procesan como posible comprobante de
             // pago, sin importar el estado del trigger/flujo actual.
             await enqueueForContact(queueKey, () =>
-              processIncomingImageBaileys(connectionId, userId, sock, contactPhone, msg, rawJid, contactName)
+              processIncomingImageBaileys(connectionId, userId, sock, contactPhone, normalizedMsg, rawJid, contactName)
             );
           } else {
             await enqueueForContact(queueKey, () =>
-              processBaileysMessage(connectionId, userId, sock, contactPhone, userMessage, isImage, msg, rawJid, contactName)
+              processBaileysMessage(connectionId, userId, sock, contactPhone, userMessage, isImage, normalizedMsg, rawJid, contactName)
             );
           }
         } catch (err) {
