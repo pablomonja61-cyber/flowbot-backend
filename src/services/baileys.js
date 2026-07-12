@@ -1588,52 +1588,72 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
 
   await saveMsg(conversation.id, isImage ? '[Imagen recibida]' : userMessage, 'inbound', isImage ? 'image' : 'text');
 
-  if (conversation.flow_active === false) {
-    // El flujo fue desactivado (ej. después de una venta) — el bot
-    // se queda en silencio, igual que en webhook.js (API oficial).
-    console.log(`[Baileys] Flujo desactivado para ${conversation.id} — bot no responde más`);
-    return;
-  }
-
-  // Antes de revisar si hay un flujo pausado, chequear si el mensaje
-  // coincide con un disparador marcado como REPETIBLE — ese caso tiene
-  // prioridad sobre cualquier pausa activa: reinicia el flujo desde
-  // cero sin importar en qué nodo se había quedado esperando.
+  // Antes de aplicar el apagado de IA o revisar si hay un flujo pausado,
+  // chequeamos si el mensaje coincide con CUALQUIER disparador activo
+  // (repetible o nuevo/no-repetible-nunca-ejecutado) — un disparador
+  // SIEMPRE tiene prioridad y reactiva el flujo, sin importar si la IA
+  // estaba apagada o si había una pausa activa esperando respuesta.
   const normalizedMsgEarly = userMessage.toLowerCase().trim();
-  const { data: repeatableTriggers } = await supabase
+  const { data: allActiveTriggersEarly } = await supabase
     .from('triggers')
     .select('*')
     .eq('user_id', userId)
     .eq('connection_id', connectionId)
-    .eq('is_active', true)
-    .eq('is_repeatable', true);
+    .eq('is_active', true);
 
-  const repeatableMatch = (repeatableTriggers || []).find(t => {
+  const earlyMatch = (allActiveTriggersEarly || []).find(t => {
     const kw = (t.keyword || '').toLowerCase().trim();
     return kw && (normalizedMsgEarly === kw || normalizedMsgEarly.includes(kw));
   });
 
-  if (repeatableMatch) {
-    console.log(`[Baileys] Trigger repetible "${repeatableMatch.keyword}" coincide — reinicia el flujo, sin importar pausa activa`);
+  if (earlyMatch) {
+    // Si NO es repetible, hay que revisar si ya se ejecutó antes para
+    // este contacto — de ser así, NO es un evento de "activar el flujo",
+    // es solo texto que coincide de casualidad, así que lo dejamos caer
+    // al flujo normal de abajo (que sí respeta el apagado de IA y la pausa).
+    let alreadyExecuted = false;
+    if (!earlyMatch.is_repeatable) {
+      const { count } = await supabase
+        .from('trigger_executions')
+        .select('*', { count: 'exact', head: true })
+        .eq('trigger_id', earlyMatch.id)
+        .eq('contact_phone', contactPhone);
+      alreadyExecuted = count > 0;
+    }
 
-    await supabase.from('conversations').update({
-      current_flow_id: null,
-      current_node_id: null,
-      tag: repeatableMatch.tag || null,
-      flow_active: true
-    }).eq('id', conversation.id);
+    if (!alreadyExecuted) {
+      console.log(`[Baileys] Trigger "${earlyMatch.keyword}" coincide — reactiva el flujo, sin importar IA apagada o pausa activa`);
 
-    try { await cancelFollowups(conversation.id); } catch (e) { console.error('[Baileys] Error cancelando seguimientos:', e.message); }
+      await supabase.from('conversations').update({
+        current_flow_id: null,
+        current_node_id: null,
+        tag: earlyMatch.tag || null,
+        flow_active: true
+      }).eq('id', conversation.id);
 
-    await supabase.from('trigger_executions').insert({
-      id: uuidv4(),
-      trigger_id: repeatableMatch.id,
-      contact_phone: contactPhone,
-      conversation_id: conversation.id,
-      executed_at: new Date().toISOString()
-    });
+      try { await cancelFollowups(conversation.id); } catch (e) { console.error('[Baileys] Error cancelando seguimientos:', e.message); }
 
-    await executeFlowBaileys(repeatableMatch.flow_id, sock, jid, contactPhone, userMessage, conversation.id);
+      await supabase.from('trigger_executions').insert({
+        id: uuidv4(),
+        trigger_id: earlyMatch.id,
+        contact_phone: contactPhone,
+        conversation_id: conversation.id,
+        executed_at: new Date().toISOString()
+      });
+
+      await executeFlowBaileys(earlyMatch.flow_id, sock, jid, contactPhone, userMessage, conversation.id);
+      return;
+    }
+  }
+
+  // Recién aquí se aplica el apagado manual de IA — un disparador válido
+  // ya habría reactivado el flujo y salido arriba, así que si llegamos
+  // hasta acá con flow_active en false, es momento de quedarse en silencio.
+  if (conversation.flow_active === false) {
+    // El flujo fue desactivado (ej. después de una venta, o manualmente
+    // con el botón IA) — el bot se queda en silencio, igual que en
+    // webhook.js (API oficial).
+    console.log(`[Baileys] Flujo desactivado para ${conversation.id} — bot no responde más`);
     return;
   }
 
@@ -1694,50 +1714,13 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
     return;
   }
 
-  const normalizedMsg = userMessage.toLowerCase().trim();
-
-  const { data: triggers } = await supabase
-    .from('triggers')
-    .select('*')
-    .eq('user_id', userId)
-    .eq('connection_id', connectionId)
-    .eq('is_active', true);
-
-  const matchedTrigger = (triggers || []).find(t => {
-    const kw = t.keyword.toLowerCase().trim();
-    return normalizedMsg === kw || normalizedMsg.includes(kw);
-  });
-
-  // Caso 1: el mensaje SÍ coincide con una palabra activadora → ejecutar flujo
-  if (matchedTrigger) {
-    if (!matchedTrigger.is_repeatable) {
-      const { count } = await supabase
-        .from('trigger_executions')
-        .select('*', { count: 'exact', head: true })
-        .eq('trigger_id', matchedTrigger.id)
-        .eq('contact_phone', contactPhone);
-
-      if (count > 0) {
-        // Ya se ejecutó antes → el flujo ya se activó en algún
-        // momento para este contacto, así que sí usamos IA.
-        console.log(`[Baileys] Trigger "${matchedTrigger.keyword}" no repetible y ya ejecutado — usando IA fallback`);
-        await respondWithAIBaileys(userId, sock, jid, userMessage, conversation.id);
-        return;
-      }
-    }
-
-    await supabase.from('conversations').update({ tag: matchedTrigger.tag || null, flow_active: true }).eq('id', conversation.id);
-
-    await supabase.from('trigger_executions').insert({
-      id: uuidv4(),
-      trigger_id: matchedTrigger.id,
-      contact_phone: contactPhone,
-      conversation_id: conversation.id,
-      executed_at: new Date().toISOString()
-    });
-
-    console.log(`[Baileys] ▶ Ejecutando trigger "${matchedTrigger.keyword}"`);
-    await executeFlowBaileys(matchedTrigger.flow_id, sock, jid, contactPhone, userMessage, conversation.id);
+  // Caso 1: el mensaje coincide con un trigger no-repetible que YA se
+  // había ejecutado antes para este contacto (detectado arriba en
+  // earlyMatch) → no es un evento de reactivación, así que aquí sí
+  // respetamos el estado normal y respondemos con IA como fallback.
+  if (earlyMatch) {
+    console.log(`[Baileys] Trigger "${earlyMatch.keyword}" no repetible y ya ejecutado — usando IA fallback`);
+    await respondWithAIBaileys(userId, sock, jid, userMessage, conversation.id);
     return;
   }
 
@@ -1748,11 +1731,11 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
   const yaActivo = await hasActivatedFlowBaileys(conversation.id);
 
   if (!yaActivo) {
-    console.log(`[Baileys] "${normalizedMsg}" no coincide con ningún trigger y la conversación nunca activó un flujo — el bot NO responde`);
+    console.log(`[Baileys] "${normalizedMsgEarly}" no coincide con ningún trigger y la conversación nunca activó un flujo — el bot NO responde`);
     return;
   }
 
-  console.log(`[Baileys] "${normalizedMsg}" no coincide con trigger, pero el flujo ya fue activado antes — usando IA fallback`);
+  console.log(`[Baileys] "${normalizedMsgEarly}" no coincide con trigger, pero el flujo ya fue activado antes — usando IA fallback`);
   await respondWithAIBaileys(userId, sock, jid, userMessage, conversation.id);
 }
 

@@ -209,51 +209,71 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
   // 3. Guardar mensaje entrante
   await saveMessage(conversation.id, userMessage, 'inbound');
 
-  if (conversation.flow_active === false) {
-    // El botón "IA" está apagado para esta conversación — el negocio
-    // responde manualmente, el bot se queda en silencio (igual que en QR).
-    console.log(`[Webhook] IA desactivada para ${conversation.id} — bot no responde`);
-    return;
-  }
-
-  // Antes de revisar si hay un flujo pausado, chequear si el mensaje
-  // coincide con un disparador REPETIBLE — tiene prioridad sobre
-  // cualquier pausa activa: reinicia el flujo desde cero.
+  // Antes de aplicar el apagado de IA o revisar si hay un flujo pausado,
+  // chequeamos si el mensaje coincide con CUALQUIER disparador activo
+  // (repetible o nuevo/no-repetible-nunca-ejecutado) — un disparador
+  // SIEMPRE tiene prioridad y reactiva el flujo, sin importar si la IA
+  // estaba apagada o si había una pausa activa esperando respuesta.
   const normalizedMsgEarly = userMessage.toLowerCase().trim();
-  const { data: repeatableTriggers } = await supabase
+  const { data: allActiveTriggersEarly } = await supabase
     .from('triggers')
     .select('*')
     .eq('user_id', userId)
     .eq('connection_id', connection.id)
-    .eq('is_active', true)
-    .eq('is_repeatable', true);
+    .eq('is_active', true);
 
-  const repeatableMatch = (repeatableTriggers || []).find(t => {
+  const earlyMatch = (allActiveTriggersEarly || []).find(t => {
     const kw = (t.keyword || '').toLowerCase().trim();
     return kw && (normalizedMsgEarly === kw || normalizedMsgEarly.includes(kw));
   });
 
-  if (repeatableMatch) {
-    console.log(`[Webhook] Trigger repetible "${repeatableMatch.keyword}" coincide — reinicia el flujo, sin importar pausa activa`);
+  if (earlyMatch) {
+    // Si NO es repetible, hay que revisar si ya se ejecutó antes para
+    // este contacto — de ser así, NO es un evento de "activar el flujo",
+    // es solo texto que coincide de casualidad, así que lo dejamos caer
+    // al flujo normal de abajo (que sí respeta el apagado de IA y la pausa).
+    let alreadyExecuted = false;
+    if (!earlyMatch.is_repeatable) {
+      const { count } = await supabase
+        .from('trigger_executions')
+        .select('*', { count: 'exact', head: true })
+        .eq('trigger_id', earlyMatch.id)
+        .eq('contact_phone', contactPhone);
+      alreadyExecuted = count > 0;
+    }
 
-    await supabase.from('conversations').update({
-      current_flow_id: null,
-      current_node_id: null,
-      tag: repeatableMatch.tag || null,
-      flow_active: true
-    }).eq('id', conversation.id);
+    if (!alreadyExecuted) {
+      console.log(`[Webhook] Trigger "${earlyMatch.keyword}" coincide — reactiva el flujo, sin importar IA apagada o pausa activa`);
 
-    try { await cancelFollowups(conversation.id); } catch (e) { console.error('[Webhook] Error cancelando seguimientos:', e.message); }
+      await supabase.from('conversations').update({
+        current_flow_id: null,
+        current_node_id: null,
+        tag: earlyMatch.tag || null,
+        flow_active: true
+      }).eq('id', conversation.id);
 
-    await supabase.from('trigger_executions').insert({
-      id: uuidv4(),
-      trigger_id: repeatableMatch.id,
-      contact_phone: contactPhone,
-      conversation_id: conversation.id,
-      executed_at: new Date().toISOString()
-    });
+      try { await cancelFollowups(conversation.id); } catch (e) { console.error('[Webhook] Error cancelando seguimientos:', e.message); }
 
-    await executeFlow(repeatableMatch.flow_id, contactPhone, userMessage, connection, conversation.id);
+      await supabase.from('trigger_executions').insert({
+        id: uuidv4(),
+        trigger_id: earlyMatch.id,
+        contact_phone: contactPhone,
+        conversation_id: conversation.id,
+        executed_at: new Date().toISOString()
+      });
+
+      await executeFlow(earlyMatch.flow_id, contactPhone, userMessage, connection, conversation.id);
+      return;
+    }
+  }
+
+  // Recién aquí se aplica el apagado manual de IA — un disparador válido
+  // ya habría reactivado el flujo y salido arriba, así que si llegamos
+  // hasta acá con flow_active en false, es momento de quedarse en silencio.
+  if (conversation.flow_active === false) {
+    // El botón "IA" está apagado para esta conversación — el negocio
+    // responde manualmente, el bot se queda en silencio (igual que en QR).
+    console.log(`[Webhook] IA desactivada para ${conversation.id} — bot no responde`);
     return;
   }
 
@@ -300,75 +320,37 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
     return;
   }
 
-  // 4. Buscar trigger que coincida con el mensaje
-  const normalizedMsg = userMessage.toLowerCase().trim();
+  // 4. El trigger ya se buscó arriba (earlyMatch), antes del apagado de
+  // IA y de la pausa. Si llegamos hasta acá con un earlyMatch, es porque
+  // era no-repetible y ya se había ejecutado antes → usamos IA fallback.
+  if (earlyMatch) {
+    console.log(`[Webhook] Trigger "${earlyMatch.keyword}" no repetible y ya ejecutado — usando IA fallback`);
+    await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
+    return;
+  }
 
-  const { data: triggers } = await supabase
+  // 5. Ningún trigger específico coincidió — buscar flujo default (catch-all)
+  const { data: allTriggersForDefault } = await supabase
     .from('triggers')
     .select('*, flows(id, nodes, edges, is_active)')
     .eq('user_id', userId)
     .eq('connection_id', connection.id)
     .eq('is_active', true);
 
-  if (!triggers?.length) {
+  if (!allTriggersForDefault?.length) {
     console.log(`[Webhook] No hay triggers activos para user ${userId}`);
     return;
   }
 
-  // Buscar trigger que coincida (exact match o contains)
-  const matchedTrigger = triggers.find(t => {
-    const kw = t.keyword.toLowerCase().trim();
-    return normalizedMsg === kw || normalizedMsg.includes(kw);
-  });
-
-  if (!matchedTrigger) {
-    // Buscar si hay algún flujo con Agente IA como respuesta por defecto
-    const defaultTrigger = triggers.find(t => t.keyword === '*' || t.keyword === 'default');
-    if (!defaultTrigger) {
-      console.log(`[Webhook] Sin coincidencia para: "${normalizedMsg}"`);
-      return;
-    }
-    // Ejecutar flujo default
-    await executeFlow(
-      defaultTrigger.flow_id,
-      contactPhone,
-      userMessage,
-      connection,
-      conversation.id
-    );
+  const defaultTrigger = allTriggersForDefault.find(t => t.keyword === '*' || t.keyword === 'default');
+  if (!defaultTrigger) {
+    console.log(`[Webhook] Sin coincidencia para: "${normalizedMsgEarly}"`);
     return;
   }
 
-  // 5. Verificar si es repetible o ya fue ejecutado
-  if (!matchedTrigger.is_repeatable) {
-    const { count } = await supabase
-      .from('trigger_executions')
-      .select('*', { count: 'exact', head: true })
-      .eq('trigger_id', matchedTrigger.id)
-      .eq('contact_phone', contactPhone);
-    if (count > 0) {
-      // Ya se ejecutó antes → no reinicia el flujo desde cero, solo
-      // continúa la conversación con la IA (igual que en QR).
-      console.log(`[Webhook] Trigger "${matchedTrigger.keyword}" no repetible y ya ejecutado — usando IA fallback`);
-      await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
-      return;
-    }
-  }
-
-  // 6. Registrar ejecución del trigger
-  await supabase.from('conversations').update({ tag: matchedTrigger.tag || null, flow_active: true }).eq('id', conversation.id);
-  await supabase.from('trigger_executions').insert({
-    id: uuidv4(),
-    trigger_id: matchedTrigger.id,
-    contact_phone: contactPhone,
-    conversation_id: conversation.id,
-    executed_at: new Date().toISOString()
-  });
-
-  // 7. Ejecutar el flujo
-  console.log(`[Webhook] Ejecutando flujo "${matchedTrigger.flows?.id}" para trigger "${matchedTrigger.name}"`);
+  // 6. Ejecutar flujo default
   await executeFlow(
-    matchedTrigger.flow_id,
+    defaultTrigger.flow_id,
     contactPhone,
     userMessage,
     connection,
