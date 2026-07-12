@@ -122,7 +122,9 @@ router.get('/:id/messages', async (req, res, next) => {
       .eq('conversation_id', req.params.id)
       .order('created_at', { ascending: true });
     if (error) throw error;
-    await supabase.from('conversations').update({ unread_count: 0 }).eq('id', req.params.id);
+    // Marcar como leído no necesita bloquear la respuesta — el usuario
+    // ya tiene sus mensajes, esto puede terminar de guardarse en paralelo.
+    supabase.from('conversations').update({ unread_count: 0 }).eq('id', req.params.id).then(() => {}).catch(() => {});
     res.json(data);
   } catch (err) { next(err); }
 });
@@ -163,57 +165,39 @@ router.get('/dashboard/stats', async (req, res, next) => {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
     thirtyDaysAgo.setHours(0, 0, 0, 0);
-    const { count: total_conversations } = await supabase
-      .from('conversations')
-      .select('*', { count: 'exact', head: true })
-      .eq('user_id', req.user.id);
-    const { count: conversations_today } = await supabase
-      .from('conversations')
-      .select('*', { count: 'exact', head: true })
-      .eq('user_id', req.user.id)
-      .gte('created_at', today.toISOString());
-    const { count: conversations_30d } = await supabase
-      .from('conversations')
-      .select('*', { count: 'exact', head: true })
-      .eq('user_id', req.user.id)
-      .gte('created_at', thirtyDaysAgo.toISOString());
-    const { count: messages_today } = await supabase
-      .from('messages')
-      .select('conversations!inner(user_id)', { count: 'exact', head: true })
-      .eq('conversations.user_id', req.user.id)
-      .gte('created_at', today.toISOString());
-    const { count: messages_30d } = await supabase
-      .from('messages')
-      .select('conversations!inner(user_id)', { count: 'exact', head: true })
-      .eq('conversations.user_id', req.user.id)
-      .gte('created_at', thirtyDaysAgo.toISOString());
-    const { count: active_conversations } = await supabase
-      .from('conversations')
-      .select('*', { count: 'exact', head: true })
-      .eq('user_id', req.user.id)
-      .eq('status', 'active');
-    const { count: sales_total } = await supabase
-      .from('conversations')
-      .select('*', { count: 'exact', head: true })
-      .eq('user_id', req.user.id)
-      .eq('is_sale', true);
-    const { count: sales_today } = await supabase
-      .from('conversations')
-      .select('*', { count: 'exact', head: true })
-      .eq('user_id', req.user.id)
-      .eq('is_sale', true)
-      .gte('sale_at', today.toISOString());
-    const { count: sales_30d } = await supabase
-      .from('conversations')
-      .select('*', { count: 'exact', head: true })
-      .eq('user_id', req.user.id)
-      .eq('is_sale', true)
-      .gte('sale_at', thirtyDaysAgo.toISOString());
-    const { data: salesData } = await supabase
-      .from('conversations')
-      .select('sale_amount, sale_at')
-      .eq('user_id', req.user.id)
-      .eq('is_sale', true);
+
+    // Antes estas 11 consultas se pedían una por una (await tras await),
+    // así que el tiempo total era la SUMA de las 11 — si cada una tarda
+    // ~400-500ms, eso son varios segundos de espera. Ninguna depende del
+    // resultado de otra, así que se piden todas en paralelo con
+    // Promise.all — el tiempo total pasa a ser el de la consulta más
+    // lenta, no la suma de todas.
+    const [
+      { count: total_conversations },
+      { count: conversations_today },
+      { count: conversations_30d },
+      { count: messages_today },
+      { count: messages_30d },
+      { count: active_conversations },
+      { count: sales_total },
+      { count: sales_today },
+      { count: sales_30d },
+      { data: salesData },
+      { data: convByDay }
+    ] = await Promise.all([
+      supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id),
+      supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).gte('created_at', today.toISOString()),
+      supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).gte('created_at', thirtyDaysAgo.toISOString()),
+      supabase.from('messages').select('conversations!inner(user_id)', { count: 'exact', head: true }).eq('conversations.user_id', req.user.id).gte('created_at', today.toISOString()),
+      supabase.from('messages').select('conversations!inner(user_id)', { count: 'exact', head: true }).eq('conversations.user_id', req.user.id).gte('created_at', thirtyDaysAgo.toISOString()),
+      supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).eq('status', 'active'),
+      supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).eq('is_sale', true),
+      supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).eq('is_sale', true).gte('sale_at', today.toISOString()),
+      supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).eq('is_sale', true).gte('sale_at', thirtyDaysAgo.toISOString()),
+      supabase.from('conversations').select('sale_amount, sale_at').eq('user_id', req.user.id).eq('is_sale', true),
+      supabase.from('conversations').select('created_at').eq('user_id', req.user.id).gte('created_at', thirtyDaysAgo.toISOString()).order('created_at', { ascending: true })
+    ]);
+
     const total_revenue = (salesData || []).reduce((sum, s) => sum + (s.sale_amount || 0), 0);
     const revenue_30d = (salesData || [])
       .filter(s => s.sale_at && new Date(s.sale_at) >= thirtyDaysAgo)
@@ -223,12 +207,6 @@ router.get('/dashboard/stats', async (req, res, next) => {
       .reduce((sum, s) => sum + (s.sale_amount || 0), 0);
     const avg_ticket = sales_total > 0 ? total_revenue / sales_total : 0;
     const conversion_rate = conversations_30d > 0 ? ((sales_30d / conversations_30d) * 100).toFixed(1) : 0;
-    const { data: convByDay } = await supabase
-      .from('conversations')
-      .select('created_at')
-      .eq('user_id', req.user.id)
-      .gte('created_at', thirtyDaysAgo.toISOString())
-      .order('created_at', { ascending: true });
     const dailyMap = {};
     for (let i = 0; i < 30; i++) {
       const d = new Date(thirtyDaysAgo);
