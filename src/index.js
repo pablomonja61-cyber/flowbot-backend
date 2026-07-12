@@ -18,10 +18,8 @@ const mediaRoutes = require('./routes/media');
 const remarketingRoutes = require('./routes/remarketing');
 const adsConfigRoutes = require('./routes/adsConfig');
 const adsMetricsRoutes = require('./routes/adsMetrics');
-
 const app = express();
 const PORT = process.env.PORT || 3000;
-
 // ── Seguridad y utilidades ──────────────────────────────────
 app.use(helmet());
 app.use(morgan('combined'));
@@ -38,12 +36,10 @@ app.use('/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 app.use(express.raw({ type: 'multipart/form-data', limit: '100mb' }));
-
 // ── Health check ────────────────────────────────────────────
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
-
 // ── Rutas ───────────────────────────────────────────────────
 app.use('/webhook', webhookRoutes);
 app.use('/api/auth', authRoutes);
@@ -59,14 +55,6 @@ app.use('/api/media', mediaRoutes);
 app.use('/api/remarketing', remarketingRoutes);
 app.use('/api/ads-config', adsConfigRoutes);
 app.use('/api/ads-metrics', adsMetricsRoutes);
-
-const { runScheduler } = require('./services/flowEngine');
-app.get('/api/scheduler/run', async (req, res) => {
-  if (req.query.secret !== process.env.SCHEDULER_SECRET) return res.status(401).json({ error: 'No autorizado' });
-  await runScheduler();
-  res.json({ ok: true, time: new Date().toISOString() });
-});
-
 // ── Error handler global ────────────────────────────────────
 app.use((err, req, res, next) => {
   console.error('[ERROR]', err.message);
@@ -74,7 +62,6 @@ app.use((err, req, res, next) => {
     error: err.message || 'Error interno del servidor'
   });
 });
-
 setTimeout(() => restoreActiveSessions(), 3000);
 app.listen(PORT, () => {
   console.log(`🚀 Backend corriendo en puerto ${PORT}`);
@@ -83,5 +70,4 @@ app.listen(PORT, () => {
   console.log(`📁 Media:   POST /api/media/upload | GET /api/media`);
   console.log(`📢 Remarketing: GET/POST /api/remarketing`);
 });
-
 module.exports = app;
