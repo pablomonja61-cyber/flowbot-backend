@@ -397,4 +397,71 @@ router.post('/:id/activate-flow', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── GET /api/conversations/dashboard/sales-by-flow ─────────────
+// Cuántas ventas (y cuánto ingreso) generó cada flujo — para el
+// gráfico de barras "¿Qué flujo vende más?" del Dashboard.
+router.get('/dashboard/sales-by-flow', async (req, res, next) => {
+  try {
+    // 1. Todos los triggers del usuario, con el nombre de su flujo
+    const { data: triggers } = await supabase
+      .from('triggers')
+      .select('id, flow_id, flows(id, name)')
+      .eq('user_id', req.user.id);
+
+    if (!triggers?.length) return res.json({ flows: [] });
+
+    const triggerIds = triggers.map(t => t.id);
+    const triggerToFlow = {};
+    triggers.forEach(t => { triggerToFlow[t.id] = t.flows; });
+
+    // 2. Todas las ejecuciones de esos triggers
+    const { data: executions } = await supabase
+      .from('trigger_executions')
+      .select('trigger_id, conversation_id')
+      .in('trigger_id', triggerIds);
+
+    if (!executions?.length) return res.json({ flows: [] });
+
+    // 3. Conversaciones involucradas, para saber cuáles terminaron en venta
+    const convIds = [...new Set(executions.map(e => e.conversation_id).filter(Boolean))];
+    const { data: convs } = await supabase
+      .from('conversations')
+      .select('id, is_sale, sale_amount')
+      .in('id', convIds);
+
+    const convMap = {};
+    (convs || []).forEach(c => { convMap[c.id] = c; });
+
+    // 4. Agrupar por flujo — una conversación cuenta una sola vez por
+    // flujo aunque el trigger se haya ejecutado varias veces ahí.
+    const porFlujo = {};
+    const conversacionesContadasPorFlujo = {};
+
+    for (const exec of executions) {
+      const flow = triggerToFlow[exec.trigger_id];
+      if (!flow) continue;
+      const flowId = flow.id;
+      if (!porFlujo[flowId]) {
+        porFlujo[flowId] = { flow_id: flowId, flow_name: flow.name || 'Sin nombre', sales: 0, revenue: 0, conversations: 0 };
+        conversacionesContadasPorFlujo[flowId] = new Set();
+      }
+      if (conversacionesContadasPorFlujo[flowId].has(exec.conversation_id)) continue;
+      conversacionesContadasPorFlujo[flowId].add(exec.conversation_id);
+
+      porFlujo[flowId].conversations += 1;
+      const conv = convMap[exec.conversation_id];
+      if (conv?.is_sale) {
+        porFlujo[flowId].sales += 1;
+        porFlujo[flowId].revenue += parseFloat(conv.sale_amount || 0);
+      }
+    }
+
+    const flows = Object.values(porFlujo)
+      .map(f => ({ ...f, revenue: Number(f.revenue.toFixed(2)) }))
+      .sort((a, b) => b.sales - a.sales);
+
+    res.json({ flows });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
