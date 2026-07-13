@@ -57,6 +57,42 @@ function sleep(ms) {
 }
 
 // ── Guardar mensaje ──────────────────────────────────────────
+// ── Detectar automáticamente si un mensaje del bot está pidiendo el
+// pago (sin que el negocio tenga que marcar nada manualmente) — se
+// usa para contar "Pendientes" en el Dashboard: clientes a los que
+// se les mandó esto pero todavía no confirmaron la venta.
+const PALABRAS_CLAVE_PAGO = [
+  'yape', 'plin', 'transferencia', 'transferir', 'número de cuenta',
+  'numero de cuenta', 'nro de cuenta', 'código de operación',
+  'codigo de operacion', 'depósito', 'deposito', 'realizar el pago',
+  'realiza tu pago', 'envía tu comprobante', 'envia tu comprobante',
+  'manda tu comprobante', 'manda el comprobante', 'captura de pago',
+  'código qr', 'codigo qr', 'monto a pagar', 'para pagar'
+];
+
+function pareceSolicitudDePago(texto) {
+  if (!texto) return false;
+  const t = texto.toLowerCase();
+  return PALABRAS_CLAVE_PAGO.some(p => t.includes(p));
+}
+
+function marcarSolicitudDePagoSiAplica(conversationId, textoCompleto) {
+  if (!pareceSolicitudDePago(textoCompleto)) return;
+  // No pisa la fecha si ya se había marcado antes (queremos el primer
+  // momento en que se le pidió el pago, no el último).
+  supabase.from('conversations')
+    .select('payment_requested_at, is_sale')
+    .eq('id', conversationId)
+    .single()
+    .then(({ data }) => {
+      if (data && !data.payment_requested_at && !data.is_sale) {
+        supabase.from('conversations').update({ payment_requested_at: new Date().toISOString() }).eq('id', conversationId)
+          .then(() => {}).catch(() => {});
+      }
+    })
+    .catch(() => {});
+}
+
 async function saveMsg(conversationId, content, direction, msgType = 'text', mediaUrl = null) {
   if (!conversationId || !content) return;
   try {
@@ -490,6 +526,7 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
       case 'message':
       case 'content': {
         const items = node.data?.items || [];
+        let textoNodoCompleto = '';
         for (let i = 0; i < items.length; i++) {
           const item = items[i];
           const tipo = (item.type || '').toLowerCase();
@@ -504,18 +541,24 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
           if (tipo === 'text' || tipo === 'texto') {
             const text = item.text || item.content || '';
             if (text) await sendText(sock, jid, text, conversationId);
+            textoNodoCompleto += ' ' + text;
           } else if (tipo === 'image' || tipo === 'imagen') {
             await sendImage(sock, jid, item.url || '', item.caption || '', conversationId);
+            textoNodoCompleto += ' ' + (item.caption || '');
           } else if (tipo === 'video') {
             await sendVideoMsg(sock, jid, item.url || '', item.caption || item.description || '', conversationId);
+            textoNodoCompleto += ' ' + (item.caption || item.description || '');
           } else if (tipo === 'audio') {
             await sendAudioMsg(sock, jid, item.url || '', conversationId, !!item.asVoiceNote);
           } else if (tipo === 'doc' || tipo === 'document' || tipo === 'documento') {
             await sendDocumentMsg(sock, jid, item.url || '', item.fileName || item.name || '', conversationId);
+            textoNodoCompleto += ' ' + (item.fileName || item.name || '');
           }
 
           await sleep(600);
         }
+
+        marcarSolicitudDePagoSiAplica(conversationId, textoNodoCompleto);
 
         if (node.data?.esperarRespuesta) {
           await supabase.from('conversations').update({
@@ -547,6 +590,7 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
           fullText += '\n\n' + buttons.map((b, i) => `${i + 1}. ${b}`).join('\n');
         }
         if (fullText) await sendText(sock, jid, fullText, conversationId);
+        marcarSolicitudDePagoSiAplica(conversationId, fullText);
 
         if (buttons.length > 0) {
           await supabase.from('conversations').update({

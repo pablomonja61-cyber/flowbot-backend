@@ -182,6 +182,8 @@ router.get('/dashboard/stats', async (req, res, next) => {
       { count: sales_total },
       { count: sales_today },
       { count: sales_30d },
+      { count: pending_today },
+      { count: pending_30d },
       { data: salesData },
       { data: convByDay }
     ] = await Promise.all([
@@ -194,6 +196,10 @@ router.get('/dashboard/stats', async (req, res, next) => {
       supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).eq('is_sale', true),
       supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).eq('is_sale', true).gte('sale_at', today.toISOString()),
       supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).eq('is_sale', true).gte('sale_at', thirtyDaysAgo.toISOString()),
+      // "Pendientes" = se le pidió el pago (payment_requested_at) pero
+      // todavía no se confirmó la venta (is_sale sigue en false).
+      supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).eq('is_sale', false).not('payment_requested_at', 'is', null).gte('payment_requested_at', today.toISOString()),
+      supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).eq('is_sale', false).not('payment_requested_at', 'is', null).gte('payment_requested_at', thirtyDaysAgo.toISOString()),
       supabase.from('conversations').select('sale_amount, sale_at').eq('user_id', req.user.id).eq('is_sale', true),
       supabase.from('conversations').select('created_at').eq('user_id', req.user.id).gte('created_at', thirtyDaysAgo.toISOString()).order('created_at', { ascending: true })
     ]);
@@ -245,6 +251,8 @@ router.get('/dashboard/stats', async (req, res, next) => {
       sales_total: sales_total || 0,
       sales_today: sales_today || 0,
       sales_30d: sales_30d || 0,
+      pending_today: pending_today || 0,
+      pending_30d: pending_30d || 0,
       total_revenue,
       revenue_today,
       revenue_30d,

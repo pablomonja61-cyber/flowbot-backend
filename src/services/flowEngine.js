@@ -4,6 +4,40 @@ const { v4: uuidv4 } = require('uuid');
 
 const GRAPH_VERSION = 'v19.0';
 
+// ── Detectar automáticamente si un mensaje del bot está pidiendo el
+// pago (sin que el negocio tenga que marcar nada manualmente) — se
+// usa para contar "Pendientes" en el Dashboard: clientes a los que
+// se les mandó esto pero todavía no confirmaron la venta.
+const PALABRAS_CLAVE_PAGO = [
+  'yape', 'plin', 'transferencia', 'transferir', 'número de cuenta',
+  'numero de cuenta', 'nro de cuenta', 'código de operación',
+  'codigo de operacion', 'depósito', 'deposito', 'realizar el pago',
+  'realiza tu pago', 'envía tu comprobante', 'envia tu comprobante',
+  'manda tu comprobante', 'manda el comprobante', 'captura de pago',
+  'código qr', 'codigo qr', 'monto a pagar', 'para pagar'
+];
+
+function pareceSolicitudDePago(texto) {
+  if (!texto) return false;
+  const t = texto.toLowerCase();
+  return PALABRAS_CLAVE_PAGO.some(p => t.includes(p));
+}
+
+function marcarSolicitudDePagoSiAplica(conversationId, textoCompleto) {
+  if (!pareceSolicitudDePago(textoCompleto)) return;
+  supabase.from('conversations')
+    .select('payment_requested_at, is_sale')
+    .eq('id', conversationId)
+    .single()
+    .then(({ data }) => {
+      if (data && !data.payment_requested_at && !data.is_sale) {
+        supabase.from('conversations').update({ payment_requested_at: new Date().toISOString() }).eq('id', conversationId)
+          .then(() => {}).catch(() => {});
+      }
+    })
+    .catch(() => {});
+}
+
 // ════════════════════════════════════════════════════════════
 // ENVÍO DE MENSAJES (WhatsApp Cloud API)
 // ════════════════════════════════════════════════════════════
@@ -522,10 +556,12 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
       case 'message':
       case 'content': {
         const items = node.data?.items || [];
+        let textoNodoCompleto = '';
 
         if (items.length === 0) {
           const legacyText = node.data?.text || node.data?.content || '';
           if (legacyText) await sendWhatsAppMessage(phoneNumberId, accessToken, to, legacyText, conversationId);
+          textoNodoCompleto += ' ' + legacyText;
         }
 
         for (const item of items) {
@@ -537,17 +573,23 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
           if (tipo === 'text' || tipo === 'texto') {
             const text = item.text || item.content || '';
             if (text) await sendWhatsAppMessage(phoneNumberId, accessToken, to, text, conversationId);
+            textoNodoCompleto += ' ' + text;
           } else if (tipo === 'image' || tipo === 'imagen') {
             await sendWhatsAppImage(phoneNumberId, accessToken, to, item.url || '', item.caption || '', conversationId);
+            textoNodoCompleto += ' ' + (item.caption || '');
           } else if (tipo === 'video') {
             await sendWhatsAppVideo(phoneNumberId, accessToken, to, item.url || '', item.caption || item.description || '', conversationId);
+            textoNodoCompleto += ' ' + (item.caption || item.description || '');
           } else if (tipo === 'audio') {
             await sendWhatsAppAudio(phoneNumberId, accessToken, to, item.url || '', conversationId);
           } else if (tipo === 'doc' || tipo === 'document' || tipo === 'documento') {
             await sendWhatsAppDocument(phoneNumberId, accessToken, to, item.url || '', item.fileName || item.name || '', conversationId);
+            textoNodoCompleto += ' ' + (item.fileName || item.name || '');
           }
           await sleep(500);
         }
+
+        marcarSolicitudDePagoSiAplica(conversationId, textoNodoCompleto);
 
         if (node.data?.esperarRespuesta) {
           await supabase.from('conversations').update({
@@ -582,6 +624,7 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
 
         if (buttons.length > 0) {
           await sendWhatsAppButtons(phoneNumberId, accessToken, to, text, buttons, conversationId, header, footerText);
+          marcarSolicitudDePagoSiAplica(conversationId, text);
           await supabase.from('conversations').update({
             current_flow_id: flowId, current_node_id: node.id, flow_active: true
           }).eq('id', conversationId);
@@ -596,6 +639,7 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
             await sleep(600);
           }
           await sendWhatsAppMessage(phoneNumberId, accessToken, to, text, conversationId);
+          marcarSolicitudDePagoSiAplica(conversationId, text);
         }
         break;
       }
