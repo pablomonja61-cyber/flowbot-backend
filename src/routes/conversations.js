@@ -7,6 +7,40 @@ const { sendManualTextBaileys, sendManualMediaBaileys, executeFlowBaileys, activ
 const {
   sendWhatsAppImage, sendWhatsAppVideo, sendWhatsAppAudio, sendWhatsAppDocument, sendPurchaseEventToMeta, executeFlow
 } = require('../services/flowEngine');
+
+// ── Conversión de moneda real para el Dashboard ─────────────────
+// Todos los montos de venta se guardan en Soles (PEN), la moneda del
+// negocio. Cuando el usuario elige ver el Dashboard en otra moneda,
+// convertimos de verdad usando tasas de cambio reales — antes solo
+// se cambiaba la etiqueta sin convertir el número.
+// API gratuita, sin key, 166 monedas: https://www.exchangerate-api.com/docs/free
+let cacheTasasCambio = { rates: null, fetchedAt: 0 };
+const UNA_HORA_MS = 60 * 60 * 1000;
+
+async function obtenerTasasCambio() {
+  const ahora = Date.now();
+  if (cacheTasasCambio.rates && (ahora - cacheTasasCambio.fetchedAt) < UNA_HORA_MS) {
+    return cacheTasasCambio.rates;
+  }
+  try {
+    const { data } = await axios.get('https://open.er-api.com/v6/latest/PEN', { timeout: 8000 });
+    if (data?.result === 'success' && data.rates) {
+      cacheTasasCambio = { rates: data.rates, fetchedAt: ahora };
+      return data.rates;
+    }
+  } catch (e) {
+    console.error('[Dashboard] Error obteniendo tasas de cambio:', e.message);
+  }
+  // Si falla la API y hay un caché viejo, mejor usarlo que no convertir nada
+  return cacheTasasCambio.rates || null;
+}
+
+async function convertirDesdeSoles(monto, monedaDestino) {
+  if (!monedaDestino || monedaDestino === 'PEN') return monto;
+  const rates = await obtenerTasasCambio();
+  if (!rates || !rates[monedaDestino]) return monto; // sin tasa disponible, devuelve el original sin convertir
+  return monto * rates[monedaDestino];
+}
 router.use(auth);
 // ── GET /api/conversations ────────────────────────────────────
 router.get('/', async (req, res, next) => {
@@ -241,6 +275,18 @@ router.get('/dashboard/stats', async (req, res, next) => {
       const wd = new Date(s.sale_at).getDay();
       byWeekday[wd].sales++;
     });
+
+    // Todos los montos se calcularon en Soles (PEN) — si el frontend
+    // pidió otra moneda (?currency=USD), se convierten de verdad acá,
+    // con tasas de cambio reales, antes de responder.
+    const monedaSolicitada = (req.query.currency || 'PEN').toUpperCase();
+    const [total_revenue_conv, revenue_today_conv, revenue_30d_conv, avg_ticket_conv] = await Promise.all([
+      convertirDesdeSoles(total_revenue, monedaSolicitada),
+      convertirDesdeSoles(revenue_today, monedaSolicitada),
+      convertirDesdeSoles(revenue_30d, monedaSolicitada),
+      convertirDesdeSoles(avg_ticket, monedaSolicitada)
+    ]);
+
     res.json({
       total_conversations,
       conversations_today,
@@ -253,10 +299,11 @@ router.get('/dashboard/stats', async (req, res, next) => {
       sales_30d: sales_30d || 0,
       pending_today: pending_today || 0,
       pending_30d: pending_30d || 0,
-      total_revenue,
-      revenue_today,
-      revenue_30d,
-      avg_ticket,
+      currency: monedaSolicitada,
+      total_revenue: Number(total_revenue_conv.toFixed(2)),
+      revenue_today: Number(revenue_today_conv.toFixed(2)),
+      revenue_30d: Number(revenue_30d_conv.toFixed(2)),
+      avg_ticket: Number(avg_ticket_conv.toFixed(2)),
       conversion_rate: parseFloat(conversion_rate),
       daily_chart,
       by_weekday: byWeekday
