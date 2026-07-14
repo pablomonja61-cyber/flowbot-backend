@@ -4,6 +4,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const webhookRoutes = require('./routes/webhook');
+const hotmartRoutes = require('./routes/hotmart');
 const authRoutes = require('./routes/auth');
 const flowRoutes = require('./routes/flows');
 const triggerRoutes = require('./routes/triggers');
@@ -42,6 +43,7 @@ app.get('/health', (req, res) => {
 });
 // ── Rutas ───────────────────────────────────────────────────
 app.use('/webhook', webhookRoutes);
+app.use('/webhook', hotmartRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/flows', flowRoutes);
 app.use('/api/triggers', triggerRoutes);

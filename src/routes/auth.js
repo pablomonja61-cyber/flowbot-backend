@@ -11,16 +11,34 @@ router.post('/register', async (req, res, next) => {
       return res.status(400).json({ error: 'email, password y name son requeridos' });
     }
 
+    const emailNormalizado = email.toLowerCase().trim();
+
+    // ── Verificar que este correo tenga una compra aprobada en
+    // Hotmart antes de dejar crear la cuenta — así no se puede
+    // registrar nadie gratis. Tiene que ser EXACTAMENTE el mismo
+    // correo con el que se compró.
+    const { data: compra } = await supabase
+      .from('hotmart_purchases')
+      .select('status')
+      .eq('email', emailNormalizado)
+      .maybeSingle();
+
+    if (!compra || compra.status !== 'approved') {
+      return res.status(403).json({
+        error: 'Este correo no tiene una compra válida de AriaBot. Usa el mismo correo con el que compraste, o adquiere tu acceso primero.'
+      });
+    }
+
     // Crear usuario en Supabase Auth
     const { data: authData, error: authError } = await supabase.auth.signUp({
-      email, password
+      email: emailNormalizado, password
     });
     if (authError) throw { status: 400, message: authError.message };
 
     // Crear perfil en tabla users
     const { data: profile, error: profileError } = await supabase
       .from('users')
-      .insert({ id: authData.user.id, email, name, plan: 'free' })
+      .insert({ id: authData.user.id, email: emailNormalizado, name, plan: 'free' })
       .select()
       .single();
     if (profileError) throw profileError;
