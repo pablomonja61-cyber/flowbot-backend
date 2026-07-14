@@ -7,7 +7,6 @@ const { sendManualTextBaileys, sendManualMediaBaileys, executeFlowBaileys, activ
 const {
   sendWhatsAppImage, sendWhatsAppVideo, sendWhatsAppAudio, sendWhatsAppDocument, sendPurchaseEventToMeta, executeFlow
 } = require('../services/flowEngine');
-const { enviarPushAUsuario } = require('../services/pushService');
 
 // ── Conversión de moneda real para el Dashboard ─────────────────
 // Todos los montos de venta se guardan en Soles (PEN), la moneda del
@@ -348,14 +347,9 @@ router.patch('/:id/sale', async (req, res, next) => {
     // a Meta (Conversions API) para que pueda optimizar los anuncios.
     if (is_sale && data) {
       sendPurchaseEventToMeta(req.user.id, data, sale_amount || 0).catch(() => {});
-
-      // Notificación push al celular/dispositivos del negocio — "cha-ching"
-      const nombreCliente = data.contact_name || data.contact_phone || 'un cliente';
-      enviarPushAUsuario(req.user.id, {
-        title: '💰 ¡Nueva venta!',
-        body: `${nombreCliente} compró por S/${(sale_amount || 0).toFixed(2)}`,
-        data: { conversation_id: data.id, type: 'sale' }
-      }).catch(() => {});
+      // Notificación push: pausada por ahora (ver conversación anterior).
+      // Cuando se retome, volver a agregar el require de pushService y
+      // descomentar esto.
     }
 
     res.json(data);
