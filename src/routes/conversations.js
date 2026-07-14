@@ -7,6 +7,7 @@ const { sendManualTextBaileys, sendManualMediaBaileys, executeFlowBaileys, activ
 const {
   sendWhatsAppImage, sendWhatsAppVideo, sendWhatsAppAudio, sendWhatsAppDocument, sendPurchaseEventToMeta, executeFlow
 } = require('../services/flowEngine');
+const { enviarPushAUsuario } = require('../services/pushService');
 
 // ── Conversión de moneda real para el Dashboard ─────────────────
 // Todos los montos de venta se guardan en Soles (PEN), la moneda del
@@ -163,14 +164,28 @@ router.get('/:id/messages', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── Calcular "medianoche de hoy" en hora de Perú (America/Lima,
+// UTC-5 fijo, sin horario de verano) — sin esto, el servidor usa su
+// propia zona horaria (normalmente UTC en Railway), y "HOY" no
+// coincide con el día real del negocio, dando números que no cuadran
+// entre las tarjetas "HOY" y "30D" incluso el primer día de uso.
+function inicioDeHoyLima() {
+  const ahoraUTC = Date.now();
+  const limaMs = ahoraUTC - 5 * 60 * 60 * 1000; // hora de Lima, en timestamp
+  const limaDate = new Date(limaMs);
+  const y = limaDate.getUTCFullYear();
+  const m = limaDate.getUTCMonth();
+  const d = limaDate.getUTCDate();
+  // 00:00 en Lima equivale a 05:00 UTC del mismo día
+  return new Date(Date.UTC(y, m, d, 5, 0, 0, 0));
+}
+
 // ── GET /api/conversations/stats/summary ─────────────────────
 router.get('/stats/summary', async (req, res, next) => {
   try {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    thirtyDaysAgo.setHours(0, 0, 0, 0);
+    const today = inicioDeHoyLima();
+    const thirtyDaysAgo = new Date(today);
+    thirtyDaysAgo.setUTCDate(thirtyDaysAgo.getUTCDate() - 30);
     const [
       { count: total },
       { count: today_count },
@@ -194,11 +209,9 @@ router.get('/stats/summary', async (req, res, next) => {
 // ── GET /api/conversations/dashboard ─────────────────────────
 router.get('/dashboard/stats', async (req, res, next) => {
   try {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    thirtyDaysAgo.setHours(0, 0, 0, 0);
+    const today = inicioDeHoyLima();
+    const thirtyDaysAgo = new Date(today);
+    thirtyDaysAgo.setUTCDate(thirtyDaysAgo.getUTCDate() - 30);
 
     // Antes estas 11 consultas se pedían una por una (await tras await),
     // así que el tiempo total era la SUMA de las 11 — si cada una tarda
@@ -335,6 +348,14 @@ router.patch('/:id/sale', async (req, res, next) => {
     // a Meta (Conversions API) para que pueda optimizar los anuncios.
     if (is_sale && data) {
       sendPurchaseEventToMeta(req.user.id, data, sale_amount || 0).catch(() => {});
+
+      // Notificación push al celular/dispositivos del negocio — "cha-ching"
+      const nombreCliente = data.contact_name || data.contact_phone || 'un cliente';
+      enviarPushAUsuario(req.user.id, {
+        title: '💰 ¡Nueva venta!',
+        body: `${nombreCliente} compró por S/${(sale_amount || 0).toFixed(2)}`,
+        data: { conversation_id: data.id, type: 'sale' }
+      }).catch(() => {});
     }
 
     res.json(data);
