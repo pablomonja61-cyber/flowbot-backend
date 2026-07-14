@@ -526,4 +526,34 @@ router.get('/dashboard/sales-by-flow', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── GET /api/conversations/dashboard/sales-by-hour ──────────────
+// Ventas de HOY agrupadas por hora (0-23), en hora de Perú — para el
+// gráfico "ACTIVIDAD CADA 1H". Se reinicia solo cada día, porque
+// solo mira las ventas de hoy (no acumula entre días).
+router.get('/dashboard/sales-by-hour', async (req, res, next) => {
+  try {
+    const inicioHoy = inicioDeHoyLima();
+
+    const { data: ventasHoy } = await supabase
+      .from('conversations')
+      .select('sale_at')
+      .eq('user_id', req.user.id)
+      .eq('is_sale', true)
+      .gte('sale_at', inicioHoy.toISOString());
+
+    // 24 horas en 0, listas para llenar
+    const porHora = Array.from({ length: 24 }, (_, h) => ({ hour: h, sales: 0 }));
+
+    for (const v of (ventasHoy || [])) {
+      if (!v.sale_at) continue;
+      // Convertir la hora UTC guardada a hora de Lima (UTC-5 fijo)
+      const ms = new Date(v.sale_at).getTime() - 5 * 60 * 60 * 1000;
+      const horaLima = new Date(ms).getUTCHours();
+      porHora[horaLima].sales += 1;
+    }
+
+    res.json({ hours: porHora });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
