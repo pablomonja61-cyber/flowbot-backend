@@ -259,34 +259,55 @@ router.get('/dashboard/stats', async (req, res, next) => {
       .reduce((sum, s) => sum + (s.sale_amount || 0), 0);
     const avg_ticket = sales_total > 0 ? total_revenue / sales_total : 0;
     const conversion_rate = conversations_30d > 0 ? ((sales_30d / conversations_30d) * 100).toFixed(1) : 0;
+    // Fecha (YYYY-MM-DD) en hora de Lima — mismo motivo que arriba: la
+    // fecha "cruda" del timestamp UTC puede caer en el día equivocado
+    // cerca de la medianoche.
+    function fechaLimaYMD(fechaISO) {
+      const ms = new Date(fechaISO).getTime() - 5 * 60 * 60 * 1000;
+      return new Date(ms).toISOString().split('T')[0];
+    }
+
     const dailyMap = {};
     for (let i = 0; i < 30; i++) {
       const d = new Date(thirtyDaysAgo);
-      d.setDate(d.getDate() + i);
+      d.setUTCDate(d.getUTCDate() + i);
       const key = d.toISOString().split('T')[0];
       dailyMap[key] = { date: key, conversations: 0, sales: 0 };
     }
     (convByDay || []).forEach(c => {
-      const key = c.created_at.split('T')[0];
+      const key = fechaLimaYMD(c.created_at);
       if (dailyMap[key]) dailyMap[key].conversations++;
     });
     (salesData || []).forEach(s => {
       if (!s.sale_at) return;
-      const key = s.sale_at.split('T')[0];
+      const key = fechaLimaYMD(s.sale_at);
       if (dailyMap[key]) dailyMap[key].sales++;
     });
     const daily_chart = Object.values(dailyMap);
     const weekdays = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
     const byWeekday = weekdays.map(day => ({ day, sales: 0, conversations: 0 }));
+
+    // Día de la semana calculado en hora de Lima (no la del servidor) —
+    // si no, un mensaje de las 11pm en Lima puede contarse como si
+    // fuera el día siguiente, dependiendo de en qué zona horaria
+    // corra Railway.
+    function diaSemanaLima(fechaISO) {
+      const ms = new Date(fechaISO).getTime() - 5 * 60 * 60 * 1000;
+      return new Date(ms).getUTCDay();
+    }
+
     (convByDay || []).forEach(c => {
-      const wd = new Date(c.created_at).getDay();
-      byWeekday[wd].conversations++;
+      byWeekday[diaSemanaLima(c.created_at)].conversations++;
     });
-    (salesData || []).forEach(s => {
-      if (!s.sale_at) return;
-      const wd = new Date(s.sale_at).getDay();
-      byWeekday[wd].sales++;
-    });
+    // Solo ventas de los últimos 30 días, para que coincida con el
+    // mismo rango que las conversaciones de arriba — antes se mezclaba
+    // TODO el histórico de ventas con solo 30 días de conversaciones,
+    // lo cual no tenía relación real entre ambas barras.
+    (salesData || [])
+      .filter(s => s.sale_at && new Date(s.sale_at) >= thirtyDaysAgo)
+      .forEach(s => {
+        byWeekday[diaSemanaLima(s.sale_at)].sales++;
+      });
 
     // Todos los montos se calcularon en Soles (PEN) — si el frontend
     // pidió otra moneda (?currency=USD), se convierten de verdad acá,
