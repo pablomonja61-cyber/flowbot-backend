@@ -268,11 +268,14 @@ router.get('/dashboard/stats', async (req, res, next) => {
     }
 
     const dailyMap = {};
-    for (let i = 0; i < 30; i++) {
+    // i <= 30 (31 días) en vez de i < 30 — el cálculo anterior siempre
+    // se cortaba UN DÍA ANTES de hoy (thirtyDaysAgo + 29 días = ayer,
+    // nunca llegaba a incluir el día actual). Así sí incluye hoy.
+    for (let i = 0; i <= 30; i++) {
       const d = new Date(thirtyDaysAgo);
       d.setUTCDate(d.getUTCDate() + i);
       const key = d.toISOString().split('T')[0];
-      dailyMap[key] = { date: key, conversations: 0, sales: 0 };
+      dailyMap[key] = { date: key, conversations: 0, sales: 0, revenue: 0 };
     }
     (convByDay || []).forEach(c => {
       const key = fechaLimaYMD(c.created_at);
@@ -281,9 +284,15 @@ router.get('/dashboard/stats', async (req, res, next) => {
     (salesData || []).forEach(s => {
       if (!s.sale_at) return;
       const key = fechaLimaYMD(s.sale_at);
-      if (dailyMap[key]) dailyMap[key].sales++;
+      if (dailyMap[key]) {
+        dailyMap[key].sales++;
+        // Antes solo se contaba CUÁNTAS ventas hubo por día, nunca se
+        // sumaba el MONTO — por eso el gráfico de "Ingresos" siempre
+        // salía en cero, no había ningún campo de dinero que graficar.
+        dailyMap[key].revenue += (s.sale_amount || 0);
+      }
     });
-    const daily_chart = Object.values(dailyMap);
+    const daily_chart = Object.values(dailyMap).map(d => ({ ...d, revenue: Number(d.revenue.toFixed(2)) }));
     const weekdays = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
     const byWeekday = weekdays.map(day => ({ day, sales: 0, conversations: 0 }));
 
@@ -320,6 +329,11 @@ router.get('/dashboard/stats', async (req, res, next) => {
       convertirDesdeSoles(avg_ticket, monedaSolicitada)
     ]);
 
+    // Convertir también el ingreso de cada día del gráfico, para que
+    // combine con el resto de montos ya convertidos arriba.
+    const tasaParaChart = monedaSolicitada === 'PEN' ? 1 : (await obtenerTasasCambio())?.[monedaSolicitada] || 1;
+    const daily_chart_convertido = daily_chart.map(d => ({ ...d, revenue: Number((d.revenue * tasaParaChart).toFixed(2)) }));
+
     res.json({
       total_conversations,
       conversations_today,
@@ -338,7 +352,7 @@ router.get('/dashboard/stats', async (req, res, next) => {
       revenue_30d: Number(revenue_30d_conv.toFixed(2)),
       avg_ticket: Number(avg_ticket_conv.toFixed(2)),
       conversion_rate: parseFloat(conversion_rate),
-      daily_chart,
+      daily_chart: daily_chart_convertido,
       by_weekday: byWeekday
     });
   } catch (err) {
