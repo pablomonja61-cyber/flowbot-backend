@@ -385,6 +385,21 @@ router.patch('/:id/sale', async (req, res, next) => {
       // Notificación push: pausada por ahora (ver conversación anterior).
       // Cuando se retome, volver a agregar el require de pushService y
       // descomentar esto.
+
+      // Sistema de recompensas: sumar esta venta al total histórico
+      // en dólares del usuario — permanente, no depende de ninguna
+      // conexión de WhatsApp ni conversación (aunque se borre el
+      // WhatsApp conectado, este número nunca baja, solo suma).
+      (async () => {
+        try {
+          const montoEnDolares = await convertirDesdeSoles(sale_amount || 0, 'USD');
+          const { data: userActual } = await supabase.from('users').select('lifetime_revenue_usd').eq('id', req.user.id).single();
+          const nuevoTotal = (userActual?.lifetime_revenue_usd || 0) + montoEnDolares;
+          await supabase.from('users').update({ lifetime_revenue_usd: nuevoTotal }).eq('id', req.user.id);
+        } catch (e) {
+          console.error('[Recompensas] Error sumando al total histórico:', e.message);
+        }
+      })();
     }
 
     res.json(data);
@@ -588,6 +603,49 @@ router.get('/dashboard/sales-by-hour', async (req, res, next) => {
     }
 
     res.json({ hours: porHora });
+  } catch (err) { next(err); }
+});
+
+// ── GET /api/conversations/rewards ──────────────────────────────
+// Sistema de recompensas por dinero generado históricamente (en
+// dólares, acumulado para siempre, sin importar si se cambia o
+// borra la conexión de WhatsApp).
+const NIVELES_RECOMPENSA = [
+  { nivel: 1, nombre: 'Novato', min: 0, max: 10000 },
+  { nivel: 2, nombre: 'Vendedor Pro', min: 10000, max: 50000 },
+  { nivel: 3, nombre: 'Disparador de Elite', min: 50000, max: 100000 },
+  { nivel: 4, nombre: 'Leyenda de Ventas', min: 100000, max: 200000 }
+];
+
+router.get('/rewards', async (req, res, next) => {
+  try {
+    const { data: user } = await supabase
+      .from('users')
+      .select('lifetime_revenue_usd')
+      .eq('id', req.user.id)
+      .single();
+
+    const total = user?.lifetime_revenue_usd || 0;
+
+    // Encontrar el nivel actual — el último tramo donde el total ya
+    // superó el mínimo (si superó los 200k, se queda en el último
+    // nivel, mostrando la barra llena).
+    let nivelActual = NIVELES_RECOMPENSA[0];
+    for (const n of NIVELES_RECOMPENSA) {
+      if (total >= n.min) nivelActual = n;
+    }
+
+    const progresoEnNivel = Math.min(total - nivelActual.min, nivelActual.max - nivelActual.min);
+    const metaDelNivel = nivelActual.max - nivelActual.min;
+
+    res.json({
+      total_usd: Number(total.toFixed(2)),
+      nivel: nivelActual.nivel,
+      nombre_nivel: nivelActual.nombre,
+      progreso_usd: Number(progresoEnNivel.toFixed(2)),
+      meta_usd: metaDelNivel,
+      nivel_maximo_alcanzado: total >= NIVELES_RECOMPENSA[NIVELES_RECOMPENSA.length - 1].max
+    });
   } catch (err) { next(err); }
 });
 
