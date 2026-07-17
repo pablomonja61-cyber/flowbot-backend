@@ -23,6 +23,18 @@ function pareceSolicitudDePago(texto) {
   return PALABRAS_CLAVE_PAGO.some(p => t.includes(p));
 }
 
+// ── Anti-Baneo: elige una variación al azar del texto (si el item la
+// tiene configurada), en vez de mandar siempre el texto original —
+// mismo motivo que en baileys.js, evitar el patrón de "mensaje
+// idéntico repetido" que WhatsApp usa para detectar bots.
+function elegirTextoConVariacion(item, textoOriginal) {
+  if (!item?.antiBaneo || !Array.isArray(item.variaciones) || item.variaciones.length === 0) {
+    return textoOriginal;
+  }
+  const opciones = [textoOriginal, ...item.variaciones];
+  return opciones[Math.floor(Math.random() * opciones.length)];
+}
+
 function marcarSolicitudDePagoSiAplica(conversationId, textoCompleto) {
   if (!pareceSolicitudDePago(textoCompleto)) return;
   supabase.from('conversations')
@@ -571,15 +583,18 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
             continue;
           }
           if (tipo === 'text' || tipo === 'texto') {
-            const text = item.text || item.content || '';
+            const textoBase = item.text || item.content || '';
+            const text = elegirTextoConVariacion(item, textoBase);
             if (text) await sendWhatsAppMessage(phoneNumberId, accessToken, to, text, conversationId);
-            textoNodoCompleto += ' ' + text;
+            textoNodoCompleto += ' ' + textoBase;
           } else if (tipo === 'image' || tipo === 'imagen') {
-            await sendWhatsAppImage(phoneNumberId, accessToken, to, item.url || '', item.caption || '', conversationId);
-            textoNodoCompleto += ' ' + (item.caption || '');
+            const captionBase = item.caption || '';
+            await sendWhatsAppImage(phoneNumberId, accessToken, to, item.url || '', elegirTextoConVariacion(item, captionBase), conversationId);
+            textoNodoCompleto += ' ' + captionBase;
           } else if (tipo === 'video') {
-            await sendWhatsAppVideo(phoneNumberId, accessToken, to, item.url || '', item.caption || item.description || '', conversationId);
-            textoNodoCompleto += ' ' + (item.caption || item.description || '');
+            const captionBase = item.caption || item.description || '';
+            await sendWhatsAppVideo(phoneNumberId, accessToken, to, item.url || '', elegirTextoConVariacion(item, captionBase), conversationId);
+            textoNodoCompleto += ' ' + captionBase;
           } else if (tipo === 'audio') {
             await sendWhatsAppAudio(phoneNumberId, accessToken, to, item.url || '', conversationId);
           } else if (tipo === 'doc' || tipo === 'document' || tipo === 'documento') {
