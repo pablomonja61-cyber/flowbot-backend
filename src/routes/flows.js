@@ -172,6 +172,9 @@ Responde SOLO con un array JSON de ${n} strings, sin explicación ni texto adici
     );
 
     let raw = response.data?.choices?.[0]?.message?.content?.trim() || '[]';
+    // Por si acaso el modelo devuelve razonamiento envuelto en <think>
+    // antes del JSON — se limpia antes de intentar parsearlo.
+    raw = raw.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
     raw = raw.replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/```$/, '').trim();
 
     let variations;

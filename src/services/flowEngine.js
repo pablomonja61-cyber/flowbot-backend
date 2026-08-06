@@ -307,6 +307,19 @@ async function sendPurchaseEventToMeta(userId, conversation, saleAmount) {
   }
 }
 
+// ── Algunos modelos "de razonamiento" (como Qwen) piensan en voz alta
+// antes de responder, envolviendo ese pensamiento en <think>...</think>
+// — eso NUNCA debe llegarle al cliente por WhatsApp, solo la respuesta
+// final. Esta función lo quita, sin importar qué modelo se use.
+function limpiarRazonamiento(texto) {
+  if (!texto) return texto;
+  let limpio = texto.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+  if (/<think>/i.test(limpio)) {
+    limpio = limpio.replace(/<think>[\s\S]*$/gi, '').trim();
+  }
+  return limpio;
+}
+
 // ════════════════════════════════════════════════════════════
 // CALLAR A CUALQUIER PROVEEDOR DE IA (Groq, OpenAI, o Claude)
 // ════════════════════════════════════════════════════════════
@@ -331,7 +344,7 @@ async function callAIProvider(provider, apiKey, model, systemPrompt, conversatio
         timeout: 15000
       }
     );
-    return response.data.content?.[0]?.text || '';
+    return limpiarRazonamiento(response.data.content?.[0]?.text || '');
   }
 
   const baseUrl = prov === 'openai'
@@ -348,7 +361,7 @@ async function callAIProvider(provider, apiKey, model, systemPrompt, conversatio
     },
     { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 15000 }
   );
-  return response.data.choices?.[0]?.message?.content || '';
+  return limpiarRazonamiento(response.data.choices?.[0]?.message?.content || '');
 }
 
 async function respondWithAI(userId, connection, to, userMessage, conversationId, aiConfigIdOverride = null, nodePrompt = null) {
@@ -435,7 +448,7 @@ async function classifyResponseWithAI(userResponse, paths, aiConfigId) {
       },
       { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 10000 }
     );
-    const raw = response.data.choices[0].message.content.trim();
+    const raw = limpiarRazonamiento(response.data.choices[0].message.content.trim());
     const idx = parseInt(raw.match(/-?\d+/)?.[0] ?? '-1', 10);
     return (idx >= 0 && idx < paths.length) ? idx : -1;
   } catch (err) {
@@ -913,7 +926,7 @@ Responde SOLO en formato JSON exacto:
       },
       { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }
     );
-    const rawText = visionResponse.data.choices[0].message.content.trim();
+    const rawText = limpiarRazonamiento(visionResponse.data.choices[0].message.content.trim());
     const jsonMatch = rawText.match(/\{[\s\S]*\}/);
     if (jsonMatch) analysisResult = JSON.parse(jsonMatch[0]);
   } catch (err) {

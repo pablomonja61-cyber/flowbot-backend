@@ -292,6 +292,22 @@ async function sendDocumentMsg(sock, jid, url, fileName, conversationId) {
 // ════════════════════════════════════════════════════════════
 // RESPONDER CON IA
 // ════════════════════════════════════════════════════════════
+// ── Algunos modelos "de razonamiento" (como Qwen) piensan en voz alta
+// antes de responder, envolviendo ese pensamiento en <think>...</think>
+// — eso NUNCA debe llegarle al cliente por WhatsApp, solo la respuesta
+// final. Esta función lo quita, sin importar qué modelo se use.
+function limpiarRazonamiento(texto) {
+  if (!texto) return texto;
+  let limpio = texto.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+  // Si quedó una etiqueta <think> abierta sin cerrar (la respuesta se
+  // cortó a mitad del razonamiento, sin llegar a la respuesta real),
+  // se quita todo desde ahí — mejor vacío que mandar pensamiento crudo.
+  if (/<think>/i.test(limpio)) {
+    limpio = limpio.replace(/<think>[\s\S]*$/gi, '').trim();
+  }
+  return limpio;
+}
+
 // ════════════════════════════════════════════════════════════
 // CALLAR A CUALQUIER PROVEEDOR DE IA (Groq, OpenAI, o Claude)
 // Cada usuario puede elegir cuál usar en "Integraciones" — esta
@@ -320,7 +336,7 @@ async function callAIProvider(provider, apiKey, model, systemPrompt, conversatio
         timeout: 15000
       }
     );
-    return response.data.content?.[0]?.text || '';
+  return limpiarRazonamiento(response.data.content?.[0]?.text || '');
   }
 
   // Groq y OpenAI comparten el mismo formato ("OpenAI-compatible")
@@ -342,7 +358,7 @@ async function callAIProvider(provider, apiKey, model, systemPrompt, conversatio
       timeout: 15000
     }
   );
-  return response.data.choices?.[0]?.message?.content || '';
+  return limpiarRazonamiento(response.data.choices?.[0]?.message?.content || '');
 }
 
 async function respondWithAIBaileys(userId, sock, jid, userMessage, conversationId, aiConfigIdOverride = null, nodePrompt = null) {
@@ -862,7 +878,7 @@ async function classifyResponseWithAI(userResponse, paths, aiConfigId) {
       },
       { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 10000 }
     );
-    const raw = response.data.choices[0].message.content.trim();
+    const raw = limpiarRazonamiento(response.data.choices[0].message.content.trim());
     const idx = parseInt(raw.match(/-?\d+/)?.[0] ?? '-1', 10);
     return (idx >= 0 && idx < paths.length) ? idx : -1;
   } catch (err) {
@@ -1436,7 +1452,7 @@ Responde SOLO en formato JSON exacto, sin texto adicional:
       }
     );
 
-    const rawText = visionResponse.data.choices[0].message.content.trim();
+    const rawText = limpiarRazonamiento(visionResponse.data.choices[0].message.content.trim());
     console.log('[Baileys Payment Vision] Respuesta IA:', rawText);
 
     const jsonMatch = rawText.match(/\{[\s\S]*\}/);
