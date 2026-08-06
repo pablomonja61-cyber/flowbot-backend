@@ -144,13 +144,36 @@ async function saveMsg(conversationId, content, direction, msgType = 'text', med
 // (el frontend debe mostrar su ícono por defecto en ese caso). No es
 // bloqueante — se dispara en paralelo, sin detener el procesamiento
 // del mensaje si tarda o falla.
+//
+// IMPORTANTE: el link que devuelve sock.profilePictureUrl() es un
+// dominio de WhatsApp (pps.whatsapp.net) que RECHAZA con 403 cualquier
+// carga directa desde un navegador — solo responde a clientes con la
+// sesión autenticada de WhatsApp, como esta librería. Por eso hay que
+// descargar la imagen acá (con acceso real) y volver a subirla a
+// nuestro propio Storage, para que el navegador cargue una URL
+// nuestra sin bloqueos.
 function updateProfilePicIfMissing(sock, jid, conversationId, currentUrl) {
   if (currentUrl) return; // ya la tenemos, no hace falta pedirla de nuevo
   sock.profilePictureUrl(jid, 'image')
-    .then(url => {
-      if (url) {
-        supabase.from('conversations').update({ profile_pic_url: url }).eq('id', conversationId)
-          .then(() => {}).catch(() => {});
+    .then(async (whatsappUrl) => {
+      if (!whatsappUrl) return;
+      try {
+        const response = await axios.get(whatsappUrl, { responseType: 'arraybuffer', timeout: 15000 });
+        const buffer = Buffer.from(response.data);
+        const fileName = `profile-pics/${conversationId}-${Date.now()}.jpg`;
+
+        const { error: uploadError } = await supabase.storage
+          .from('media')
+          .upload(fileName, buffer, { contentType: 'image/jpeg', upsert: true });
+        if (uploadError) throw uploadError;
+
+        const { data: urlData } = supabase.storage.from('media').getPublicUrl(fileName);
+
+        await supabase.from('conversations').update({ profile_pic_url: urlData.publicUrl }).eq('id', conversationId);
+      } catch (e) {
+        // Si falla la descarga/subida, no es crítico — simplemente no
+        // queda foto guardada esta vez, se puede volver a intentar en
+        // el próximo mensaje de este contacto.
       }
     })
     .catch(() => {
