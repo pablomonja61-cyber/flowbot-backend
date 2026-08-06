@@ -51,7 +51,7 @@ router.get('/', async (req, res, next) => {
       .from('conversations')
       .select(`
         id, contact_phone, contact_name, last_message,
-        last_message_at, unread_count, status, connection_id, tag, profile_pic_url, flow_active,
+        last_message_at, unread_count, status, connection_id, tag, profile_pic_url, flow_active, last_message_direction, bot_ever_responded,
         connections(name)
       `, { count: 'exact' })
       .eq('user_id', req.user.id)
@@ -133,7 +133,9 @@ router.post('/:id/messages', async (req, res, next) => {
 
     await supabase.from('conversations').update({
       last_message: contentGuardado.slice(0, 100),
-      last_message_at: new Date().toISOString()
+      last_message_at: new Date().toISOString(),
+      last_message_direction: direction,
+      ...(direction === 'outbound' ? { bot_ever_responded: true } : {})
     }).eq('id', req.params.id);
 
     res.status(201).json(msg);

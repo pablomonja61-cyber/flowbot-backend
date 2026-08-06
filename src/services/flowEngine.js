@@ -1227,6 +1227,8 @@ async function saveMessage(conversationId, content, direction, msgType = 'text',
   await supabase.from('conversations').update({
     last_message: content.slice(0, 100),
     last_message_at: new Date().toISOString(),
+    last_message_direction: direction,
+    ...(direction === 'outbound' ? { bot_ever_responded: true } : {}),
     ...(direction === 'inbound' ? { unread_count: 1 } : {})
   }).eq('id', conversationId);
 }
