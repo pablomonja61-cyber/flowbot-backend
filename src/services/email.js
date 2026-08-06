@@ -33,7 +33,7 @@ async function enviarCorreoVerificacion(email, codigo) {
 
               <!-- Encabezado -->
               <div style="background: #000000; padding: 32px 24px; text-align: center; border-bottom: 1px solid #222;">
-                <div style="font-size: 40px; margin-bottom: 8px;">🤖</div>
+                <img src="https://ariabot.app/__l5e/assets-v1/32bd803a-8b0a-42ec-9d40-4b7ef5fdb574/ariabot-logo-2026.png" alt="AriaBot" width="64" height="64" style="display: block; margin: 0 auto 12px; border-radius: 12px;" />
                 <h1 style="color: #ffffff; margin: 0; font-size: 22px;">¡Bienvenido a AriaBot!</h1>
               </div>
 
