@@ -84,13 +84,16 @@ router.post('/register', async (req, res, next) => {
     const codigo = generarCodigo();
     const expiresAt = new Date(Date.now() + CODIGO_VALIDO_MINUTOS * 60 * 1000).toISOString();
 
-    await supabase.from('email_verifications').insert({
+    const { error: codeInsertError } = await supabase.from('email_verifications').insert({
       id: uuidv4(),
       email: emailNormalizado,
       code: codigo,
       expires_at: expiresAt,
       verified: false
     });
+    if (codeInsertError) {
+      console.error('[Auth] Error guardando el código de verificación:', codeInsertError.message);
+    }
 
     // 6. Mandar el correo con el código
     const enviado = await enviarCorreoVerificacion(emailNormalizado, codigo);
@@ -181,13 +184,16 @@ router.post('/resend-code', async (req, res, next) => {
     const codigo = generarCodigo();
     const expiresAt = new Date(Date.now() + CODIGO_VALIDO_MINUTOS * 60 * 1000).toISOString();
 
-    await supabase.from('email_verifications').insert({
+    const { error: codeInsertError } = await supabase.from('email_verifications').insert({
       id: uuidv4(),
       email: emailNormalizado,
       code: codigo,
       expires_at: expiresAt,
       verified: false
     });
+    if (codeInsertError) {
+      console.error('[Auth] Error guardando el código de verificación (reenvío):', codeInsertError.message);
+    }
 
     await enviarCorreoVerificacion(emailNormalizado, codigo);
     res.json({ message: 'Te mandamos un nuevo código.' });
