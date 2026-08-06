@@ -301,30 +301,55 @@ router.get('/dashboard/stats', async (req, res, next) => {
       return new Date(ms).getUTCDay();
     }
 
-    // Gráfico diario — un punto por cada día dentro del rango elegido.
-    // Si el rango es muy largo (ej. un "personalizado" de varios
-    // meses), lo topamos en 90 días para no reventar la respuesta.
-    const diasEnRango = Math.min(Math.ceil((hasta - desde) / (24 * 60 * 60 * 1000)) + 1, 90);
-    const dailyMap = {};
-    for (let i = 0; i < diasEnRango; i++) {
-      const d = new Date(desde);
-      d.setUTCDate(d.getUTCDate() + i);
-      const key = d.toISOString().split('T')[0];
-      dailyMap[key] = { date: key, conversations: 0, sales: 0, revenue: 0 };
-    }
-    (convByDay || []).forEach(c => {
-      const key = fechaLimaYMD(c.created_at);
-      if (dailyMap[key]) dailyMap[key].conversations++;
-    });
-    (salesData || []).forEach(s => {
-      if (!s.sale_at) return;
-      const key = fechaLimaYMD(s.sale_at);
-      if (dailyMap[key]) {
-        dailyMap[key].sales++;
-        dailyMap[key].revenue += (s.sale_amount || 0);
+    // Gráfico — la granularidad se adapta sola según el rango elegido:
+    // si es un solo día (Hoy/Ayer), se arma POR HORA (más útil para un
+    // rango tan corto); si es más largo (7d, 14d, mes, etc.), se arma
+    // POR DÍA, como antes. Esto es lo que usan las mini-gráficas
+    // (sparklines) dentro de cada tarjeta del Dashboard.
+    const esRangoDeUnDia = (range === 'today' || range === 'yesterday');
+    let daily_chart;
+    let chart_granularity;
+
+    if (esRangoDeUnDia) {
+      chart_granularity = 'hourly';
+      const porHora = Array.from({ length: 24 }, (_, h) => ({ hour: h, conversations: 0, sales: 0, revenue: 0 }));
+      function horaLima(fechaISO) {
+        const ms = new Date(fechaISO).getTime() - 5 * 60 * 60 * 1000;
+        return new Date(ms).getUTCHours();
       }
-    });
-    const daily_chart = Object.values(dailyMap).map(d => ({ ...d, revenue: Number(d.revenue.toFixed(2)) }));
+      (convByDay || []).forEach(c => { porHora[horaLima(c.created_at)].conversations++; });
+      (salesData || []).forEach(s => {
+        if (!s.sale_at) return;
+        porHora[horaLima(s.sale_at)].sales++;
+        porHora[horaLima(s.sale_at)].revenue += (s.sale_amount || 0);
+      });
+      daily_chart = porHora.map(d => ({ ...d, revenue: Number(d.revenue.toFixed(2)) }));
+    } else {
+      chart_granularity = 'daily';
+      // Si el rango es muy largo (ej. un "personalizado" de varios
+      // meses), lo topamos en 90 días para no reventar la respuesta.
+      const diasEnRango = Math.min(Math.ceil((hasta - desde) / (24 * 60 * 60 * 1000)) + 1, 90);
+      const dailyMap = {};
+      for (let i = 0; i < diasEnRango; i++) {
+        const d = new Date(desde);
+        d.setUTCDate(d.getUTCDate() + i);
+        const key = d.toISOString().split('T')[0];
+        dailyMap[key] = { date: key, conversations: 0, sales: 0, revenue: 0 };
+      }
+      (convByDay || []).forEach(c => {
+        const key = fechaLimaYMD(c.created_at);
+        if (dailyMap[key]) dailyMap[key].conversations++;
+      });
+      (salesData || []).forEach(s => {
+        if (!s.sale_at) return;
+        const key = fechaLimaYMD(s.sale_at);
+        if (dailyMap[key]) {
+          dailyMap[key].sales++;
+          dailyMap[key].revenue += (s.sale_amount || 0);
+        }
+      });
+      daily_chart = Object.values(dailyMap).map(d => ({ ...d, revenue: Number(d.revenue.toFixed(2)) }));
+    }
 
     // Ventas/contactos por día de la semana, dentro del mismo rango.
     const weekdays = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
@@ -350,6 +375,7 @@ router.get('/dashboard/stats', async (req, res, next) => {
 
     res.json({
       range,
+      chart_granularity,
       from: desde.toISOString(),
       to: hasta.toISOString(),
       total_conversations: total_conversations || 0,
