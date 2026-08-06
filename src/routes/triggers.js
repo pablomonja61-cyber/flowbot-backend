@@ -54,7 +54,7 @@ router.post('/', async (req, res, next) => {
 // ── PUT /api/triggers/:id ────────────────────────────────────
 router.put('/:id', async (req, res, next) => {
   try {
-    const { name, keyword, flow_id, is_active, is_repeatable, tag } = req.body;
+    const { name, keyword, flow_id, is_active, is_repeatable, tag, connection_id } = req.body;
     const updates = { updated_at: new Date().toISOString() };
     if (name !== undefined) updates.name = name;
     if (keyword !== undefined) updates.keyword = keyword.toLowerCase().trim();
@@ -62,6 +62,11 @@ router.put('/:id', async (req, res, next) => {
     if (is_active !== undefined) updates.is_active = is_active;
     if (is_repeatable !== undefined) updates.is_repeatable = is_repeatable;
     if (tag !== undefined) updates.tag = tag;
+    // Permite reasignar el disparador a otra conexión de WhatsApp —
+    // necesario para cuando se borró la conexión original y el
+    // disparador quedó "huérfano" (connection_id en null), así se
+    // puede volver a activar apuntándolo a la conexión nueva.
+    if (connection_id !== undefined) updates.connection_id = connection_id;
     const { data, error } = await supabase
       .from('triggers')
       .update(updates)
