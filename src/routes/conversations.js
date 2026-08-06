@@ -51,7 +51,7 @@ router.get('/', async (req, res, next) => {
       .from('conversations')
       .select(`
         id, contact_phone, contact_name, last_message,
-        last_message_at, unread_count, status, connection_id, tag, profile_pic_url, flow_active, last_message_direction, bot_ever_responded,
+        last_message_at, unread_count, status, connection_id, tag, profile_pic_url, flow_active, last_message_direction, bot_ever_responded, ever_replied,
         connections(name)
       `, { count: 'exact' })
       .eq('user_id', req.user.id)

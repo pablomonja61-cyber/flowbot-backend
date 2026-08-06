@@ -1327,13 +1327,30 @@ async function saveMessage(conversationId, content, direction, msgType = 'text',
     media_url: mediaUrl,
     created_at: new Date().toISOString()
   });
-  await supabase.from('conversations').update({
+
+  const updateData = {
     last_message: content.slice(0, 100),
     last_message_at: new Date().toISOString(),
     last_message_direction: direction,
     ...(direction === 'outbound' ? { bot_ever_responded: true } : {}),
     ...(direction === 'inbound' ? { unread_count: 1 } : {})
-  }).eq('id', conversationId);
+  };
+
+  // "ever_replied" es permanente — una vez que el cliente respondió de
+  // verdad (después de que el bot ya le había escrito antes), se queda
+  // en true para siempre, aunque un seguimiento posterior no se conteste.
+  if (direction === 'inbound') {
+    const { data: convActual } = await supabase
+      .from('conversations')
+      .select('bot_ever_responded')
+      .eq('id', conversationId)
+      .single();
+    if (convActual?.bot_ever_responded) {
+      updateData.ever_replied = true;
+    }
+  }
+
+  await supabase.from('conversations').update(updateData).eq('id', conversationId);
 }
 
 module.exports = {

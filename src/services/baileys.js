@@ -119,17 +119,31 @@ async function saveMsg(conversationId, content, direction, msgType = 'text', med
     });
     // Guardamos también quién mandó el último mensaje (cliente o
     // negocio/bot) — esto es lo que usa el filtro "Respondieron" /
-    // "Sin Respuesta" del Chat en Vivo. "Respondieron" no es solo
-    // "el último mensaje fue del cliente" — tiene que haber pasado
-    // DESPUÉS de que el bot ya le respondiera algo antes, por eso
-    // también guardamos bot_ever_responded (una vez en true, se
-    // queda así para siempre en esa conversación).
+    // "Sin Respuesta" del Chat en Vivo.
     const updateData = {
       last_message: content.slice(0, 100),
       last_message_at: new Date().toISOString(),
       last_message_direction: direction
     };
     if (direction === 'outbound') updateData.bot_ever_responded = true;
+
+    // "ever_replied" es distinto de "last_message_direction" — una vez
+    // que el cliente respondió de VERDAD (después de que el bot ya le
+    // había escrito antes), esto se queda en true PARA SIEMPRE, aunque
+    // más adelante se le mande un seguimiento y no conteste. Así
+    // "Respondieron" no se le "resetea" a un cliente que ya demostró
+    // interés real, solo porque el bot le volvió a escribir.
+    if (direction === 'inbound') {
+      const { data: convActual } = await supabase
+        .from('conversations')
+        .select('bot_ever_responded')
+        .eq('id', conversationId)
+        .single();
+      if (convActual?.bot_ever_responded) {
+        updateData.ever_replied = true;
+      }
+    }
+
     await supabase.from('conversations').update(updateData).eq('id', conversationId);
   } catch (e) {
     console.error('[Baileys] Error guardando mensaje:', e.message);
