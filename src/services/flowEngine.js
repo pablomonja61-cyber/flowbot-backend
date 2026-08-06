@@ -320,11 +320,22 @@ function limpiarRazonamiento(texto) {
   return limpio;
 }
 
+// ── Resuelve qué clave de API usar según el proveedor elegido por el
+// usuario (Groq, OpenAI, Claude o Gemini) — si no configuró su propia
+// clave, cae en las variables de entorno del servidor como respaldo.
+function resolveApiKey(aiConfig, provider) {
+  const prov = (provider || 'openai').toLowerCase();
+  if (prov === 'openai') return aiConfig?.openai_api_key || process.env.OPENAI_API_KEY;
+  if (prov === 'claude' || prov === 'anthropic') return aiConfig?.claude_api_key || process.env.ANTHROPIC_API_KEY;
+  if (prov === 'gemini' || prov === 'google') return aiConfig?.gemini_api_key || process.env.GEMINI_API_KEY;
+  return aiConfig?.groq_api_key || process.env.GROQ_API_KEY;
+}
+
 // ════════════════════════════════════════════════════════════
-// CALLAR A CUALQUIER PROVEEDOR DE IA (Groq, OpenAI, o Claude)
+// CALLAR A CUALQUIER PROVEEDOR DE IA (Groq, OpenAI, Claude o Gemini)
 // ════════════════════════════════════════════════════════════
 async function callAIProvider(provider, apiKey, model, systemPrompt, conversationMessages, maxTokens = 500) {
-  const prov = (provider || 'groq').toLowerCase();
+  const prov = (provider || 'openai').toLowerCase();
 
   if (prov === 'claude' || prov === 'anthropic') {
     const response = await axios.post(
@@ -345,6 +356,24 @@ async function callAIProvider(provider, apiKey, model, systemPrompt, conversatio
       }
     );
     return limpiarRazonamiento(response.data.content?.[0]?.text || '');
+  }
+
+  if (prov === 'gemini' || prov === 'google') {
+    const geminiModel = model || 'gemini-2.0-flash';
+    const contents = conversationMessages.map(m => ({
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: m.content }]
+    }));
+    const response = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${apiKey}`,
+      {
+        contents,
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        generationConfig: { maxOutputTokens: maxTokens }
+      },
+      { headers: { 'Content-Type': 'application/json' }, timeout: 15000 }
+    );
+    return limpiarRazonamiento(response.data?.candidates?.[0]?.content?.parts?.[0]?.text || '');
   }
 
   const baseUrl = prov === 'openai'
@@ -410,11 +439,23 @@ async function respondWithAI(userId, connection, to, userMessage, conversationId
       { role: 'user', content: userMessage }
     ];
 
-    const provider = aiConfig?.provider || 'groq';
-    const apiKey = aiConfig?.groq_api_key || process.env.GROQ_API_KEY;
+    const provider = aiConfig?.provider || 'openai';
+    const apiKey = resolveApiKey(aiConfig, provider);
     const model = aiConfig?.model || null;
 
-    const aiResponse = await callAIProvider(provider, apiKey, model, systemPrompt, conversationMessages);
+    // 1500 en vez de 500 (el default) — los modelos "de razonamiento"
+    // como Qwen gastan buena parte de los tokens solo pensando antes
+    // de llegar a la respuesta real; con muy pocos tokens, la
+    // respuesta se corta a mitad del pensamiento y no queda nada
+    // útil que mandarle al cliente después de limpiar el <think>.
+    const aiResponse = await callAIProvider(provider, apiKey, model, systemPrompt, conversationMessages, 1500);
+
+    if (!aiResponse || !aiResponse.trim()) {
+      console.warn('[CloudAPI AI] La respuesta quedó vacía después de limpiar el razonamiento — usando mensaje de respaldo');
+      await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, to, 'Dame un momento para revisar eso 🙏', conversationId);
+      return;
+    }
+
     await sendWhatsAppMessage(connection.phone_number_id, connection.access_token, to, aiResponse, conversationId);
   } catch (err) {
     console.error('[CloudAPI AI] Error:', err.response?.data || err.message);
@@ -429,26 +470,14 @@ async function classifyResponseWithAI(userResponse, paths, aiConfigId) {
       const { data: c } = await supabase.from('ai_config').select('*').eq('id', aiConfigId).single();
       if (c) aiConfig = c;
     }
-    const apiKey = aiConfig?.groq_api_key || process.env.GROQ_API_KEY;
-    const model = aiConfig?.model || 'qwen/qwen3.6-27b';
+    const provider = aiConfig?.provider || 'openai';
+    const apiKey = resolveApiKey(aiConfig, provider);
+    const model = aiConfig?.model || null;
     const options = paths.map((p, i) => `${i}: ${p.label}`).join('\n');
 
-    const response = await axios.post(
-      'https://api.groq.com/openai/v1/chat/completions',
-      {
-        model,
-        max_tokens: 10,
-        messages: [
-          {
-            role: 'system',
-            content: `Eres un clasificador. Dado un mensaje de un cliente, decide a cuál de estas opciones corresponde mejor:\n${options}\n\nResponde SOLO con el número de la opción (ej: "0"), sin texto adicional. Si el mensaje no corresponde claramente a ninguna opción, responde "-1".`
-          },
-          { role: 'user', content: userResponse }
-        ]
-      },
-      { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 10000 }
-    );
-    const raw = limpiarRazonamiento(response.data.choices[0].message.content.trim());
+    const systemPrompt = `Eres un clasificador. Dado un mensaje de un cliente, decide a cuál de estas opciones corresponde mejor:\n${options}\n\nResponde SOLO con el número de la opción (ej: "0"), sin texto adicional. Si el mensaje no corresponde claramente a ninguna opción, responde "-1".`;
+
+    const raw = await callAIProvider(provider, apiKey, model, systemPrompt, [{ role: 'user', content: userResponse }], 10);
     const idx = parseInt(raw.match(/-?\d+/)?.[0] ?? '-1', 10);
     return (idx >= 0 && idx < paths.length) ? idx : -1;
   } catch (err) {
@@ -842,6 +871,72 @@ async function resolvePaidPathNode(conversation) {
 // ════════════════════════════════════════════════════════════
 // PROCESAR IMAGEN ENTRANTE (comprobante de pago) — Cloud API
 // ════════════════════════════════════════════════════════════
+// ── Llama a la IA con una imagen (análisis de comprobantes de pago).
+// Cada proveedor tiene su propio formato para mandar imágenes — esta
+// función lo unifica, igual que callAIProvider unifica el texto.
+async function callVisionAI(provider, apiKey, promptText, base64Image, mimeType, maxTokens = 400) {
+  const prov = (provider || 'openai').toLowerCase();
+
+  if (prov === 'claude' || prov === 'anthropic') {
+    const response = await axios.post(
+      'https://api.anthropic.com/v1/messages',
+      {
+        model: 'claude-sonnet-4-6',
+        max_tokens: maxTokens,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: mimeType, data: base64Image } },
+            { type: 'text', text: promptText }
+          ]
+        }]
+      },
+      { headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }, timeout: 20000 }
+    );
+    return limpiarRazonamiento(response.data.content?.[0]?.text || '');
+  }
+
+  if (prov === 'gemini' || prov === 'google') {
+    const response = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      {
+        contents: [{
+          role: 'user',
+          parts: [
+            { text: promptText },
+            { inline_data: { mime_type: mimeType, data: base64Image } }
+          ]
+        }],
+        generationConfig: { maxOutputTokens: maxTokens }
+      },
+      { headers: { 'Content-Type': 'application/json' }, timeout: 20000 }
+    );
+    return limpiarRazonamiento(response.data?.candidates?.[0]?.content?.parts?.[0]?.text || '');
+  }
+
+  const baseUrl = prov === 'openai'
+    ? 'https://api.openai.com/v1/chat/completions'
+    : 'https://api.groq.com/openai/v1/chat/completions';
+  const visionModel = prov === 'openai' ? 'gpt-4o-mini' : 'qwen/qwen3.6-27b';
+
+  const response = await axios.post(
+    baseUrl,
+    {
+      model: visionModel,
+      max_tokens: maxTokens,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: promptText },
+          { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64Image}` } }
+        ]
+      }]
+    },
+    { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 20000 }
+  );
+  return limpiarRazonamiento(response.data.choices?.[0]?.message?.content || '');
+}
+
 async function processIncomingImageCloud(connection, contactPhone, mediaId, conversationId) {
   const userId = connection.user_id;
   const phoneNumberId = connection.phone_number_id;
@@ -889,26 +984,24 @@ async function processIncomingImageCloud(connection, contactPhone, mediaId, conv
   const msgConfirmacion = paymentConfig?.msg_confirmacion || 'Gracias por tu pago. Validaremos el comprobante y en breve te enviaremos el acceso.';
   const msgNoValido = paymentConfig?.msg_no_valido || 'Disculpa, no pudimos validar el comprobante. Por favor envía una foto más clara.';
 
-  const apiKey = process.env.GROQ_API_KEY;
+  // Traer la config de IA del usuario para saber qué proveedor eligió
+  // (Groq u OpenAI) — necesitamos un modelo con soporte de VISIÓN.
+  const { data: aiConfigPago } = await supabase
+    .from('ai_config')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('is_active', true)
+    .single();
+
+  const providerPago = aiConfigPago?.provider || 'openai';
+  const apiKey = resolveApiKey(aiConfigPago, providerPago);
+
   const hoyLima = new Intl.DateTimeFormat('es-PE', { timeZone: 'America/Lima', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
   const validarExtra = (paidPathInfo?.paidPaths || []).map(p => p.path.validar).filter(Boolean)[0];
 
   let analysisResult = null;
   try {
-    const visionResponse = await axios.post(
-      'https://api.groq.com/openai/v1/chat/completions',
-      {
-        // OJO: este modelo tiene que ser uno con soporte de VISIÓN (analiza
-        // imágenes) — openai/gpt-oss-120b es excelente para texto pero NO
-        // entiende imágenes. qwen/qwen3.6-27b sí es multimodal.
-        model: 'qwen/qwen3.6-27b',
-        max_tokens: 400,
-        messages: [{
-          role: 'user',
-          content: [
-            {
-              type: 'text',
-              text: `Analiza esta imagen. ¿Es un comprobante de pago (Yape, Plin, transferencia bancaria u otro)?
+    const promptText = `Analiza esta imagen. ¿Es un comprobante de pago (Yape, Plin, transferencia bancaria u otro)?
 Si lo es, extrae:
 - monto: el monto exacto pagado (solo el número, sin moneda)
 - titular_destino: el nombre del destinatario/titular al que se realizó el pago
@@ -918,15 +1011,9 @@ Si lo es, extrae:
 ${validarExtra ? `- cumple_validacion_extra: true/false según si cumple: "${validarExtra}"` : ''}
 
 Responde SOLO en formato JSON exacto:
-{"es_comprobante": true/false, "monto": numero_o_null, "titular_destino": "nombre_o_null", "numero_operacion": "texto_o_null", "fecha_es_hoy": true/false/null, "estado_pago": "confirmado/pendiente/desconocido"${validarExtra ? ', "cumple_validacion_extra": true/false' : ''}}`
-            },
-            { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64Image}` } }
-          ]
-        }]
-      },
-      { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }
-    );
-    const rawText = limpiarRazonamiento(visionResponse.data.choices[0].message.content.trim());
+{"es_comprobante": true/false, "monto": numero_o_null, "titular_destino": "nombre_o_null", "numero_operacion": "texto_o_null", "fecha_es_hoy": true/false/null, "estado_pago": "confirmado/pendiente/desconocido"${validarExtra ? ', "cumple_validacion_extra": true/false' : ''}}`;
+
+    const rawText = await callVisionAI(providerPago, apiKey, promptText, base64Image, mimeType, 400);
     const jsonMatch = rawText.match(/\{[\s\S]*\}/);
     if (jsonMatch) analysisResult = JSON.parse(jsonMatch[0]);
   } catch (err) {

@@ -25,7 +25,7 @@ router.get('/', async (req, res, next) => {
 // ── POST /api/ai-config — crear nueva config ───────────────
 router.post('/', async (req, res, next) => {
   try {
-    const { name, model, response_time, is_active, system_prompt } = req.body;
+    const { name, model, response_time, is_active, system_prompt, provider, openai_api_key, claude_api_key, gemini_api_key } = req.body;
 
     // Si se activa esta, desactivar las demás
     if (is_active) {
@@ -41,7 +41,11 @@ router.post('/', async (req, res, next) => {
         id: uuidv4(),
         user_id: req.user.id,
         name: name || 'Configuración IA',
-        model: model || 'qwen/qwen3.6-27b',
+        model: model || 'gpt-4o-mini',
+        provider: provider || 'openai',
+        openai_api_key: openai_api_key || null,
+        claude_api_key: claude_api_key || null,
+        gemini_api_key: gemini_api_key || null,
         response_time: response_time || 10,
         is_active: is_active !== undefined ? is_active : true,
         system_prompt: system_prompt || '',
@@ -59,7 +63,7 @@ router.post('/', async (req, res, next) => {
 // ── PUT /api/ai-config/:id — actualizar config ─────────────
 router.put('/:id', async (req, res, next) => {
   try {
-    const { name, model, response_time, is_active, system_prompt } = req.body;
+    const { name, model, response_time, is_active, system_prompt, provider, openai_api_key, claude_api_key, gemini_api_key } = req.body;
 
     // Si se activa esta, desactivar las demás
     if (is_active) {
@@ -75,6 +79,10 @@ router.put('/:id', async (req, res, next) => {
     if (response_time !== undefined) updateData.response_time = response_time;
     if (is_active !== undefined) updateData.is_active = is_active;
     if (system_prompt !== undefined) updateData.system_prompt = system_prompt;
+    if (provider !== undefined) updateData.provider = provider;
+    if (openai_api_key !== undefined) updateData.openai_api_key = openai_api_key;
+    if (claude_api_key !== undefined) updateData.claude_api_key = claude_api_key;
+    if (gemini_api_key !== undefined) updateData.gemini_api_key = gemini_api_key;
 
     const { data, error } = await supabase
       .from('ai_config')
@@ -107,7 +115,7 @@ router.delete('/:id', async (req, res, next) => {
 // ── PATCH /api/ai-config/:id — toggle activo ──────────────
 router.patch('/:id', async (req, res, next) => {
   try {
-    const { is_active, name, model, response_time, system_prompt } = req.body;
+    const { is_active, name, model, response_time, system_prompt, provider, openai_api_key, claude_api_key, gemini_api_key } = req.body;
 
     if (is_active) {
       await supabase
@@ -122,6 +130,10 @@ router.patch('/:id', async (req, res, next) => {
     if (response_time !== undefined) updateData.response_time = response_time;
     if (is_active !== undefined) updateData.is_active = is_active;
     if (system_prompt !== undefined) updateData.system_prompt = system_prompt;
+    if (provider !== undefined) updateData.provider = provider;
+    if (openai_api_key !== undefined) updateData.openai_api_key = openai_api_key;
+    if (claude_api_key !== undefined) updateData.claude_api_key = claude_api_key;
+    if (gemini_api_key !== undefined) updateData.gemini_api_key = gemini_api_key;
 
     const { data, error } = await supabase
       .from('ai_config')
@@ -139,7 +151,7 @@ router.patch('/:id', async (req, res, next) => {
 // ── PUT /api/ai-config (legacy) — compatibilidad ──────────
 router.put('/', async (req, res, next) => {
   try {
-    const { model, response_time, is_active, system_prompt } = req.body;
+    const { model, response_time, is_active, system_prompt, provider, openai_api_key, claude_api_key, gemini_api_key } = req.body;
 
     const { data: existing } = await supabase
       .from('ai_config')
@@ -152,7 +164,7 @@ router.put('/', async (req, res, next) => {
       const { data, error } = await supabase
         .from('ai_config')
         .update({
-          model, response_time, is_active, system_prompt,
+          model, response_time, is_active, system_prompt, provider, openai_api_key,
           updated_at: new Date().toISOString()
         })
         .eq('id', existing.id)
@@ -167,7 +179,11 @@ router.put('/', async (req, res, next) => {
           id: uuidv4(),
           user_id: req.user.id,
           name: 'Configuración IA',
-          model: model || 'qwen/qwen3.6-27b',
+          model: model || 'gpt-4o-mini',
+          provider: provider || 'openai',
+          openai_api_key: openai_api_key || null,
+        claude_api_key: claude_api_key || null,
+        gemini_api_key: gemini_api_key || null,
           response_time: response_time || 10,
           is_active: is_active !== undefined ? is_active : true,
           system_prompt: system_prompt || '',
