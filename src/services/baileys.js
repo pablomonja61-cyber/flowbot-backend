@@ -4,6 +4,7 @@ const QRCode = require('qrcode');
 const supabase = require('../models/supabase');
 const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
+const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const { cancelFollowups, sendFollowupContentCloud } = require('../services/flowEngine');
@@ -1499,6 +1500,25 @@ async function processIncomingImageBaileys(connectionId, userId, sock, contactPh
 
   const base64Image = imageBuffer.toString('base64');
 
+  // ── "Reuso": detectar si esta MISMA imagen ya se usó antes, en
+  // cualquier negocio de AriaBot (no solo el tuyo) — evita que alguien
+  // le pague a un negocio y reuse la misma captura para sacar acceso
+  // gratis en otros. Se revisa ANTES de gastar en el análisis de IA,
+  // así no se paga por analizar algo que de todos modos se va a
+  // rechazar.
+  const hashImagen = crypto.createHash('sha256').update(imageBuffer).digest('hex');
+  const { data: usoAnterior } = await supabase
+    .from('payment_receipt_hashes')
+    .select('user_id, conversation_id')
+    .eq('image_hash', hashImagen)
+    .maybeSingle();
+
+  if (usoAnterior) {
+    console.log(`[Baileys Payment] ⚠️ Comprobante duplicado detectado (hash ya usado antes) — no se da acceso`);
+    await sendText(sock, jid, 'Este comprobante ya fue utilizado anteriormente. Por favor, envía la captura del pago correspondiente a esta compra. 🙏', conversationId);
+    return;
+  }
+
   // ── Buscar si hay caminos "Pago" activos en el flujo pausado ──
   const paidPathInfo = await resolvePaidPathNode(conversation);
 
@@ -1565,6 +1585,18 @@ Responde SOLO en formato JSON exacto, sin texto adicional:
     await sendText(sock, jid, msgNoValido, conversation.id);
     return;
   }
+
+  // Ya se confirmó que es un comprobante real — guardamos su hash para
+  // que, si alguien intenta reusar esta MISMA imagen en otro negocio
+  // (o el mismo) más adelante, quede detectado automáticamente.
+  await supabase.from('payment_receipt_hashes').insert({
+    id: uuidv4(),
+    image_hash: hashImagen,
+    user_id: userId,
+    conversation_id: conversation.id,
+    monto: analysisResult.monto || null,
+    created_at: new Date().toISOString()
+  }).then(() => {}).catch((e) => console.error('[Baileys Payment] Error guardando hash del comprobante:', e.message));
 
   const monto = analysisResult.monto;
   console.log(`[Baileys Payment] Comprobante detectado, monto: ${monto}`);

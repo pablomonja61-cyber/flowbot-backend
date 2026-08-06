@@ -1,4 +1,5 @@
 const axios = require('axios');
+const crypto = require('crypto');
 const supabase = require('../models/supabase');
 const { v4: uuidv4 } = require('uuid');
 
@@ -978,6 +979,24 @@ async function processIncomingImageCloud(connection, contactPhone, mediaId, conv
   if (!imageBuffer) return;
 
   const base64Image = imageBuffer.toString('base64');
+
+  // ── "Reuso": detectar si esta MISMA imagen ya se usó antes, en
+  // cualquier negocio de AriaBot (no solo el tuyo) — evita que alguien
+  // le pague a un negocio y reuse la misma captura para sacar acceso
+  // gratis en otros. Se revisa ANTES de gastar en el análisis de IA.
+  const hashImagen = crypto.createHash('sha256').update(imageBuffer).digest('hex');
+  const { data: usoAnterior } = await supabase
+    .from('payment_receipt_hashes')
+    .select('user_id, conversation_id')
+    .eq('image_hash', hashImagen)
+    .maybeSingle();
+
+  if (usoAnterior) {
+    console.log(`[CloudAPI Payment] ⚠️ Comprobante duplicado detectado (hash ya usado antes) — no se da acceso`);
+    await sendWhatsAppMessage(phoneNumberId, accessToken, to, 'Este comprobante ya fue utilizado anteriormente. Por favor, envía la captura del pago correspondiente a esta compra. 🙏', conversation.id);
+    return;
+  }
+
   const paidPathInfo = await resolvePaidPathNode(conversation);
 
   const { data: paymentConfig } = await supabase.from('payment_config').select('*').eq('user_id', userId).single();
@@ -1024,6 +1043,17 @@ Responde SOLO en formato JSON exacto:
     await sendWhatsAppMessage(phoneNumberId, accessToken, to, msgNoValido, conversation.id);
     return;
   }
+
+  // Ya se confirmó que es un comprobante real — guardamos su hash para
+  // detectar si se reusa en otro negocio (o el mismo) más adelante.
+  await supabase.from('payment_receipt_hashes').insert({
+    id: uuidv4(),
+    image_hash: hashImagen,
+    user_id: userId,
+    conversation_id: conversation.id,
+    monto: analysisResult.monto || null,
+    created_at: new Date().toISOString()
+  }).then(() => {}).catch((e) => console.error('[CloudAPI Payment] Error guardando hash del comprobante:', e.message));
 
   const monto = analysisResult.monto;
 
