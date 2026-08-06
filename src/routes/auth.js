@@ -267,6 +267,69 @@ router.get('/me', authMiddleware, async (req, res, next) => {
   }
 });
 
+// ── PATCH /api/auth/profile ──────────────────────────────────
+// Editar nombre y/o foto de perfil (avatar_url) — la imagen en sí se
+// sube por separado a Supabase Storage (ej. con el endpoint que ya
+// existe en /api/media/upload), y acá solo se guarda la URL resultante.
+router.patch('/profile', authMiddleware, async (req, res, next) => {
+  try {
+    const { name, avatar_url } = req.body;
+    const updates = {};
+    if (name !== undefined) updates.name = name;
+    if (avatar_url !== undefined) updates.avatar_url = avatar_url;
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: 'Nada para actualizar' });
+    }
+
+    const { data: profile, error } = await supabase
+      .from('users')
+      .update(updates)
+      .eq('id', req.user.id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json(profile);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── POST /api/auth/change-password ───────────────────────────
+// Cambiar contraseña estando YA logueado (distinto del flujo de
+// "olvidé mi contraseña" — acá primero se confirma la contraseña
+// actual, por seguridad).
+router.post('/change-password', authMiddleware, async (req, res, next) => {
+  try {
+    const { current_password, new_password } = req.body;
+    if (!current_password || !new_password) {
+      return res.status(400).json({ error: 'contraseña actual y nueva son requeridas' });
+    }
+
+    const { data: profile } = await supabase
+      .from('users')
+      .select('email')
+      .eq('id', req.user.id)
+      .single();
+    if (!profile) return res.status(404).json({ error: 'Usuario no encontrado' });
+
+    // Confirmar que la contraseña actual sea correcta antes de cambiarla
+    const { error: signInError } = await supabase.auth.signInWithPassword({
+      email: profile.email,
+      password: current_password
+    });
+    if (signInError) return res.status(401).json({ error: 'La contraseña actual no es correcta.' });
+
+    const { error: updateError } = await supabase.auth.admin.updateUserById(req.user.id, { password: new_password });
+    if (updateError) throw updateError;
+
+    res.json({ message: 'Contraseña actualizada correctamente.' });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ── GET /api/auth/detect-country ─────────────────────────────
 // Detecta el país del visitante por su IP, para preseleccionar el
 // código de país (+51, +52, etc.) en el formulario de registro.
