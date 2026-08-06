@@ -20,6 +20,10 @@ const remarketingRoutes = require('./routes/remarketing');
 const adsConfigRoutes = require('./routes/adsConfig');
 const adsMetricsRoutes = require('./routes/adsMetrics');
 const app = express();
+// Necesario para que req.ip devuelva la IP real del visitante, no la
+// IP interna del proxy de Railway — lo usa el límite de 5 cuentas
+// por IP en el registro.
+app.set('trust proxy', true);
 const PORT = process.env.PORT || 3000;
 // ── Seguridad y utilidades ──────────────────────────────────
 app.use(helmet());
