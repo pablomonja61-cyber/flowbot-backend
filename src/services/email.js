@@ -33,7 +33,7 @@ async function enviarCorreoVerificacion(email, codigo) {
 
               <!-- Encabezado -->
               <div style="background: #000000; padding: 32px 24px; text-align: center; border-bottom: 1px solid #222;">
-                <img src="https://vdfffshazydiymzbapql.supabase.co/storage/v1/object/public/media/ariabot-logo-2026%20(1).png" alt="AriaBot" width="64" height="64" style="display: block; margin: 0 auto 12px; border-radius: 12px;" />
+                <img src="https://vdfffshazydiymzbapql.supabase.co/storage/v1/object/public/media/ariabot-logo.png.png" alt="AriaBot" width="64" height="64" style="display: block; margin: 0 auto 12px; border-radius: 12px;" />
                 <h1 style="color: #ffffff; margin: 0; font-size: 22px;">¡Bienvenido a AriaBot!</h1>
               </div>
 
@@ -91,7 +91,7 @@ async function enviarCorreoRecuperacion(email, codigo) {
             <div style="background: #0a0a0a; border-radius: 16px; overflow: hidden; border: 1px solid #222;">
 
               <div style="background: #000000; padding: 32px 24px; text-align: center; border-bottom: 1px solid #222;">
-                <img src="https://vdfffshazydiymzbapql.supabase.co/storage/v1/object/public/media/ariabot-logo-2026%20(1).png" alt="AriaBot" width="64" height="64" style="display: block; margin: 0 auto 12px; border-radius: 12px;" />
+                <img src="https://vdfffshazydiymzbapql.supabase.co/storage/v1/object/public/media/ariabot-logo.png.png" alt="AriaBot" width="64" height="64" style="display: block; margin: 0 auto 12px; border-radius: 12px;" />
                 <h1 style="color: #ffffff; margin: 0; font-size: 22px;">Recupera tu contraseña</h1>
               </div>
 
