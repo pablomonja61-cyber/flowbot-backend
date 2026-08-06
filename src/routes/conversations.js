@@ -208,73 +208,106 @@ router.get('/stats/summary', async (req, res, next) => {
 });
 
 // ── GET /api/conversations/dashboard ─────────────────────────
+// ── Calcula el rango de fechas [desde, hasta] según el preset
+// elegido en el botón "Fecha" del Dashboard. Todo en hora de Lima.
+function calcularRangoFechas(range, fromParam, toParam) {
+  const inicioHoy = inicioDeHoyLima(); // 00:00 de hoy, en Lima
+  const ahora = new Date();
+
+  switch (range) {
+    case 'yesterday': {
+      const desde = new Date(inicioHoy);
+      desde.setUTCDate(desde.getUTCDate() - 1);
+      return { desde, hasta: inicioHoy }; // ayer completo, hasta las 00:00 de hoy
+    }
+    case '7d': {
+      const desde = new Date(inicioHoy);
+      desde.setUTCDate(desde.getUTCDate() - 7);
+      return { desde, hasta: ahora };
+    }
+    case '14d': {
+      const desde = new Date(inicioHoy);
+      desde.setUTCDate(desde.getUTCDate() - 14);
+      return { desde, hasta: ahora };
+    }
+    case '30d': {
+      // Rango fijo de 30 días — lo usan los 2 gráficos de abajo del
+      // Dashboard ("Contactos y ventas últimos 30 días" / "Ingresos
+      // últimos 30 días"), que NO cambian con el botón "Fecha".
+      const desde = new Date(inicioHoy);
+      desde.setUTCDate(desde.getUTCDate() - 30);
+      return { desde, hasta: ahora };
+    }
+    case 'last_month': {
+      // Primer y último día del mes calendario ANTERIOR, en hora de Lima
+      const limaMs = inicioHoy.getTime();
+      const limaDate = new Date(limaMs);
+      const y = limaDate.getUTCFullYear();
+      const m = limaDate.getUTCMonth(); // mes actual (0-indexado)
+      const desde = new Date(Date.UTC(y, m - 1, 1, 5, 0, 0, 0)); // 1ro del mes pasado, 00:00 Lima
+      const hasta = new Date(Date.UTC(y, m, 1, 5, 0, 0, 0)); // 1ro de este mes, 00:00 Lima (límite exclusivo)
+      return { desde, hasta };
+    }
+    case 'custom': {
+      const desde = fromParam ? new Date(fromParam) : inicioHoy;
+      // "hasta" incluye el día completo indicado (hasta las 23:59:59)
+      const hasta = toParam ? new Date(new Date(toParam).getTime() + 24 * 60 * 60 * 1000) : ahora;
+      return { desde, hasta };
+    }
+    case 'today':
+    default:
+      return { desde: inicioHoy, hasta: ahora };
+  }
+}
+
 router.get('/dashboard/stats', async (req, res, next) => {
   try {
-    const today = inicioDeHoyLima();
-    const thirtyDaysAgo = new Date(today);
-    thirtyDaysAgo.setUTCDate(thirtyDaysAgo.getUTCDate() - 30);
+    const { range = 'today', from, to } = req.query;
+    const { desde, hasta } = calcularRangoFechas(range, from, to);
 
-    // Antes estas 11 consultas se pedían una por una (await tras await),
-    // así que el tiempo total era la SUMA de las 11 — si cada una tarda
-    // ~400-500ms, eso son varios segundos de espera. Ninguna depende del
-    // resultado de otra, así que se piden todas en paralelo con
-    // Promise.all — el tiempo total pasa a ser el de la consulta más
-    // lenta, no la suma de todas.
     const [
       { count: total_conversations },
-      { count: conversations_today },
-      { count: conversations_30d },
-      { count: messages_today },
-      { count: messages_30d },
       { count: active_conversations },
-      { count: sales_total },
-      { count: sales_today },
-      { count: sales_30d },
-      { count: pending_today },
-      { count: pending_30d },
+      { count: messages },
+      { count: sales },
+      { count: pending },
       { data: salesData },
       { data: convByDay }
     ] = await Promise.all([
-      supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id),
-      supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).gte('created_at', today.toISOString()),
-      supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).gte('created_at', thirtyDaysAgo.toISOString()),
-      supabase.from('messages').select('conversations!inner(user_id)', { count: 'exact', head: true }).eq('conversations.user_id', req.user.id).gte('created_at', today.toISOString()),
-      supabase.from('messages').select('conversations!inner(user_id)', { count: 'exact', head: true }).eq('conversations.user_id', req.user.id).gte('created_at', thirtyDaysAgo.toISOString()),
+      supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).gte('created_at', desde.toISOString()).lte('created_at', hasta.toISOString()),
       supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).eq('status', 'active'),
-      supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).eq('is_sale', true),
-      supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).eq('is_sale', true).gte('sale_at', today.toISOString()),
-      supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).eq('is_sale', true).gte('sale_at', thirtyDaysAgo.toISOString()),
+      supabase.from('messages').select('conversations!inner(user_id)', { count: 'exact', head: true }).eq('conversations.user_id', req.user.id).gte('created_at', desde.toISOString()).lte('created_at', hasta.toISOString()),
+      supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).eq('is_sale', true).gte('sale_at', desde.toISOString()).lte('sale_at', hasta.toISOString()),
       // "Pendientes" = se le pidió el pago (payment_requested_at) pero
       // todavía no se confirmó la venta (is_sale sigue en false).
-      supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).eq('is_sale', false).not('payment_requested_at', 'is', null).gte('payment_requested_at', today.toISOString()),
-      supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).eq('is_sale', false).not('payment_requested_at', 'is', null).gte('payment_requested_at', thirtyDaysAgo.toISOString()),
-      supabase.from('conversations').select('sale_amount, sale_at').eq('user_id', req.user.id).eq('is_sale', true),
-      supabase.from('conversations').select('created_at').eq('user_id', req.user.id).gte('created_at', thirtyDaysAgo.toISOString()).order('created_at', { ascending: true })
+      supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).eq('is_sale', false).not('payment_requested_at', 'is', null).gte('payment_requested_at', desde.toISOString()).lte('payment_requested_at', hasta.toISOString()),
+      supabase.from('conversations').select('sale_amount, sale_at').eq('user_id', req.user.id).eq('is_sale', true).gte('sale_at', desde.toISOString()).lte('sale_at', hasta.toISOString()),
+      supabase.from('conversations').select('created_at').eq('user_id', req.user.id).gte('created_at', desde.toISOString()).lte('created_at', hasta.toISOString()).order('created_at', { ascending: true })
     ]);
 
     const total_revenue = (salesData || []).reduce((sum, s) => sum + (s.sale_amount || 0), 0);
-    const revenue_30d = (salesData || [])
-      .filter(s => s.sale_at && new Date(s.sale_at) >= thirtyDaysAgo)
-      .reduce((sum, s) => sum + (s.sale_amount || 0), 0);
-    const revenue_today = (salesData || [])
-      .filter(s => s.sale_at && new Date(s.sale_at) >= today)
-      .reduce((sum, s) => sum + (s.sale_amount || 0), 0);
-    const avg_ticket = sales_total > 0 ? total_revenue / sales_total : 0;
-    const conversion_rate = conversations_30d > 0 ? ((sales_30d / conversations_30d) * 100).toFixed(1) : 0;
-    // Fecha (YYYY-MM-DD) en hora de Lima — mismo motivo que arriba: la
-    // fecha "cruda" del timestamp UTC puede caer en el día equivocado
-    // cerca de la medianoche.
+    const avg_ticket = sales > 0 ? total_revenue / sales : 0;
+    const conversion_rate = total_conversations > 0 ? ((sales / total_conversations) * 100).toFixed(1) : 0;
+
+    // Fecha (YYYY-MM-DD) en hora de Lima — la fecha "cruda" del
+    // timestamp UTC puede caer en el día equivocado cerca de la
+    // medianoche si no se convierte primero.
     function fechaLimaYMD(fechaISO) {
       const ms = new Date(fechaISO).getTime() - 5 * 60 * 60 * 1000;
       return new Date(ms).toISOString().split('T')[0];
     }
+    function diaSemanaLima(fechaISO) {
+      const ms = new Date(fechaISO).getTime() - 5 * 60 * 60 * 1000;
+      return new Date(ms).getUTCDay();
+    }
 
+    // Gráfico diario — un punto por cada día dentro del rango elegido.
+    // Si el rango es muy largo (ej. un "personalizado" de varios
+    // meses), lo topamos en 90 días para no reventar la respuesta.
+    const diasEnRango = Math.min(Math.ceil((hasta - desde) / (24 * 60 * 60 * 1000)) + 1, 90);
     const dailyMap = {};
-    // i <= 30 (31 días) en vez de i < 30 — el cálculo anterior siempre
-    // se cortaba UN DÍA ANTES de hoy (thirtyDaysAgo + 29 días = ayer,
-    // nunca llegaba a incluir el día actual). Así sí incluye hoy.
-    for (let i = 0; i <= 30; i++) {
-      const d = new Date(thirtyDaysAgo);
+    for (let i = 0; i < diasEnRango; i++) {
+      const d = new Date(desde);
       d.setUTCDate(d.getUTCDate() + i);
       const key = d.toISOString().split('T')[0];
       dailyMap[key] = { date: key, conversations: 0, sales: 0, revenue: 0 };
@@ -288,70 +321,44 @@ router.get('/dashboard/stats', async (req, res, next) => {
       const key = fechaLimaYMD(s.sale_at);
       if (dailyMap[key]) {
         dailyMap[key].sales++;
-        // Antes solo se contaba CUÁNTAS ventas hubo por día, nunca se
-        // sumaba el MONTO — por eso el gráfico de "Ingresos" siempre
-        // salía en cero, no había ningún campo de dinero que graficar.
         dailyMap[key].revenue += (s.sale_amount || 0);
       }
     });
     const daily_chart = Object.values(dailyMap).map(d => ({ ...d, revenue: Number(d.revenue.toFixed(2)) }));
+
+    // Ventas/contactos por día de la semana, dentro del mismo rango.
     const weekdays = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
     const byWeekday = weekdays.map(day => ({ day, sales: 0, conversations: 0 }));
-
-    // Día de la semana calculado en hora de Lima (no la del servidor) —
-    // si no, un mensaje de las 11pm en Lima puede contarse como si
-    // fuera el día siguiente, dependiendo de en qué zona horaria
-    // corra Railway.
-    function diaSemanaLima(fechaISO) {
-      const ms = new Date(fechaISO).getTime() - 5 * 60 * 60 * 1000;
-      return new Date(ms).getUTCDay();
-    }
-
     (convByDay || []).forEach(c => {
       byWeekday[diaSemanaLima(c.created_at)].conversations++;
     });
-    // Solo ventas de los últimos 30 días, para que coincida con el
-    // mismo rango que las conversaciones de arriba — antes se mezclaba
-    // TODO el histórico de ventas con solo 30 días de conversaciones,
-    // lo cual no tenía relación real entre ambas barras.
-    (salesData || [])
-      .filter(s => s.sale_at && new Date(s.sale_at) >= thirtyDaysAgo)
-      .forEach(s => {
-        byWeekday[diaSemanaLima(s.sale_at)].sales++;
-      });
+    (salesData || []).forEach(s => {
+      if (!s.sale_at) return;
+      byWeekday[diaSemanaLima(s.sale_at)].sales++;
+    });
 
     // Todos los montos se calcularon en Soles (PEN) — si el frontend
     // pidió otra moneda (?currency=USD), se convierten de verdad acá,
     // con tasas de cambio reales, antes de responder.
     const monedaSolicitada = (req.query.currency || 'PEN').toUpperCase();
-    const [total_revenue_conv, revenue_today_conv, revenue_30d_conv, avg_ticket_conv] = await Promise.all([
+    const [total_revenue_conv, avg_ticket_conv] = await Promise.all([
       convertirDesdeSoles(total_revenue, monedaSolicitada),
-      convertirDesdeSoles(revenue_today, monedaSolicitada),
-      convertirDesdeSoles(revenue_30d, monedaSolicitada),
       convertirDesdeSoles(avg_ticket, monedaSolicitada)
     ]);
-
-    // Convertir también el ingreso de cada día del gráfico, para que
-    // combine con el resto de montos ya convertidos arriba.
     const tasaParaChart = monedaSolicitada === 'PEN' ? 1 : (await obtenerTasasCambio())?.[monedaSolicitada] || 1;
     const daily_chart_convertido = daily_chart.map(d => ({ ...d, revenue: Number((d.revenue * tasaParaChart).toFixed(2)) }));
 
     res.json({
-      total_conversations,
-      conversations_today,
-      conversations_30d,
-      active_conversations,
-      messages_today,
-      messages_30d,
-      sales_total: sales_total || 0,
-      sales_today: sales_today || 0,
-      sales_30d: sales_30d || 0,
-      pending_today: pending_today || 0,
-      pending_30d: pending_30d || 0,
+      range,
+      from: desde.toISOString(),
+      to: hasta.toISOString(),
+      total_conversations: total_conversations || 0,
+      active_conversations: active_conversations || 0,
+      messages: messages || 0,
+      sales: sales || 0,
+      pending: pending || 0,
       currency: monedaSolicitada,
       total_revenue: Number(total_revenue_conv.toFixed(2)),
-      revenue_today: Number(revenue_today_conv.toFixed(2)),
-      revenue_30d: Number(revenue_30d_conv.toFixed(2)),
       avg_ticket: Number(avg_ticket_conv.toFixed(2)),
       conversion_rate: parseFloat(conversion_rate),
       daily_chart: daily_chart_convertido,
