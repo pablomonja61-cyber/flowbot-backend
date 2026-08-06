@@ -28,14 +28,35 @@ async function enviarCorreoVerificacion(email, codigo) {
         to: email,
         subject: 'Verifica tu correo - AriaBot',
         html: `
-          <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto;">
-            <h2>¡Bienvenido a AriaBot! 🤖</h2>
-            <p>Para activar tu cuenta, usa este código de verificación:</p>
-            <div style="background: #f0f4ff; border-radius: 8px; padding: 20px; text-align: center; margin: 20px 0;">
-              <span style="font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #2563eb;">${codigo}</span>
+          <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 480px; margin: 0 auto; background: #000000; padding: 24px;">
+            <div style="background: #0a0a0a; border-radius: 16px; overflow: hidden; border: 1px solid #222;">
+
+              <!-- Encabezado -->
+              <div style="background: #000000; padding: 32px 24px; text-align: center; border-bottom: 1px solid #222;">
+                <div style="font-size: 40px; margin-bottom: 8px;">🤖</div>
+                <h1 style="color: #ffffff; margin: 0; font-size: 22px;">¡Bienvenido a AriaBot!</h1>
+              </div>
+
+              <!-- Cuerpo -->
+              <div style="padding: 32px 28px;">
+                <p style="color: #e5e5e5; font-size: 15px; margin: 0 0 20px;">Para activar tu cuenta, usa este código de verificación:</p>
+
+                <div style="background: #111111; border: 1px solid #d11842; border-radius: 12px; padding: 24px; text-align: center; margin: 0 0 20px;">
+                  <span style="font-size: 36px; font-weight: bold; letter-spacing: 10px; color: #d11842;">${codigo}</span>
+                </div>
+
+                <p style="color: #aaa; font-size: 14px; margin: 0 0 4px;">⏱️ Este código vence en <strong style="color: #d11842;">15 minutos</strong>.</p>
+                <p style="color: #666; font-size: 12px; margin: 20px 0 0; border-top: 1px solid #222; padding-top: 16px;">
+                  Si no creaste una cuenta en AriaBot, puedes ignorar este correo tranquilamente.
+                </p>
+              </div>
+
+              <!-- Footer -->
+              <div style="background: #000000; padding: 16px; text-align: center; border-top: 1px solid #222;">
+                <p style="color: #555; font-size: 11px; margin: 0;">AriaBot — Automatiza tu WhatsApp con IA</p>
+              </div>
+
             </div>
-            <p>Este código vence en 15 minutos.</p>
-            <p style="color: #888; font-size: 13px;">Si no creaste una cuenta en AriaBot, puedes ignorar este correo.</p>
           </div>
         `
       },
