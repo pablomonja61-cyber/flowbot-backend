@@ -337,7 +337,7 @@ async function callAIProvider(provider, apiKey, model, systemPrompt, conversatio
   const baseUrl = prov === 'openai'
     ? 'https://api.openai.com/v1/chat/completions'
     : 'https://api.groq.com/openai/v1/chat/completions';
-  const defaultModel = prov === 'openai' ? 'gpt-4o-mini' : 'llama-3.3-70b-versatile';
+  const defaultModel = prov === 'openai' ? 'gpt-4o-mini' : 'openai/gpt-oss-120b';
 
   const response = await axios.post(
     baseUrl,
@@ -417,7 +417,7 @@ async function classifyResponseWithAI(userResponse, paths, aiConfigId) {
       if (c) aiConfig = c;
     }
     const apiKey = aiConfig?.groq_api_key || process.env.GROQ_API_KEY;
-    const model = aiConfig?.model || 'llama-3.3-70b-versatile';
+    const model = aiConfig?.model || 'openai/gpt-oss-120b';
     const options = paths.map((p, i) => `${i}: ${p.label}`).join('\n');
 
     const response = await axios.post(
@@ -885,7 +885,10 @@ async function processIncomingImageCloud(connection, contactPhone, mediaId, conv
     const visionResponse = await axios.post(
       'https://api.groq.com/openai/v1/chat/completions',
       {
-        model: 'openai/gpt-oss-120b',
+        // OJO: este modelo tiene que ser uno con soporte de VISIÓN (analiza
+        // imágenes) — openai/gpt-oss-120b es excelente para texto pero NO
+        // entiende imágenes. qwen/qwen3.6-27b sí es multimodal.
+        model: 'qwen/qwen3.6-27b',
         max_tokens: 400,
         messages: [{
           role: 'user',
