@@ -152,7 +152,7 @@ router.post('/generate-variations', async (req, res, next) => {
     const response = await axios.post(
       'https://api.groq.com/openai/v1/chat/completions',
       {
-        model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+        model: 'openai/gpt-oss-120b',
         max_tokens: 1500,
         temperature: 0.9,
         messages: [{

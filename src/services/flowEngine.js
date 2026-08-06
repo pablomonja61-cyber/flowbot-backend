@@ -885,7 +885,7 @@ async function processIncomingImageCloud(connection, contactPhone, mediaId, conv
     const visionResponse = await axios.post(
       'https://api.groq.com/openai/v1/chat/completions',
       {
-        model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+        model: 'openai/gpt-oss-120b',
         max_tokens: 400,
         messages: [{
           role: 'user',
