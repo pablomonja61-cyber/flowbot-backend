@@ -328,7 +328,7 @@ async function callAIProvider(provider, apiKey, model, systemPrompt, conversatio
     ? 'https://api.openai.com/v1/chat/completions'
     : 'https://api.groq.com/openai/v1/chat/completions';
 
-  const defaultModel = prov === 'openai' ? 'gpt-4o-mini' : 'openai/gpt-oss-120b';
+  const defaultModel = prov === 'openai' ? 'gpt-4o-mini' : 'qwen/qwen3.6-27b';
 
   const response = await axios.post(
     baseUrl,
@@ -844,7 +844,7 @@ async function classifyResponseWithAI(userResponse, paths, aiConfigId) {
     }
 
     const apiKey = aiConfig?.groq_api_key || process.env.GROQ_API_KEY;
-    const model = aiConfig?.model || 'openai/gpt-oss-120b';
+    const model = aiConfig?.model || 'qwen/qwen3.6-27b';
     const options = paths.map((p, i) => `${i}: ${p.label}`).join('\n');
 
     const response = await axios.post(
