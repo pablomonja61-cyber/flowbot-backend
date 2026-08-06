@@ -651,4 +651,58 @@ router.get('/rewards', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── GET /api/conversations/dashboard/ranking-tiendas ────────────
+// Métricas por CADA WhatsApp conectado por separado (cada conexión
+// es una "tienda") — para la tabla de ranking del Dashboard.
+router.get('/dashboard/ranking-tiendas', async (req, res, next) => {
+  try {
+    const { data: conexiones } = await supabase
+      .from('connections')
+      .select('id, name, phone_number')
+      .eq('user_id', req.user.id);
+
+    if (!conexiones?.length) return res.json({ tiendas: [] });
+
+    const monedaSolicitada = (req.query.currency || 'PEN').toUpperCase();
+
+    const tiendas = await Promise.all(conexiones.map(async (conn) => {
+      const [
+        { count: contactos },
+        { count: mensajes },
+        { count: ventas },
+        { data: ventasData }
+      ] = await Promise.all([
+        supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('connection_id', conn.id),
+        supabase.from('messages').select('conversations!inner(connection_id)', { count: 'exact', head: true }).eq('conversations.connection_id', conn.id),
+        supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('connection_id', conn.id).eq('is_sale', true),
+        supabase.from('conversations').select('sale_amount').eq('connection_id', conn.id).eq('is_sale', true)
+      ]);
+
+      const facturacionSoles = (ventasData || []).reduce((sum, v) => sum + (v.sale_amount || 0), 0);
+      const ticketPromSoles = ventas > 0 ? facturacionSoles / ventas : 0;
+      const tasaDeCierre = contactos > 0 ? ((ventas / contactos) * 100) : 0;
+
+      const [facturacion, ticketProm] = await Promise.all([
+        convertirDesdeSoles(facturacionSoles, monedaSolicitada),
+        convertirDesdeSoles(ticketPromSoles, monedaSolicitada)
+      ]);
+
+      return {
+        connection_id: conn.id,
+        tienda: conn.name || conn.phone_number || 'Sin nombre',
+        contactos: contactos || 0,
+        mensajes: mensajes || 0,
+        ventas: ventas || 0,
+        facturacion: Number(facturacion.toFixed(2)),
+        ticket_promedio: Number(ticketProm.toFixed(2)),
+        tasa_de_cierre: Number(tasaDeCierre.toFixed(1))
+      };
+    }));
+
+    tiendas.sort((a, b) => b.facturacion - a.facturacion);
+
+    res.json({ currency: monedaSolicitada, tiendas });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
