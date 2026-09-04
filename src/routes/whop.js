@@ -30,6 +30,10 @@ router.get('/connect', async (req, res, next) => {
     const codeVerifier = base64url(crypto.randomBytes(32));
     const codeChallenge = base64url(crypto.createHash('sha256').update(codeVerifier).digest());
     const state = base64url(crypto.randomBytes(16));
+    // El scope "openid" exige mandar un "nonce" — un valor random de
+    // un solo uso, distinto del "state" (protege contra ataques de
+    // "replay" del token de identidad).
+    const nonce = base64url(crypto.randomBytes(16));
 
     // Se guarda temporalmente para poder recuperarlo en el callback.
     await supabase.from('whop_oauth_states').insert({
@@ -46,6 +50,7 @@ router.get('/connect', async (req, res, next) => {
       redirect_uri: WHOP_REDIRECT_URI,
       scope: 'openid profile email',
       state,
+      nonce,
       code_challenge: codeChallenge,
       code_challenge_method: 'S256'
     });
