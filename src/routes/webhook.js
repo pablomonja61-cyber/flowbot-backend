@@ -59,14 +59,18 @@ router.post('/whatsapp', async (req, res) => {
         if (!phoneNumberId) continue;
 
         for (const msg of value.messages || []) {
-          const contactPhone = msg.from;
+          // Desde el 31 de marzo de 2026, si el cliente activó "nombres
+          // de usuario" en WhatsApp (para ocultar su número), Meta ya
+          // no manda "from" — manda "from_user_id" con un identificador
+          // especial (BSUID, ej. "PE.1733311707727685") en su lugar.
+          // Igual sirve para identificar la conversación y responder,
+          // solo que no es un número de teléfono real.
+          const contactPhone = msg.from || msg.from_user_id;
           const queueKey = `${phoneNumberId}:${contactPhone}`;
 
-          // Diagnóstico temporal — si el número del contacto no se
-          // pudo leer bien, mostramos el mensaje completo tal como
-          // llegó de Meta, para ver exactamente qué estructura mandó.
           if (!contactPhone) {
             console.error('[Webhook] ⚠️ contactPhone vino vacío — mensaje completo:', JSON.stringify(msg));
+            continue;
           }
 
           if (msg.type === 'image') {
