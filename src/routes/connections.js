@@ -156,6 +156,26 @@ router.post('/embedded-signup', async (req, res, next) => {
       console.warn('[Embedded Signup] No se pudo traer info del número:', e.response?.data || e.message);
     }
 
+    // 2.5 Registrar el número en la Cloud API — sin este paso, el número
+    // se queda para siempre en estado "Pending" en el panel de Meta,
+    // aunque el resto de la conexión haya salido bien. Se le pone un
+    // PIN de 6 dígitos al azar (Meta lo pide para la verificación en
+    // 2 pasos, pero no hace falta que el cliente lo sepa ni lo use).
+    try {
+      const pin = String(Math.floor(100000 + Math.random() * 900000));
+      await axios.post(`https://graph.facebook.com/v21.0/${phone_number_id}/register`, {
+        messaging_product: 'whatsapp',
+        pin
+      }, {
+        headers: { Authorization: `Bearer ${accessToken}` }
+      });
+      console.log(`[Embedded Signup] Número ${phone_number_id} registrado en Cloud API correctamente`);
+    } catch (e) {
+      console.error('[Embedded Signup] Error registrando el número en Cloud API:', e.response?.data || e.message);
+      // No cortamos el proceso — si esto falla, el número puede quedar
+      // en Pending, pero al menos se ve el motivo exacto en los logs.
+    }
+
     // 3. Suscribir nuestra app a los webhooks de este WABA — sin esto,
     // Meta nunca nos avisaría de los mensajes entrantes de este cliente.
     try {
