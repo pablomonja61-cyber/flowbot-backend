@@ -90,13 +90,18 @@ router.post('/whatsapp', async (req, res) => {
 
           console.log(`[Webhook] Mensaje de ${contactPhone}: "${userMessage}"`);
 
+          // Meta manda el nombre real del perfil de WhatsApp en un
+          // arreglo aparte ("contacts"), no dentro del mensaje mismo.
+          const contactInfo = (value.contacts || []).find(c => c.wa_id === contactPhone) || value.contacts?.[0];
+          const profileName = contactInfo?.profile?.name || null;
+
           // Si el mensaje viene de un clic en un anuncio "Enviar mensaje"
           // (Click to WhatsApp), Meta manda este dato en el primer mensaje.
           const referral = msg.referral
             ? { ad_id: msg.referral.source_id || null, ctwa_clid: msg.referral.ctwa_clid || null }
             : null;
 
-          enqueueForContact(queueKey, () => processIncomingMessage(phoneNumberId, contactPhone, userMessage, msg.id, referral)).catch(err => {
+          enqueueForContact(queueKey, () => processIncomingMessage(phoneNumberId, contactPhone, userMessage, msg.id, referral, profileName)).catch(err => {
             console.error('[Webhook] Error procesando mensaje:', err.stack || err.message);
           });
         }
@@ -156,7 +161,7 @@ async function processIncomingImageMessage(phoneNumberId, contactPhone, msg) {
 // ════════════════════════════════════════════════════════════
 // Lógica principal: recibe msg → busca trigger → ejecuta flujo
 // ════════════════════════════════════════════════════════════
-async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, messageId, referral = null) {
+async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, messageId, referral = null, profileName = null) {
   // 1. Buscar la conexión por phone_number_id
   const { data: connection } = await supabase
     .from('connections')
@@ -203,7 +208,7 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
         user_id: userId,
         connection_id: connection.id,
         contact_phone: contactPhone,
-        contact_name: contactPhone,
+        contact_name: profileName || contactPhone,
         status: 'active',
         unread_count: 1,
         flow_active: false,
