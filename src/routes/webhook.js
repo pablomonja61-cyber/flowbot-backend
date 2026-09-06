@@ -97,7 +97,7 @@ router.post('/whatsapp', async (req, res) => {
             : null;
 
           enqueueForContact(queueKey, () => processIncomingMessage(phoneNumberId, contactPhone, userMessage, msg.id, referral)).catch(err => {
-            console.error('[Webhook] Error procesando mensaje:', err.message);
+            console.error('[Webhook] Error procesando mensaje:', err.stack || err.message);
           });
         }
       }
