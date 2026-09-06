@@ -78,12 +78,28 @@ async function showTypingCloud(phoneNumberId, accessToken, messageId) {
   }
 }
 
+// ── Detecta si el destinatario es un BSUID (identificador especial
+// para clientes que ocultan su número, ej. "PE.1733311707727685") en
+// vez de un número de teléfono normal. Formato: 2 letras + punto +
+// hasta 128 caracteres alfanuméricos.
+function esBsuid(to) {
+  return /^[A-Z]{2}\.[A-Za-z0-9]{1,128}$/.test(to || '');
+}
+
+// Sin esto, Meta acepta la petición (parece que se mandó bien) pero
+// NUNCA entrega el mensaje a números que activaron "ocultar mi
+// número" — hay que decirle explícitamente que el destinatario es
+// un BSUID, no un número de teléfono normal.
+function recipientTypeFields(to) {
+  return esBsuid(to) ? { recipient_type: 'business_scoped_user_id' } : {};
+}
+
 async function sendWhatsAppMessage(phoneNumberId, accessToken, to, message, conversationId) {
   if (!message || !message.trim()) return;
   try {
     await axios.post(
       `https://graph.facebook.com/${GRAPH_VERSION}/${phoneNumberId}/messages`,
-      { messaging_product: 'whatsapp', to, type: 'text', text: { body: message } },
+      { messaging_product: 'whatsapp', ...recipientTypeFields(to), to, type: 'text', text: { body: message } },
       { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
     );
     if (conversationId) await saveMessage(conversationId, message, 'outbound', 'text');
@@ -124,7 +140,7 @@ async function sendWhatsAppButtons(phoneNumberId, accessToken, to, bodyText, but
 
     await axios.post(
       `https://graph.facebook.com/${GRAPH_VERSION}/${phoneNumberId}/messages`,
-      { messaging_product: 'whatsapp', to, type: 'interactive', interactive },
+      { messaging_product: 'whatsapp', ...recipientTypeFields(to), to, type: 'interactive', interactive },
       { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
     );
     if (conversationId) {
@@ -144,7 +160,7 @@ async function sendWhatsAppImage(phoneNumberId, accessToken, to, url, caption, c
   try {
     await axios.post(
       `https://graph.facebook.com/${GRAPH_VERSION}/${phoneNumberId}/messages`,
-      { messaging_product: 'whatsapp', to, type: 'image', image: { link: url, caption: caption || '' } },
+      { messaging_product: 'whatsapp', ...recipientTypeFields(to), to, type: 'image', image: { link: url, caption: caption || '' } },
       { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
     );
     if (conversationId) await saveMessage(conversationId, caption || '[Imagen]', 'outbound', 'image', url);
@@ -160,7 +176,7 @@ async function sendWhatsAppVideo(phoneNumberId, accessToken, to, url, caption, c
   try {
     await axios.post(
       `https://graph.facebook.com/${GRAPH_VERSION}/${phoneNumberId}/messages`,
-      { messaging_product: 'whatsapp', to, type: 'video', video: { link: url, caption: caption || '' } },
+      { messaging_product: 'whatsapp', ...recipientTypeFields(to), to, type: 'video', video: { link: url, caption: caption || '' } },
       { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
     );
     if (conversationId) await saveMessage(conversationId, caption || '[Video]', 'outbound', 'video', url);
@@ -175,7 +191,7 @@ async function sendWhatsAppAudio(phoneNumberId, accessToken, to, url, conversati
   try {
     await axios.post(
       `https://graph.facebook.com/${GRAPH_VERSION}/${phoneNumberId}/messages`,
-      { messaging_product: 'whatsapp', to, type: 'audio', audio: { link: url } },
+      { messaging_product: 'whatsapp', ...recipientTypeFields(to), to, type: 'audio', audio: { link: url } },
       { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
     );
     if (conversationId) await saveMessage(conversationId, '[Audio]', 'outbound', 'audio', url);
@@ -191,7 +207,7 @@ async function sendWhatsAppDocument(phoneNumberId, accessToken, to, url, fileNam
     const nombre = fileName || url.split('/').pop().split('?')[0] || 'documento.pdf';
     await axios.post(
       `https://graph.facebook.com/${GRAPH_VERSION}/${phoneNumberId}/messages`,
-      { messaging_product: 'whatsapp', to, type: 'document', document: { link: url, filename: nombre } },
+      { messaging_product: 'whatsapp', ...recipientTypeFields(to), to, type: 'document', document: { link: url, filename: nombre } },
       { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
     );
     if (conversationId) await saveMessage(conversationId, `[Documento: ${nombre}]`, 'outbound', 'document', url);
