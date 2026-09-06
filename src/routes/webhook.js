@@ -196,7 +196,7 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
     if (referral) {
       console.log(`[Webhook] 📢 Conversación iniciada desde anuncio: ad_id=${referral.ad_id}, ctwa_clid=${referral.ctwa_clid ? 'sí' : 'no'}`);
     }
-    const { data: newConv } = await supabase
+    const { data: newConv, error: insertError } = await supabase
       .from('conversations')
       .insert({
         id: uuidv4(),
@@ -214,6 +214,11 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
       })
       .select()
       .single();
+
+    if (insertError) {
+      console.error('[Webhook] Error creando la conversación:', insertError.message);
+      return;
+    }
     conversation = newConv;
   }
 
