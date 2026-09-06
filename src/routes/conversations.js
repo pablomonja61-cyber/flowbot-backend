@@ -95,7 +95,7 @@ router.post('/:id/messages', async (req, res, next) => {
             else if (media_type === 'document') await sendWhatsAppDocument(pnid, tok, conv.contact_phone, media_url, file_name || '', null);
           } else {
             await axios.post(
-              `https://graph.facebook.com/v19.0/${conv.connections.phone_number_id}/messages`,
+              `https://graph.facebook.com/v26.0/${conv.connections.phone_number_id}/messages`,
               { messaging_product: 'whatsapp', to: conv.contact_phone, type: 'text', text: { body: content } },
               { headers: { Authorization: `Bearer ${conv.connections.access_token}`, 'Content-Type': 'application/json' } }
             );

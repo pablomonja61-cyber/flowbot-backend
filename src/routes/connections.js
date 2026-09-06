@@ -28,7 +28,7 @@ router.post('/', async (req, res, next) => {
     }
     try {
       const verify = await axios.get(
-        `https://graph.facebook.com/v19.0/${phone_number_id}`,
+        `https://graph.facebook.com/v26.0/${phone_number_id}`,
         { headers: { Authorization: `Bearer ${access_token}` } }
       );
       var phone_number = verify.data.display_phone_number || phone_number_id;
@@ -80,7 +80,7 @@ router.put('/:id', async (req, res, next) => {
       updates.phone_number_id = phone_number_id;
       try {
         const verify = await axios.get(
-          `https://graph.facebook.com/v19.0/${phone_number_id}`,
+          `https://graph.facebook.com/v26.0/${phone_number_id}`,
           { headers: { Authorization: `Bearer ${access_token || req.body.access_token}` } }
         );
         updates.phone_number = verify.data.display_phone_number || phone_number_id;
@@ -135,7 +135,7 @@ router.post('/embedded-signup', async (req, res, next) => {
     }
 
     // 1. Intercambiar el "code" de un solo uso por un token de acceso real
-    const tokenRes = await axios.get('https://graph.facebook.com/v21.0/oauth/access_token', {
+    const tokenRes = await axios.get('https://graph.facebook.com/v26.0/oauth/access_token', {
       params: { client_id: appId, client_secret: appSecret, code }
     });
     const accessToken = tokenRes.data?.access_token;
@@ -147,7 +147,7 @@ router.post('/embedded-signup', async (req, res, next) => {
     let displayPhone = phone_number_id;
     let verifiedName = 'WhatsApp conectado';
     try {
-      const infoRes = await axios.get(`https://graph.facebook.com/v21.0/${phone_number_id}`, {
+      const infoRes = await axios.get(`https://graph.facebook.com/v26.0/${phone_number_id}`, {
         params: { fields: 'display_phone_number,verified_name', access_token: accessToken }
       });
       displayPhone = infoRes.data?.display_phone_number || phone_number_id;
@@ -163,7 +163,7 @@ router.post('/embedded-signup', async (req, res, next) => {
     // 2 pasos, pero no hace falta que el cliente lo sepa ni lo use).
     try {
       const pin = String(Math.floor(100000 + Math.random() * 900000));
-      await axios.post(`https://graph.facebook.com/v21.0/${phone_number_id}/register`, {
+      await axios.post(`https://graph.facebook.com/v26.0/${phone_number_id}/register`, {
         messaging_product: 'whatsapp',
         pin
       }, {
@@ -179,7 +179,7 @@ router.post('/embedded-signup', async (req, res, next) => {
     // 3. Suscribir nuestra app a los webhooks de este WABA — sin esto,
     // Meta nunca nos avisaría de los mensajes entrantes de este cliente.
     try {
-      await axios.post(`https://graph.facebook.com/v21.0/${waba_id}/subscribed_apps`, {}, {
+      await axios.post(`https://graph.facebook.com/v26.0/${waba_id}/subscribed_apps`, {}, {
         headers: { Authorization: `Bearer ${accessToken}` }
       });
     } catch (e) {

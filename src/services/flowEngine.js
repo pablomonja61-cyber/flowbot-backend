@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const supabase = require('../models/supabase');
 const { v4: uuidv4 } = require('uuid');
 
-const GRAPH_VERSION = 'v19.0';
+const GRAPH_VERSION = 'v26.0';
 
 // ── Detectar automáticamente si un mensaje del bot está pidiendo el
 // pago (sin que el negocio tenga que marcar nada manualmente) — se
@@ -86,12 +86,12 @@ function esBsuid(to) {
   return /^[A-Z]{2}\.[A-Za-z0-9]{1,128}$/.test(to || '');
 }
 
-// Sin esto, Meta acepta la petición (parece que se mandó bien) pero
-// NUNCA entrega el mensaje a números que activaron "ocultar mi
-// número" — hay que decirle explícitamente que el destinatario es
-// un BSUID, no un número de teléfono normal.
+// OJO: se probó agregar recipient_type: "business_scoped_user_id" para
+// estos casos, pero Meta lo RECHAZA con error real (solo acepta
+// "group", "individual" o vacío) — así que no se manda nada especial,
+// el "to" con el BSUID se manda tal cual, igual que un número normal.
 function recipientTypeFields(to) {
-  return esBsuid(to) ? { recipient_type: 'business_scoped_user_id' } : {};
+  return {};
 }
 
 async function sendWhatsAppMessage(phoneNumberId, accessToken, to, message, conversationId) {
