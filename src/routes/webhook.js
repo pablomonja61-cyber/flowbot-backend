@@ -62,6 +62,13 @@ router.post('/whatsapp', async (req, res) => {
           const contactPhone = msg.from;
           const queueKey = `${phoneNumberId}:${contactPhone}`;
 
+          // Diagnóstico temporal — si el número del contacto no se
+          // pudo leer bien, mostramos el mensaje completo tal como
+          // llegó de Meta, para ver exactamente qué estructura mandó.
+          if (!contactPhone) {
+            console.error('[Webhook] ⚠️ contactPhone vino vacío — mensaje completo:', JSON.stringify(msg));
+          }
+
           if (msg.type === 'image') {
             enqueueForContact(queueKey, () => processIncomingImageMessage(phoneNumberId, contactPhone, msg)).catch(err => {
               console.error('[Webhook] Error procesando imagen:', err.message);
