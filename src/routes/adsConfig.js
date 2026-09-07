@@ -23,21 +23,36 @@ router.get('/', async (req, res, next) => {
 router.post('/', async (req, res, next) => {
   try {
     const { ad_account_id, access_token, pixel_id, currency, conversions_api } = req.body;
-    if (!ad_account_id || !access_token) {
-      return res.status(400).json({ error: 'Ad Account ID y Access Token son requeridos' });
+
+    // Para usar SOLO el Pixel (Conversions API, registrar compras), solo
+    // hacen falta pixel_id + access_token — el Ad Account ID es un dato
+    // aparte, de un sistema distinto de Meta (Ads Manager), que solo se
+    // necesita si además quieres ver el Dashboard de métricas de
+    // anuncios dentro de AriaBot. No deben mezclarse ni exigirse juntos.
+    if (!access_token) {
+      return res.status(400).json({ error: 'El Access Token es requerido' });
     }
-    // Verificar token con Meta
-    try {
-      await axios.get(
-        `https://graph.facebook.com/v26.0/act_${ad_account_id.replace('act_', '')}`,
-        {
-          params: { fields: 'id,name', access_token },
-          timeout: 10000
-        }
-      );
-    } catch (e) {
-      console.error('[Ads Config] Error verificando credenciales con Meta:', e.response?.data || e.message);
-      return res.status(400).json({ error: 'Token o Ad Account ID inválido. Verifica tus credenciales de Meta.' });
+    if (!pixel_id && !ad_account_id) {
+      return res.status(400).json({ error: 'Debes ingresar al menos el Pixel ID (para registrar compras) o el Ad Account ID (para ver métricas de anuncios)' });
+    }
+
+    // Solo se verifica contra el Ads Manager si de verdad se mandó un
+    // Ad Account ID — si el usuario solo quiere el Pixel, este paso se
+    // salta por completo (el token del Pixel no tiene por qué tener
+    // permisos de ads_read/ads_management, son cosas distintas).
+    if (ad_account_id) {
+      try {
+        await axios.get(
+          `https://graph.facebook.com/v26.0/act_${ad_account_id.replace('act_', '')}`,
+          {
+            params: { fields: 'id,name', access_token },
+            timeout: 10000
+          }
+        );
+      } catch (e) {
+        console.error('[Ads Config] Error verificando credenciales con Meta:', e.response?.data || e.message);
+        return res.status(400).json({ error: 'Token o Ad Account ID inválido para el Ads Manager. Si solo quieres usar el Pixel, deja el campo de Ad Account ID vacío.' });
+      }
     }
     // Upsert config
     const { data: existing } = await supabase
