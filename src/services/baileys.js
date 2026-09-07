@@ -7,7 +7,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
-const { cancelFollowups, sendFollowupContentCloud } = require('../services/flowEngine');
+const { cancelFollowups, sendFollowupContentCloud, sendPurchaseEventToMeta } = require('../services/flowEngine');
 
 const activeSessions = {};
 const connectingLocks = {};
@@ -1718,6 +1718,8 @@ Responde SOLO en formato JSON exacto, sin texto adicional:
       current_flow_id: null
     }).eq('id', conversation.id);
 
+    sendPurchaseEventToMeta(userId, conversation, monto).catch(e => console.error('[Meta Conversions API] Error inesperado:', e.message));
+
     try {
       await cancelFollowups(conversation.id);
     } catch (e) {
@@ -1779,6 +1781,8 @@ Responde SOLO en formato JSON exacto, sin texto adicional:
     sale_at: new Date().toISOString(),
     flow_active: false
   }).eq('id', conversation.id);
+
+  sendPurchaseEventToMeta(userId, conversation, monto).catch(e => console.error('[Meta Conversions API] Error inesperado:', e.message));
 
   try {
     await cancelFollowups(conversation.id);
