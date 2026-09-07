@@ -26,7 +26,7 @@ router.get('/', async (req, res, next) => {
     //    que contiene las conversaciones de mensajería iniciadas
     //    (esto viene directo de Meta, no de nuestra base de datos)
     const metricsResponse = await axios.get(
-      `https://graph.facebook.com/v19.0/act_${accountId}/insights`,
+      `https://graph.facebook.com/v26.0/act_${accountId}/insights`,
       {
         params: {
           access_token: config.access_token,
@@ -62,7 +62,7 @@ router.get('/', async (req, res, next) => {
     if (adIds.length > 0) {
       try {
         const statusResponse = await axios.get(
-          `https://graph.facebook.com/v19.0/`,
+          `https://graph.facebook.com/v26.0/`,
           {
             params: {
               ids: adIds.join(','),

@@ -29,13 +29,14 @@ router.post('/', async (req, res, next) => {
     // Verificar token con Meta
     try {
       await axios.get(
-        `https://graph.facebook.com/v19.0/act_${ad_account_id.replace('act_', '')}`,
+        `https://graph.facebook.com/v26.0/act_${ad_account_id.replace('act_', '')}`,
         {
           params: { fields: 'id,name', access_token },
           timeout: 10000
         }
       );
     } catch (e) {
+      console.error('[Ads Config] Error verificando credenciales con Meta:', e.response?.data || e.message);
       return res.status(400).json({ error: 'Token o Ad Account ID inválido. Verifica tus credenciales de Meta.' });
     }
     // Upsert config
