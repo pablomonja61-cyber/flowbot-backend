@@ -9,6 +9,11 @@ router.use(auth);
 const META_APP_ID = process.env.META_APP_ID;
 const META_APP_SECRET = process.env.META_APP_SECRET;
 const GRAPH_VERSION = 'v26.0';
+// Fijo en el código a propósito — Meta exige que el redirect_uri sea
+// IDÉNTICO, byte por byte, entre el paso de autorización y el de
+// intercambio del código. Dejarlo fijo acá evita cualquier diferencia
+// (como una barra "/" de más) entre esos 2 pasos.
+const META_ADS_REDIRECT_URI = 'https://ariabot.app/meta/callback';
 
 // ── GET /api/meta/connect ────────────────────────────────────
 // Devuelve la URL de autorización de Meta para pedir permisos de
@@ -19,10 +24,9 @@ router.get('/connect', async (req, res, next) => {
     if (!META_APP_ID) {
       return res.status(500).json({ error: 'META_APP_ID no configurado en el servidor' });
     }
-    const redirectUri = req.query.redirect_uri || `${process.env.FRONTEND_URL}/meta/callback`;
     const params = new URLSearchParams({
       client_id: META_APP_ID,
-      redirect_uri: redirectUri,
+      redirect_uri: META_ADS_REDIRECT_URI,
       scope: 'ads_read,ads_management,business_management',
       response_type: 'code',
       state: req.user.id
@@ -36,19 +40,17 @@ router.get('/connect', async (req, res, next) => {
 // de Ads, lo cambia por un access_token, y lo guarda.
 router.post('/callback', async (req, res, next) => {
   try {
-    const { code, redirect_uri } = req.body;
+    const { code } = req.body;
     if (!code) return res.status(400).json({ error: 'code es requerido' });
     if (!META_APP_ID || !META_APP_SECRET) {
       return res.status(500).json({ error: 'META_APP_ID / META_APP_SECRET no configurados en el servidor' });
     }
 
-    const redirectUri = redirect_uri || `${process.env.FRONTEND_URL}/meta/callback`;
-
     const tokenRes = await axios.get(`https://graph.facebook.com/${GRAPH_VERSION}/oauth/access_token`, {
       params: {
         client_id: META_APP_ID,
         client_secret: META_APP_SECRET,
-        redirect_uri: redirectUri,
+        redirect_uri: META_ADS_REDIRECT_URI,
         code
       }
     });
