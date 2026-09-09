@@ -131,4 +131,65 @@ router.get('/adaccounts', async (req, res, next) => {
   }
 });
 
+// ── GET /api/meta/pixels?ad_account_id=act_123 ────────────────
+// Lista los Pixels que ya existen en esa cuenta de anuncios — así
+// el usuario no tiene que escribir el Pixel ID a mano, solo elegir
+// de una lista (o se usa el único que tenga, automáticamente).
+router.get('/pixels', async (req, res, next) => {
+  try {
+    const { ad_account_id } = req.query;
+    if (!ad_account_id) return res.status(400).json({ error: 'ad_account_id es requerido' });
+
+    const { data: config } = await supabase
+      .from('ads_config')
+      .select('access_token, currency')
+      .eq('user_id', req.user.id)
+      .maybeSingle();
+
+    if (!config?.access_token) {
+      return res.status(404).json({ error: 'No hay una cuenta de Meta Ads conectada todavía' });
+    }
+
+    const accountId = ad_account_id.startsWith('act_') ? ad_account_id : `act_${ad_account_id}`;
+
+    const pixelsRes = await axios.get(`https://graph.facebook.com/${GRAPH_VERSION}/${accountId}/adspixels`, {
+      params: { access_token: config.access_token, fields: 'id,name' }
+    });
+
+    res.json(pixelsRes.data?.data || []);
+  } catch (err) {
+    console.error('[Meta Ads] Error listando pixels:', err.response?.data || err.message);
+    next(err);
+  }
+});
+
+// ── POST /api/meta/select-pixel ───────────────────────────────
+// Guarda el Pixel elegido (o el único que había) junto con el resto
+// de la config — usa el mismo access_token ya conectado, sin pedir
+// otro token aparte para esto.
+router.post('/select-pixel', async (req, res, next) => {
+  try {
+    const { pixel_id, ad_account_id, currency } = req.body;
+    if (!pixel_id) return res.status(400).json({ error: 'pixel_id es requerido' });
+
+    const { data: existing } = await supabase
+      .from('ads_config')
+      .select('id')
+      .eq('user_id', req.user.id)
+      .maybeSingle();
+
+    const updates = { pixel_id, conversions_api: true, updated_at: new Date().toISOString() };
+    if (ad_account_id) updates.ad_account_id = ad_account_id;
+    if (currency) updates.currency = currency;
+
+    if (existing) {
+      await supabase.from('ads_config').update(updates).eq('user_id', req.user.id);
+    } else {
+      await supabase.from('ads_config').insert({ user_id: req.user.id, ...updates });
+    }
+
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
