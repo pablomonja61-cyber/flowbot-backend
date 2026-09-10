@@ -192,4 +192,159 @@ router.post('/select-pixel', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── POST /api/meta/create-pixel ──────────────────────────────
+// Crea un Pixel NUEVO en Meta (uno que todavía no existe), usando
+// la cuenta de anuncios ya conectada — y de una vez lo guarda como
+// la configuración activa. El usuario no necesita ir a buscar
+// ningún token aparte: se reusa el mismo que ya autorizó al conectar
+// su cuenta publicitaria.
+router.post('/create-pixel', async (req, res, next) => {
+  try {
+    const { ad_account_id, name } = req.body;
+    if (!ad_account_id) return res.status(400).json({ error: 'ad_account_id es requerido' });
+
+    const { data: config } = await supabase
+      .from('ads_config')
+      .select('access_token, currency')
+      .eq('user_id', req.user.id)
+      .maybeSingle();
+
+    if (!config?.access_token) {
+      return res.status(404).json({ error: 'Primero conecta tu cuenta de Meta Ads' });
+    }
+
+    const accountId = ad_account_id.startsWith('act_') ? ad_account_id : `act_${ad_account_id}`;
+
+    const createRes = await axios.post(
+      `https://graph.facebook.com/${GRAPH_VERSION}/${accountId}/adspixels`,
+      { name: name || 'Pixel AriaBot' },
+      { params: { access_token: config.access_token } }
+    );
+
+    const newPixelId = createRes.data?.id;
+    if (!newPixelId) {
+      return res.status(400).json({ error: 'Meta no devolvió el ID del Pixel creado' });
+    }
+
+    // Guardar de una vez como la configuración activa — reusa el
+    // mismo access_token que ya se conectó antes, no hace falta pedir
+    // ninguno nuevo.
+    await supabase.from('ads_config').update({
+      pixel_id: newPixelId,
+      ad_account_id: accountId,
+      conversions_api: true,
+      updated_at: new Date().toISOString()
+    }).eq('user_id', req.user.id);
+
+    console.log(`[Meta Ads] ✓ Pixel nuevo creado y conectado: ${newPixelId}`);
+    res.status(201).json({ pixel_id: newPixelId });
+  } catch (err) {
+    console.error('[Meta Ads] Error creando Pixel:', err.response?.data || err.message);
+    res.status(400).json({ error: err.response?.data?.error?.message || 'No se pudo crear el Pixel' });
+  }
+});
+
+// ── GET /api/meta/campaigns?account_id=act_123 ────────────────
+// Lista las campañas de una cuenta publicitaria.
+router.get('/campaigns', async (req, res, next) => {
+  try {
+    const { account_id } = req.query;
+    if (!account_id) return res.status(400).json({ error: 'account_id es requerido' });
+
+    const { data: config } = await supabase
+      .from('ads_config')
+      .select('access_token')
+      .eq('user_id', req.user.id)
+      .maybeSingle();
+
+    if (!config?.access_token) {
+      return res.status(404).json({ error: 'No hay una cuenta de Meta Ads conectada todavía' });
+    }
+
+    const accountId = account_id.startsWith('act_') ? account_id : `act_${account_id}`;
+
+    const campaignsRes = await axios.get(`https://graph.facebook.com/${GRAPH_VERSION}/${accountId}/campaigns`, {
+      params: { access_token: config.access_token, fields: 'name,status,objective' }
+    });
+
+    res.json(campaignsRes.data?.data || []);
+  } catch (err) {
+    console.error('[Meta Ads] Error listando campañas:', err.response?.data || err.message);
+    res.status(400).json({ error: err.response?.data?.error?.message || 'No se pudieron cargar las campañas' });
+  }
+});
+
+// ── GET /api/meta/adsets?campaign_id=xxx ───────────────────────
+// Lista los conjuntos de anuncios de una campaña.
+router.get('/adsets', async (req, res, next) => {
+  try {
+    const { campaign_id } = req.query;
+    if (!campaign_id) return res.status(400).json({ error: 'campaign_id es requerido' });
+
+    const { data: config } = await supabase
+      .from('ads_config')
+      .select('access_token')
+      .eq('user_id', req.user.id)
+      .maybeSingle();
+
+    if (!config?.access_token) {
+      return res.status(404).json({ error: 'No hay una cuenta de Meta Ads conectada todavía' });
+    }
+
+    const adsetsRes = await axios.get(`https://graph.facebook.com/${GRAPH_VERSION}/${campaign_id}/adsets`, {
+      params: { access_token: config.access_token, fields: 'name,status' }
+    });
+
+    res.json(adsetsRes.data?.data || []);
+  } catch (err) {
+    console.error('[Meta Ads] Error listando conjuntos de anuncios:', err.response?.data || err.message);
+    res.status(400).json({ error: err.response?.data?.error?.message || 'No se pudieron cargar los conjuntos de anuncios' });
+  }
+});
+
+// ── GET /api/meta/ads?adset_id=xxx ─────────────────────────────
+// Lista los anuncios de un conjunto, con sus métricas.
+router.get('/ads', async (req, res, next) => {
+  try {
+    const { adset_id } = req.query;
+    if (!adset_id) return res.status(400).json({ error: 'adset_id es requerido' });
+
+    const { data: config } = await supabase
+      .from('ads_config')
+      .select('access_token')
+      .eq('user_id', req.user.id)
+      .maybeSingle();
+
+    if (!config?.access_token) {
+      return res.status(404).json({ error: 'No hay una cuenta de Meta Ads conectada todavía' });
+    }
+
+    const adsRes = await axios.get(`https://graph.facebook.com/${GRAPH_VERSION}/${adset_id}/ads`, {
+      params: {
+        access_token: config.access_token,
+        fields: 'name,status,insights{spend,impressions,clicks}'
+      }
+    });
+
+    // "insights" viene como un objeto con .data[0] — lo aplanamos para
+    // que el frontend no tenga que lidiar con esa estructura anidada.
+    const ads = (adsRes.data?.data || []).map(ad => {
+      const insight = ad.insights?.data?.[0] || {};
+      return {
+        id: ad.id,
+        name: ad.name,
+        status: ad.status,
+        spend: insight.spend || '0',
+        impressions: insight.impressions || '0',
+        clicks: insight.clicks || '0'
+      };
+    });
+
+    res.json(ads);
+  } catch (err) {
+    console.error('[Meta Ads] Error listando anuncios:', err.response?.data || err.message);
+    res.status(400).json({ error: err.response?.data?.error?.message || 'No se pudieron cargar los anuncios' });
+  }
+});
+
 module.exports = router;
