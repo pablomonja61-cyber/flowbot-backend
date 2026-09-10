@@ -107,6 +107,7 @@ router.post('/callback', async (req, res, next) => {
 // tiene acceso, para que el usuario elija cuál usar.
 router.get('/adaccounts', async (req, res, next) => {
   try {
+    res.set('Cache-Control', 'no-store');
     const { data: config } = await supabase
       .from('ads_config')
       .select('access_token')
@@ -123,6 +124,8 @@ router.get('/adaccounts', async (req, res, next) => {
         fields: 'id,name,account_status,currency'
       }
     });
+
+    console.log('[Meta Ads] Respuesta cruda de /me/adaccounts:', JSON.stringify(accountsRes.data));
 
     res.json(accountsRes.data?.data || []);
   } catch (err) {
