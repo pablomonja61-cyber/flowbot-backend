@@ -251,6 +251,7 @@ router.post('/create-pixel', async (req, res, next) => {
 // Lista las campañas de una cuenta publicitaria.
 router.get('/campaigns', async (req, res, next) => {
   try {
+    res.set('Cache-Control', 'no-store');
     const { account_id } = req.query;
     if (!account_id) return res.status(400).json({ error: 'account_id es requerido' });
 
@@ -270,6 +271,8 @@ router.get('/campaigns', async (req, res, next) => {
       params: { access_token: config.access_token, fields: 'name,status,objective' }
     });
 
+    console.log('[Meta Ads] Respuesta cruda de /campaigns:', JSON.stringify(campaignsRes.data));
+
     res.json(campaignsRes.data?.data || []);
   } catch (err) {
     console.error('[Meta Ads] Error listando campañas:', err.response?.data || err.message);
@@ -281,6 +284,7 @@ router.get('/campaigns', async (req, res, next) => {
 // Lista los conjuntos de anuncios de una campaña.
 router.get('/adsets', async (req, res, next) => {
   try {
+    res.set('Cache-Control', 'no-store');
     const { campaign_id } = req.query;
     if (!campaign_id) return res.status(400).json({ error: 'campaign_id es requerido' });
 
@@ -309,6 +313,7 @@ router.get('/adsets', async (req, res, next) => {
 // Lista los anuncios de un conjunto, con sus métricas.
 router.get('/ads', async (req, res, next) => {
   try {
+    res.set('Cache-Control', 'no-store');
     const { adset_id } = req.query;
     if (!adset_id) return res.status(400).json({ error: 'adset_id es requerido' });
 
