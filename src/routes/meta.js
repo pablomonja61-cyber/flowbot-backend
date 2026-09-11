@@ -330,7 +330,7 @@ router.get('/ads', async (req, res, next) => {
     const adsRes = await axios.get(`https://graph.facebook.com/${GRAPH_VERSION}/${adset_id}/ads`, {
       params: {
         access_token: config.access_token,
-        fields: 'name,status,insights.date_preset(last_30d){spend,impressions,clicks,reach,ctr}'
+        fields: 'name,status,insights.date_preset(last_30d){spend,impressions,clicks,reach,ctr,cpm,cpc}'
       }
     });
 
@@ -346,7 +346,9 @@ router.get('/ads', async (req, res, next) => {
         impressions: insight.impressions || '0',
         clicks: insight.clicks || '0',
         reach: insight.reach || '0',
-        ctr: insight.ctr || '0'
+        ctr: insight.ctr || '0',
+        cpm: insight.cpm || '0',
+        cpc: insight.cpc || '0'
       };
     });
 
