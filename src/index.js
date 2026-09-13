@@ -34,6 +34,9 @@ app.use(morgan('combined'));
 app.use(cors({
   origin: [
     process.env.FRONTEND_URL,
+    'https://ariabot.app',
+    'https://www.ariabot.app',
+    'https://boceto-ariabot.vercel.app',
     'http://localhost:5173',
     'https://ventas-vista.lovable.app'
   ],
