@@ -22,6 +22,7 @@ const adsMetricsRoutes = require('./routes/adsMetrics');
 const whopRoutes = require('./routes/whop');
 const metaRoutes = require('./routes/meta');
 const campaignsRoutes = require('./routes/campaigns');
+const capiRoutes = require('./routes/capi');
 const app = express();
 // Necesario para que req.ip devuelva la IP real del visitante, no la
 // IP interna del proxy de Railway — lo usa el límite de 5 cuentas
@@ -71,6 +72,7 @@ app.use('/api/ads-metrics', adsMetricsRoutes);
 app.use('/api/whop', whopRoutes);
 app.use('/api/meta', metaRoutes);
 app.use('/api/campaigns', campaignsRoutes);
+app.use('/api/capi', capiRoutes);
 // ── Error handler global ────────────────────────────────────
 app.use((err, req, res, next) => {
   console.error('[ERROR]', err.message);
