@@ -425,6 +425,93 @@ router.patch('/:id/sale', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── POST /api/conversations/:id/send-purchase-event ────────────
+// Reenvía el evento Purchase a Meta para una venta ya registrada.
+// Normalmente esto ya se hace solo al registrar la venta (arriba),
+// pero este botón permite reintentarlo manualmente si algo falló.
+router.post('/:id/send-purchase-event', async (req, res, next) => {
+  try {
+    const { data: conv, error } = await supabase
+      .from('conversations')
+      .select('*')
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id)
+      .single();
+    if (error) throw error;
+    if (!conv) return res.status(404).json({ error: 'Conversación no encontrada.' });
+    if (!conv.is_sale) return res.status(400).json({ error: 'Esta conversación todavía no tiene una venta registrada.' });
+
+    await sendPurchaseEventToMeta(req.user.id, conv, conv.sale_amount || 0);
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// ── POST /api/conversations/:id/messages/audio ──────────────────
+// Recibe un audio grabado en el navegador y lo envía por WhatsApp
+// (solo conexiones API Oficial — sube el archivo a Meta y lo manda
+// como mensaje de audio).
+const multer = require('multer');
+const audioUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 16 * 1024 * 1024 } });
+
+router.post('/:id/messages/audio', audioUpload.single('audio'), async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No se recibió ningún archivo de audio.' });
+
+    const { data: conv, error: convError } = await supabase
+      .from('conversations')
+      .select('*, connections(*)')
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id)
+      .single();
+    if (convError) throw convError;
+    if (!conv) return res.status(404).json({ error: 'Conversación no encontrada.' });
+
+    const { phone_number_id, access_token } = conv.connections || {};
+    if (!phone_number_id || !access_token) {
+      return res.status(400).json({ error: 'El envío de audio por ahora solo está disponible para conexiones de API Oficial.' });
+    }
+
+    // 1. Subir el audio a Meta
+    const form = new FormData();
+    form.append('file', new Blob([req.file.buffer], { type: req.file.mimetype }), req.file.originalname || 'audio.ogg');
+    form.append('messaging_product', 'whatsapp');
+
+    const uploadRes = await fetch(`https://graph.facebook.com/v21.0/${phone_number_id}/media`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${access_token}` },
+      body: form
+    });
+    const uploadData = await uploadRes.json();
+    if (!uploadRes.ok) return res.status(502).json({ error: 'No se pudo subir el audio a Meta: ' + (uploadData.error?.message || 'error desconocido') });
+
+    // 2. Enviar el mensaje de audio
+    const sendRes = await fetch(`https://graph.facebook.com/v21.0/${phone_number_id}/messages`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${access_token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messaging_product: 'whatsapp', to: conv.contact_phone, type: 'audio', audio: { id: uploadData.id } })
+    });
+    const sendData = await sendRes.json();
+    if (!sendRes.ok) return res.status(502).json({ error: 'No se pudo enviar el audio: ' + (sendData.error?.message || 'error desconocido') });
+
+    // 3. Guardar el mensaje
+    const { data: msg, error: insertError } = await supabase
+      .from('messages')
+      .insert({ conversation_id: req.params.id, content: '[Audio]', direction: 'outbound', msg_type: 'audio', created_at: new Date().toISOString() })
+      .select()
+      .single();
+    if (insertError) console.error('[Audio] No se pudo guardar el mensaje:', insertError.message);
+
+    await supabase.from('conversations').update({
+      last_message: '[Audio]',
+      last_message_at: new Date().toISOString(),
+      last_message_direction: 'outbound',
+      bot_ever_responded: true
+    }).eq('id', req.params.id);
+
+    res.status(201).json(msg || { success: true });
+  } catch (err) { next(err); }
+});
+
 // ── PATCH /api/conversations/:id/ai-toggle ─────────────────────
 // Prende/apaga el botón "IA" de una conversación específica.
 // Cuando está apagado (flow_active = false), el bot se queda en
