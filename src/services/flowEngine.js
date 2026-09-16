@@ -292,7 +292,7 @@ async function sendPurchaseEventToMeta(userId, conversation, saleAmount) {
     // (un Dataset distinto por cada WhatsApp conectado) — si la
     // conexión de esta conversación tiene un WABA con una
     // integración CAPI creada, se usa esa.
-    let datasetId, accessToken, currency = 'PEN';
+    let datasetId, accessToken, currency = 'PEN', wabaId;
 
     if (conversation.connection_id) {
       const { data: conn } = await supabase
@@ -302,6 +302,7 @@ async function sendPurchaseEventToMeta(userId, conversation, saleAmount) {
         .maybeSingle();
 
       if (conn?.waba_id) {
+        wabaId = conn.waba_id;
         const { data: capi } = await supabase
           .from('capi_connections')
           .select('dataset_id, event_token')
@@ -338,7 +339,14 @@ async function sendPurchaseEventToMeta(userId, conversation, saleAmount) {
     const cleanPhone = (conversation.contact_phone || '').replace(/\D/g, '');
     const hashedPhone = crypto.createHash('sha256').update(cleanPhone).digest('hex');
 
+    // Estructura exacta que exige Meta para eventos de Business
+    // Messaging (Click-to-WhatsApp): whatsapp_business_account_id y
+    // ctwa_clid van DENTRO de user_data, y el monto/moneda van
+    // DENTRO de custom_data — no sueltos en el evento. Antes se
+    // enviaban mal ubicados y Meta rechazaba todo con "Invalid
+    // parameter" sin mandar nada.
     const userData = { ph: [hashedPhone] };
+    if (wabaId) userData.whatsapp_business_account_id = wabaId;
     if (conversation.ctwa_clid) userData.ctwa_clid = conversation.ctwa_clid;
 
     await axios.post(
@@ -349,9 +357,11 @@ async function sendPurchaseEventToMeta(userId, conversation, saleAmount) {
           event_time: Math.floor(Date.now() / 1000),
           action_source: 'business_messaging',
           messaging_channel: 'whatsapp',
-          value: parseFloat(saleAmount) || 0,
-          currency,
-          user_data: userData
+          user_data: userData,
+          custom_data: {
+            currency,
+            value: parseFloat(saleAmount) || 0
+          }
         }],
         access_token: accessToken
       },
