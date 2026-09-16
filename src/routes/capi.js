@@ -1,6 +1,9 @@
 // routes/capi.js
 // Rutas de Meta CAPI Cloud — Dataset ID, conexión, listar, eliminar.
-// Móntala en tu index.js con: app.use('/api/capi', require('./routes/capi'));
+// Corregido según la documentación oficial de Meta:
+// https://developers.facebook.com/docs/marketing-api/conversions-api/business-messaging/
+// El Dataset ID se obtiene/crea con POST al edge /dataset del WABA
+// (no es un campo del WABA como se intentó antes).
 
 const express = require('express');
 const router = express.Router();
@@ -10,6 +13,7 @@ const supabase = require('../models/supabase');
 router.use(auth);
 
 // ── GET /api/capi/dataset?wabaId=... ────────────────────────────
+// Obtiene (o crea, si no existía) el Dataset ID de Meta para este WABA.
 router.get('/dataset', async (req, res, next) => {
   try {
     const { wabaId } = req.query;
@@ -24,14 +28,17 @@ router.get('/dataset', async (req, res, next) => {
     if (connError) throw connError;
     if (!conn?.access_token) return res.status(404).json({ error: 'No se encontró el token de esta cuenta de WhatsApp.' });
 
+    // POST al edge /dataset — Meta crea el dataset si no existe, o
+    // devuelve el que ya existía (es seguro llamarlo repetidas veces).
     const metaRes = await fetch(
-      `https://graph.facebook.com/v21.0/${wabaId}?fields=message_template_namespace,connected_business_message_dataset_id&access_token=${encodeURIComponent(conn.access_token)}`
+      `https://graph.facebook.com/v21.0/${wabaId}/dataset?access_token=${encodeURIComponent(conn.access_token)}`,
+      { method: 'POST' }
     );
     const metaData = await metaRes.json();
     if (!metaRes.ok) return res.status(502).json({ error: 'Meta rechazó la solicitud: ' + (metaData.error?.message || 'error desconocido') });
 
-    const datasetId = metaData.connected_business_message_dataset_id;
-    if (!datasetId) return res.status(404).json({ error: 'Esta cuenta todavía no tiene un Dataset de Meta asociado.' });
+    const datasetId = metaData.id;
+    if (!datasetId) return res.status(502).json({ error: 'Meta no devolvió un Dataset ID.' });
 
     res.json({ datasetId: String(datasetId) });
   } catch (err) { next(err); }
