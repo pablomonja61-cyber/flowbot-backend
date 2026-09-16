@@ -39,6 +39,7 @@ app.use(cors({
     'https://www.ariabot.app',
     'https://boceto-ariabot.vercel.app',
     'https://ariabot-panel-pablo.k4el-ux.chatgpt.site',
+    'https://ariabot-flujos-corregidos-pablo.iamblezts.chatgpt.site',
     'http://localhost:5173',
     'https://ventas-vista.lovable.app'
   ],
