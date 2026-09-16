@@ -288,14 +288,50 @@ async function isCountryBlocked(userId, contactPhone) {
 // ════════════════════════════════════════════════════════════
 async function sendPurchaseEventToMeta(userId, conversation, saleAmount) {
   try {
-    const { data: config } = await supabase
-      .from('ads_config')
-      .select('*')
-      .eq('user_id', userId)
-      .single();
+    // Primero intenta con la integración nueva "Meta CAPI Cloud"
+    // (un Dataset distinto por cada WhatsApp conectado) — si la
+    // conexión de esta conversación tiene un WABA con una
+    // integración CAPI creada, se usa esa.
+    let datasetId, accessToken, currency = 'PEN';
 
-    if (!config || !config.conversions_api || !config.pixel_id || !config.access_token) {
-      return; // el usuario no tiene esto configurado/activado — no hacer nada
+    if (conversation.connection_id) {
+      const { data: conn } = await supabase
+        .from('connections')
+        .select('waba_id')
+        .eq('id', conversation.connection_id)
+        .maybeSingle();
+
+      if (conn?.waba_id) {
+        const { data: capi } = await supabase
+          .from('capi_connections')
+          .select('dataset_id, event_token')
+          .eq('user_id', userId)
+          .eq('waba_id', conn.waba_id)
+          .maybeSingle();
+        if (capi?.dataset_id && capi?.event_token) {
+          datasetId = capi.dataset_id;
+          accessToken = capi.event_token;
+        }
+      }
+    }
+
+    // Si no hay una integración CAPI Cloud para este WhatsApp
+    // específico, cae en la configuración general vieja (un solo
+    // pixel_id para toda la cuenta), por si el usuario todavía la
+    // tiene configurada así.
+    if (!datasetId || !accessToken) {
+      const { data: config } = await supabase
+        .from('ads_config')
+        .select('*')
+        .eq('user_id', userId)
+        .single();
+
+      if (!config || !config.conversions_api || !config.pixel_id || !config.access_token) {
+        return; // no hay ninguna de las 2 formas configurada — no hacer nada
+      }
+      datasetId = config.pixel_id;
+      accessToken = config.access_token;
+      currency = config.currency || 'PEN';
     }
 
     const crypto = require('crypto');
@@ -306,7 +342,7 @@ async function sendPurchaseEventToMeta(userId, conversation, saleAmount) {
     if (conversation.ctwa_clid) userData.ctwa_clid = conversation.ctwa_clid;
 
     await axios.post(
-      `https://graph.facebook.com/${GRAPH_VERSION}/${config.pixel_id}/events`,
+      `https://graph.facebook.com/${GRAPH_VERSION}/${datasetId}/events`,
       {
         data: [{
           event_name: 'Purchase',
@@ -314,15 +350,15 @@ async function sendPurchaseEventToMeta(userId, conversation, saleAmount) {
           action_source: 'business_messaging',
           messaging_channel: 'whatsapp',
           value: parseFloat(saleAmount) || 0,
-          currency: config.currency || 'PEN',
+          currency,
           user_data: userData
         }],
-        access_token: config.access_token
+        access_token: accessToken
       },
       { timeout: 10000 }
     );
 
-    console.log(`[Meta Conversions API] ✓ Evento de compra enviado (pixel ${config.pixel_id}, S/${saleAmount})`);
+    console.log(`[Meta Conversions API] ✓ Evento de compra enviado (dataset ${datasetId}, S/${saleAmount})`);
   } catch (err) {
     console.error('[Meta Conversions API] Error enviando evento:', err.response?.data?.error?.message || err.message);
   }
