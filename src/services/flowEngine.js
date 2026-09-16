@@ -1316,6 +1316,17 @@ async function continueFlowFromButton(flowId, pausedNodeId, userResponse, connec
   const matchedHandle = `btn_${matchedIndex}`;
   let matchedEdge = (flow.edges || []).find(e => e.source === pausedNodeId && e.sourceHandle === matchedHandle);
 
+  // Los nodos "Mensajes API" (type 'api') no tienen una conexión por
+  // cada botón — tienen UNA sola salida llamada "api-out" que va
+  // siempre al mismo siguiente nodo (normalmente un Agente IA, que
+  // es quien decide qué camino tomar según la respuesta). Sin este
+  // respaldo, nunca se encontraba la conexión "btn_N" (porque no
+  // existe en este tipo de nodo) y se caía en la respuesta genérica
+  // de más abajo en vez de avanzar de verdad por el flujo.
+  if (!matchedEdge && pausedNode.type === 'api') {
+    matchedEdge = (flow.edges || []).find(e => e.source === pausedNodeId && e.sourceHandle === 'api-out');
+  }
+
   if (!matchedEdge && buttons.length === 1) {
     const edgesFromNode = (flow.edges || []).filter(e => e.source === pausedNodeId);
     if (edgesFromNode.length === 1) {
