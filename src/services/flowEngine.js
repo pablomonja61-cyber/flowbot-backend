@@ -1342,6 +1342,16 @@ async function continueFlowFromButton(flowId, pausedNodeId, userResponse, connec
 
   await supabase.from('conversations').update({ current_node_id: null, current_flow_id: null }).eq('id', conversationId);
   try { await cancelFollowups(conversationId); } catch (e) { console.error('[Flow] Error cancelando seguimientos:', e.message); }
+
+  // Si el siguiente nodo es un Agente IA con caminos configurados
+  // (como el que decide entre Yape/Plin), hay que evaluar la
+  // respuesta YA — si no, ese nodo se queda pausado esperando OTRO
+  // mensaje más, sin usar la respuesta que el cliente ya mandó.
+  const nextNode = nodeMap[matchedEdge.target];
+  if (nextNode && (nextNode.type === 'ai' || nextNode.type === 'ai_agent') && (nextNode.data?.paths || []).length > 0) {
+    return await resolveAIPath(flow, nextNode, nextNode.data.paths, userResponse, connection, contactPhone, conversationId);
+  }
+
   await executeFlow(flowId, contactPhone, userResponse, connection, conversationId, matchedEdge.target);
   return true;
 }
