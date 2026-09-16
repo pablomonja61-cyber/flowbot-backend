@@ -617,9 +617,28 @@ async function scheduleAttachedFollowups(flow, nodeId, connection, phoneNumberId
   const nodeMap = {};
   (flow.nodes || []).forEach(n => { nodeMap[n.id] = n; });
 
-  const attachedEdges = (flow.edges || []).filter(
+  let attachedEdges = (flow.edges || []).filter(
     e => e.target === nodeId && e.sourceHandle === 'seguimiento-out'
   );
+
+  // Si este nodo (típicamente "Mensajes API", esperando que el
+  // cliente elija un botón) no tiene un seguimiento conectado
+  // directamente a él, usa el que esté conectado al Agente IA al
+  // que apunta después (por su salida "api-out") — así el cliente
+  // igual recibe el empujón aunque nunca haya llegado a contestar,
+  // sin que haga falta conectar visualmente el seguimiento al nodo
+  // API (que se vería feo en el editor).
+  if (attachedEdges.length === 0) {
+    const node = nodeMap[nodeId];
+    if (node && (node.type === 'api' || node.type === 'buttons' || node.type === 'api_message')) {
+      const outEdge = (flow.edges || []).find(e => e.source === nodeId && e.sourceHandle === 'api-out');
+      if (outEdge) {
+        attachedEdges = (flow.edges || []).filter(
+          e => e.target === outEdge.target && e.sourceHandle === 'seguimiento-out'
+        );
+      }
+    }
+  }
 
   if (attachedEdges.length === 0) return;
 
