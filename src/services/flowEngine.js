@@ -1192,7 +1192,9 @@ Responde SOLO en formato JSON exacto:
 
     await supabase.from('conversations').update({
       is_sale: true, sale_amount: monto, sale_at: new Date().toISOString(),
-      current_node_id: null, current_flow_id: null
+      current_node_id: null, current_flow_id: null,
+      sale_method: conversation.pending_payment_method || null,
+      operation_code: analysisResult.numero_operacion || null
     }).eq('id', conversation.id);
 
     sendPurchaseEventToMeta(userId, conversation, monto).catch(() => {});
@@ -1227,7 +1229,11 @@ Responde SOLO en formato JSON exacto:
   if (!matchedRule) return;
 
   await sendWhatsAppMessage(phoneNumberId, accessToken, to, matchedRule.access_message, conversation.id);
-  await supabase.from('conversations').update({ is_sale: true, sale_amount: monto, sale_at: new Date().toISOString(), flow_active: false }).eq('id', conversation.id);
+  await supabase.from('conversations').update({
+    is_sale: true, sale_amount: monto, sale_at: new Date().toISOString(), flow_active: false,
+    sale_method: conversation.pending_payment_method || null,
+    operation_code: analysisResult.numero_operacion || null
+  }).eq('id', conversation.id);
   sendPurchaseEventToMeta(userId, conversation, monto).catch(() => {});
   try { await cancelFollowups(conversation.id); } catch (e) { console.error('[CloudAPI Payment] Error cancelando seguimientos:', e.message); }
 }
@@ -1294,7 +1300,7 @@ async function resolveAIPath(flow, pausedNode, paths, userResponse, connection, 
     return true;
   }
 
-  await supabase.from('conversations').update({ current_node_id: null, current_flow_id: null }).eq('id', conversationId);
+  await supabase.from('conversations').update({ current_node_id: null, current_flow_id: null, pending_payment_method: matched.label || null }).eq('id', conversationId);
   try { await cancelFollowups(conversationId); } catch (e) { console.error('[Flow] Error cancelando seguimientos:', e.message); }
   await executeFlow(flow.id, contactPhone, userResponse, connection, conversationId, matchedEdge.target);
   return true;

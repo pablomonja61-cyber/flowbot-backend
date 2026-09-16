@@ -52,6 +52,7 @@ router.get('/', async (req, res, next) => {
       .select(`
         id, contact_phone, contact_name, last_message,
         last_message_at, unread_count, status, connection_id, tag, profile_pic_url, flow_active, last_message_direction, bot_ever_responded, ever_replied,
+        is_sale, sale_amount, sale_at, sale_method, operation_code,
         connections(name)
       `, { count: 'exact' })
       .eq('user_id', req.user.id)
