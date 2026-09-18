@@ -337,7 +337,12 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
     if (handled) return;
 
     console.log(`[Webhook] IA responde duda mientras flujo sigue pausado`);
-    await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id);
+    // Antes esto llamaba a la IA sin ningún contexto del nodo pausado
+    // (sin el precio, sin los números de pago, nada) — por eso a veces
+    // la IA inventaba placeholders como "[inserta el número aquí]" en
+    // vez del número real. Ahora sí le pasamos el mismo contexto del
+    // nodo que ya estaba esperando la respuesta del cliente.
+    await respondWithAI(userId, connection, contactPhone, userMessage, conversation.id, pausedNode?.data?.ai_config_id, pausedNode?.data?.context);
     return;
   }
 

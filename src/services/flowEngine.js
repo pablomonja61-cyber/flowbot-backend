@@ -1323,6 +1323,40 @@ async function continueFlowFromButton(flowId, pausedNodeId, userResponse, connec
   const matchedHandle = `btn_${matchedIndex}`;
   let matchedEdge = (flow.edges || []).find(e => e.source === pausedNodeId && e.sourceHandle === matchedHandle);
 
+  // Los nodos "Mensajes API" (type 'api') no tienen una conexión por
+  // cada botón — tienen UNA sola salida llamada "api-out" que va
+  // siempre al mismo siguiente nodo (normalmente un Agente IA).
+  if (!matchedEdge && pausedNode.type === 'api') {
+    const apiOutEdge = (flow.edges || []).find(e => e.source === pausedNodeId && e.sourceHandle === 'api-out');
+    if (apiOutEdge) {
+      const nextNode = nodeMap[apiOutEdge.target];
+
+      // Si ese siguiente nodo es un Agente IA con "caminos" (paths) que
+      // tienen el MISMO nombre que el botón que el cliente presionó
+      // (ej. botón "Yape" → camino "Yape"), saltamos DIRECTO a ese
+      // camino sin pasarlo por la IA — es 100% seguro y determinístico,
+      // porque ya sabemos con certeza qué botón presionó el cliente.
+      // Esto evita que la IA "adivine" mal o responda sin contexto.
+      if (nextNode && (nextNode.type === 'ai' || nextNode.type === 'ai_agent')) {
+        const paths = nextNode.data?.paths || [];
+        const clickedLabel = String(buttons[matchedIndex] || '').toLowerCase().replace(/[^a-z0-9áéíóúñ]/g, '').trim();
+        const pathIndex = paths.findIndex(p => String(p.label || '').toLowerCase().replace(/[^a-z0-9áéíóúñ]/g, '').trim() === clickedLabel);
+
+        if (pathIndex !== -1) {
+          const directEdge = (flow.edges || []).find(e => e.source === nextNode.id && e.sourceHandle === `path-${pathIndex}`);
+          if (directEdge) {
+            console.log(`[Flow] Salto directo: botón "${buttons[matchedIndex]}" → camino "${paths[pathIndex].label}" (sin pasar por la IA)`);
+            await supabase.from('conversations').update({ current_node_id: null, current_flow_id: null }).eq('id', conversationId);
+            try { await cancelFollowups(conversationId); } catch (e) { console.error('[Flow] Error cancelando seguimientos:', e.message); }
+            await executeFlow(flowId, contactPhone, userResponse, connection, conversationId, directEdge.target);
+            return true;
+          }
+        }
+      }
+      matchedEdge = apiOutEdge;
+    }
+  }
+
   if (!matchedEdge && buttons.length === 1) {
     const edgesFromNode = (flow.edges || []).filter(e => e.source === pausedNodeId);
     if (edgesFromNode.length === 1) {
