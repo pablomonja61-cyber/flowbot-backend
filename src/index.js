@@ -47,9 +47,9 @@ app.use(cors({
 }));
 // ── Body parser ─────────────────────────────────────────────
 app.use('/webhook', express.raw({ type: 'application/json' }));
-app.use(express.json({ limit: '100mb' }));
-app.use(express.urlencoded({ extended: true, limit: '100mb' }));
-app.use(express.raw({ type: 'multipart/form-data', limit: '100mb' }));
+app.use(express.json({ limit: '150mb' }));
+app.use(express.urlencoded({ extended: true, limit: '150mb' }));
+app.use(express.raw({ type: 'multipart/form-data', limit: '150mb' }));
 // ── Health check ────────────────────────────────────────────
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
