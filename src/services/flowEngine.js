@@ -288,87 +288,41 @@ async function isCountryBlocked(userId, contactPhone) {
 // ════════════════════════════════════════════════════════════
 async function sendPurchaseEventToMeta(userId, conversation, saleAmount) {
   try {
-    // Primero intenta con la integración nueva "Meta CAPI Cloud"
-    // (un Dataset distinto por cada WhatsApp conectado) — si la
-    // conexión de esta conversación tiene un WABA con una
-    // integración CAPI creada, se usa esa.
-    let datasetId, accessToken, currency = 'PEN', wabaId;
+    const { data: config } = await supabase
+      .from('ads_config')
+      .select('*')
+      .eq('user_id', userId)
+      .single();
 
-    if (conversation.connection_id) {
-      const { data: conn } = await supabase
-        .from('connections')
-        .select('waba_id')
-        .eq('id', conversation.connection_id)
-        .maybeSingle();
-
-      if (conn?.waba_id) {
-        wabaId = conn.waba_id;
-        const { data: capi } = await supabase
-          .from('capi_connections')
-          .select('dataset_id, event_token')
-          .eq('user_id', userId)
-          .eq('waba_id', conn.waba_id)
-          .maybeSingle();
-        if (capi?.dataset_id && capi?.event_token) {
-          datasetId = capi.dataset_id;
-          accessToken = capi.event_token;
-        }
-      }
-    }
-
-    // Si no hay una integración CAPI Cloud para este WhatsApp
-    // específico, cae en la configuración general vieja (un solo
-    // pixel_id para toda la cuenta), por si el usuario todavía la
-    // tiene configurada así.
-    if (!datasetId || !accessToken) {
-      const { data: config } = await supabase
-        .from('ads_config')
-        .select('*')
-        .eq('user_id', userId)
-        .single();
-
-      if (!config || !config.conversions_api || !config.pixel_id || !config.access_token) {
-        return; // no hay ninguna de las 2 formas configurada — no hacer nada
-      }
-      datasetId = config.pixel_id;
-      accessToken = config.access_token;
-      currency = config.currency || 'PEN';
+    if (!config || !config.conversions_api || !config.pixel_id || !config.access_token) {
+      return; // el usuario no tiene esto configurado/activado — no hacer nada
     }
 
     const crypto = require('crypto');
     const cleanPhone = (conversation.contact_phone || '').replace(/\D/g, '');
     const hashedPhone = crypto.createHash('sha256').update(cleanPhone).digest('hex');
 
-    // Estructura exacta que exige Meta para eventos de Business
-    // Messaging (Click-to-WhatsApp): whatsapp_business_account_id y
-    // ctwa_clid van DENTRO de user_data, y el monto/moneda van
-    // DENTRO de custom_data — no sueltos en el evento. Antes se
-    // enviaban mal ubicados y Meta rechazaba todo con "Invalid
-    // parameter" sin mandar nada.
     const userData = { ph: [hashedPhone] };
-    if (wabaId) userData.whatsapp_business_account_id = wabaId;
     if (conversation.ctwa_clid) userData.ctwa_clid = conversation.ctwa_clid;
 
     await axios.post(
-      `https://graph.facebook.com/${GRAPH_VERSION}/${datasetId}/events`,
+      `https://graph.facebook.com/${GRAPH_VERSION}/${config.pixel_id}/events`,
       {
         data: [{
           event_name: 'Purchase',
           event_time: Math.floor(Date.now() / 1000),
           action_source: 'business_messaging',
           messaging_channel: 'whatsapp',
-          user_data: userData,
-          custom_data: {
-            currency,
-            value: parseFloat(saleAmount) || 0
-          }
+          value: parseFloat(saleAmount) || 0,
+          currency: config.currency || 'PEN',
+          user_data: userData
         }],
-        access_token: accessToken
+        access_token: config.access_token
       },
       { timeout: 10000 }
     );
 
-    console.log(`[Meta Conversions API] ✓ Evento de compra enviado (dataset ${datasetId}, S/${saleAmount})`);
+    console.log(`[Meta Conversions API] ✓ Evento de compra enviado (pixel ${config.pixel_id}, S/${saleAmount})`);
   } catch (err) {
     console.error('[Meta Conversions API] Error enviando evento:', err.response?.data?.error?.message || err.message);
   }
@@ -617,28 +571,9 @@ async function scheduleAttachedFollowups(flow, nodeId, connection, phoneNumberId
   const nodeMap = {};
   (flow.nodes || []).forEach(n => { nodeMap[n.id] = n; });
 
-  let attachedEdges = (flow.edges || []).filter(
+  const attachedEdges = (flow.edges || []).filter(
     e => e.target === nodeId && e.sourceHandle === 'seguimiento-out'
   );
-
-  // Si este nodo (típicamente "Mensajes API", esperando que el
-  // cliente elija un botón) no tiene un seguimiento conectado
-  // directamente a él, usa el que esté conectado al Agente IA al
-  // que apunta después (por su salida "api-out") — así el cliente
-  // igual recibe el empujón aunque nunca haya llegado a contestar,
-  // sin que haga falta conectar visualmente el seguimiento al nodo
-  // API (que se vería feo en el editor).
-  if (attachedEdges.length === 0) {
-    const node = nodeMap[nodeId];
-    if (node && (node.type === 'api' || node.type === 'buttons' || node.type === 'api_message')) {
-      const outEdge = (flow.edges || []).find(e => e.source === nodeId && e.sourceHandle === 'api-out');
-      if (outEdge) {
-        attachedEdges = (flow.edges || []).filter(
-          e => e.target === outEdge.target && e.sourceHandle === 'seguimiento-out'
-        );
-      }
-    }
-  }
 
   if (attachedEdges.length === 0) return;
 
@@ -729,7 +664,11 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
             await sendWhatsAppDocument(phoneNumberId, accessToken, to, item.url || '', item.fileName || item.name || '', conversationId);
             textoNodoCompleto += ' ' + (item.fileName || item.name || '');
           }
-          await sleep(500);
+          // Después de una imagen/video/documento se espera más — WhatsApp
+          // tarda más en procesarlos en sus servidores que un texto simple,
+          // y si el siguiente item es texto, puede llegarle al cliente antes
+          // que la imagen si no le damos este margen extra.
+          await sleep(['image', 'imagen', 'video', 'doc', 'document', 'documento'].includes(tipo) ? 3000 : 500);
         }
 
         marcarSolicitudDePagoSiAplica(conversationId, textoNodoCompleto);
@@ -911,7 +850,10 @@ async function sendFollowupContentCloud(phoneNumberId, accessToken, to, contenid
   } else if (tipo === 'botones') {
     if (contenido.imagen_cabecera) {
       await sendWhatsAppImage(phoneNumberId, accessToken, to, contenido.imagen_cabecera, '', conversationId);
-      await sleep(600);
+      // 600ms no alcanzaba — WhatsApp a veces tarda más en procesar la
+      // imagen en sus servidores que en entregar un texto enviado justo
+      // después, y el texto le "ganaba" llegando primero al cliente.
+      await sleep(3000);
     }
     const botones = contenido.botones || [];
     if (botones.length > 0) {
@@ -1221,9 +1163,7 @@ Responde SOLO en formato JSON exacto:
 
     await supabase.from('conversations').update({
       is_sale: true, sale_amount: monto, sale_at: new Date().toISOString(),
-      current_node_id: null, current_flow_id: null,
-      sale_method: conversation.pending_payment_method || null,
-      operation_code: analysisResult.numero_operacion || null
+      current_node_id: null, current_flow_id: null
     }).eq('id', conversation.id);
 
     sendPurchaseEventToMeta(userId, conversation, monto).catch(() => {});
@@ -1258,11 +1198,7 @@ Responde SOLO en formato JSON exacto:
   if (!matchedRule) return;
 
   await sendWhatsAppMessage(phoneNumberId, accessToken, to, matchedRule.access_message, conversation.id);
-  await supabase.from('conversations').update({
-    is_sale: true, sale_amount: monto, sale_at: new Date().toISOString(), flow_active: false,
-    sale_method: conversation.pending_payment_method || null,
-    operation_code: analysisResult.numero_operacion || null
-  }).eq('id', conversation.id);
+  await supabase.from('conversations').update({ is_sale: true, sale_amount: monto, sale_at: new Date().toISOString(), flow_active: false }).eq('id', conversation.id);
   sendPurchaseEventToMeta(userId, conversation, monto).catch(() => {});
   try { await cancelFollowups(conversation.id); } catch (e) { console.error('[CloudAPI Payment] Error cancelando seguimientos:', e.message); }
 }
@@ -1329,7 +1265,7 @@ async function resolveAIPath(flow, pausedNode, paths, userResponse, connection, 
     return true;
   }
 
-  await supabase.from('conversations').update({ current_node_id: null, current_flow_id: null, pending_payment_method: matched.label || null }).eq('id', conversationId);
+  await supabase.from('conversations').update({ current_node_id: null, current_flow_id: null }).eq('id', conversationId);
   try { await cancelFollowups(conversationId); } catch (e) { console.error('[Flow] Error cancelando seguimientos:', e.message); }
   await executeFlow(flow.id, contactPhone, userResponse, connection, conversationId, matchedEdge.target);
   return true;
@@ -1387,17 +1323,6 @@ async function continueFlowFromButton(flowId, pausedNodeId, userResponse, connec
   const matchedHandle = `btn_${matchedIndex}`;
   let matchedEdge = (flow.edges || []).find(e => e.source === pausedNodeId && e.sourceHandle === matchedHandle);
 
-  // Los nodos "Mensajes API" (type 'api') no tienen una conexión por
-  // cada botón — tienen UNA sola salida llamada "api-out" que va
-  // siempre al mismo siguiente nodo (normalmente un Agente IA, que
-  // es quien decide qué camino tomar según la respuesta). Sin este
-  // respaldo, nunca se encontraba la conexión "btn_N" (porque no
-  // existe en este tipo de nodo) y se caía en la respuesta genérica
-  // de más abajo en vez de avanzar de verdad por el flujo.
-  if (!matchedEdge && pausedNode.type === 'api') {
-    matchedEdge = (flow.edges || []).find(e => e.source === pausedNodeId && e.sourceHandle === 'api-out');
-  }
-
   if (!matchedEdge && buttons.length === 1) {
     const edgesFromNode = (flow.edges || []).filter(e => e.source === pausedNodeId);
     if (edgesFromNode.length === 1) {
@@ -1413,16 +1338,6 @@ async function continueFlowFromButton(flowId, pausedNodeId, userResponse, connec
 
   await supabase.from('conversations').update({ current_node_id: null, current_flow_id: null }).eq('id', conversationId);
   try { await cancelFollowups(conversationId); } catch (e) { console.error('[Flow] Error cancelando seguimientos:', e.message); }
-
-  // Si el siguiente nodo es un Agente IA con caminos configurados
-  // (como el que decide entre Yape/Plin), hay que evaluar la
-  // respuesta YA — si no, ese nodo se queda pausado esperando OTRO
-  // mensaje más, sin usar la respuesta que el cliente ya mandó.
-  const nextNode = nodeMap[matchedEdge.target];
-  if (nextNode && (nextNode.type === 'ai' || nextNode.type === 'ai_agent') && (nextNode.data?.paths || []).length > 0) {
-    return await resolveAIPath(flow, nextNode, nextNode.data.paths, userResponse, connection, contactPhone, conversationId);
-  }
-
   await executeFlow(flowId, contactPhone, userResponse, connection, conversationId, matchedEdge.target);
   return true;
 }
