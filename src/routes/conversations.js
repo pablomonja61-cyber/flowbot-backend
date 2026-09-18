@@ -50,7 +50,7 @@ router.get('/', async (req, res, next) => {
     const { data, error, count } = await supabase
       .from('conversations')
       .select(`
-        id, contact_phone, contact_name, last_message,
+        id, contact_phone, contact_name, last_message, is_sale, sale_amount, sale_at,
         last_message_at, unread_count, status, connection_id, tag, profile_pic_url, flow_active, last_message_direction, bot_ever_responded, ever_replied,
         is_sale, sale_amount, sale_at, sale_method, operation_code,
         connections(name)
@@ -385,13 +385,18 @@ router.get('/dashboard/stats', async (req, res, next) => {
 router.patch('/:id/sale', async (req, res, next) => {
   try {
     const { is_sale, sale_amount } = req.body;
+    if (sale_amount !== undefined && (typeof sale_amount !== 'number' || !Number.isFinite(sale_amount) || sale_amount < 0)) return res.status(400).json({ error: 'Monto no válido' });
+    const updates = {};
+    if (sale_amount !== undefined) updates.sale_amount = sale_amount;
+    if (is_sale !== undefined) {
+      if (typeof is_sale !== 'boolean') return res.status(400).json({ error: 'is_sale debe ser booleano' });
+      updates.is_sale = is_sale;
+      updates.sale_at = is_sale ? new Date().toISOString() : null;
+    }
+    if (!Object.keys(updates).length) return res.status(400).json({ error: 'Nada para actualizar' });
     const { data, error } = await supabase
       .from('conversations')
-      .update({
-        is_sale: is_sale ?? true,
-        sale_amount: sale_amount || 0,
-        sale_at: is_sale ? new Date().toISOString() : null
-      })
+      .update(updates)
       .eq('id', req.params.id)
       .eq('user_id', req.user.id)
       .select()
@@ -520,7 +525,7 @@ router.post('/:id/messages/audio', audioUpload.single('audio'), async (req, res,
 // el backend (QR y API) — esta ruta solo expone el interruptor.
 router.patch('/:id/ai-toggle', async (req, res, next) => {
   try {
-    const raw = req.body.active;
+    const raw = req.body.ai_active ?? req.body.active;
     // Acepta boolean real (true/false), string ("true"/"false", "1"/"0")
     // o número (1/0) — algunos frontends serializan distinto según cómo
     // arman el request, así que no hay que ser estrictos con el tipo,

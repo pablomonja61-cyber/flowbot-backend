@@ -36,6 +36,7 @@ app.use(cors({
   origin: [
     process.env.FRONTEND_URL,
     'https://ariabot.app',
+    'https://ariabot-panel-pablo.k4el-ux.chatgpt.site',
     'https://www.ariabot.app',
     'https://boceto-ariabot.vercel.app',
     'https://ariabot-panel-pablo.k4el-ux.chatgpt.site',

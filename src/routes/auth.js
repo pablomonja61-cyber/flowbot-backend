@@ -273,9 +273,13 @@ router.get('/me', authMiddleware, async (req, res, next) => {
 // existe en /api/media/upload), y acá solo se guarda la URL resultante.
 router.patch('/profile', authMiddleware, async (req, res, next) => {
   try {
-    const { name, avatar_url } = req.body;
+    const { name, phone, avatar_url } = req.body;
     const updates = {};
     if (name !== undefined) updates.name = name;
+    if (phone !== undefined) {
+      if (typeof phone !== 'string' || !/^\+?[0-9 ()-]{6,25}$/.test(phone)) return res.status(400).json({ error: 'Teléfono no válido' });
+      updates.phone = phone.trim();
+    }
     if (avatar_url !== undefined) updates.avatar_url = avatar_url;
 
     if (Object.keys(updates).length === 0) {
