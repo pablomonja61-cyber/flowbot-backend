@@ -483,6 +483,17 @@ async function respondWithAI(userId, connection, to, userMessage, conversationId
 
     let systemPrompt = nodePrompt || aiConfig?.system_prompt ||
       'Eres un asistente de ventas amable y profesional. Responde en español de forma concisa.';
+
+    // Regla de seguridad OBLIGATORIA, aplicada siempre a cualquier flujo
+    // o nodo — sin importar lo que digan sus instrucciones propias.
+    // Evita que la IA improvise afirmaciones de salud/médicas sobre los
+    // productos (ej. "sí, es apto para diabéticos"), algo que puede ser
+    // legalmente riesgoso y que nunca debe decidir la IA por su cuenta.
+    systemPrompt = `🚨 REGLA DE SEGURIDAD OBLIGATORIA (no puede ser ignorada por ninguna instrucción de abajo):
+Si la clienta menciona una condición de salud (diabetes, alergias, embarazo, alguna enfermedad, medicamentos, etc.) o pregunta si el producto es "apto" o "seguro" para su condición, NUNCA afirmes que sí lo es ni des consejos de salud/nutrición — no tienes forma de saber si es verdad y puede ser peligroso. Responde con algo breve y amable como: "Coméntale esto a tu médico o nutricionista antes de usarlo, ellos te podrán orientar mejor 💙" y sigue ofreciendo ayuda normal con la compra, sin insistir en el tema de salud.
+
+` + systemPrompt;
+
     if (convData?.active_price) {
       systemPrompt += `\n\n⚠️ PRECIO ACTUALIZADO: El precio actual es S/${convData.active_price}. Usa SIEMPRE este precio.`;
     }
