@@ -1094,7 +1094,7 @@ Si lo es, extrae:
 - monto: el monto exacto pagado (solo el número, sin moneda)
 - titular_destino: el nombre del destinatario/titular al que se realizó el pago
 - numero_operacion: el número de operación/transacción, si aparece
-- fecha_es_hoy: true si la fecha del comprobante es hoy (${hoyLima}, zona horaria Perú), false si es anterior, null si no se ve
+- fecha_es_hoy: la fecha de hoy es ${hoyLima} (zona horaria Perú). Revisa la fecha del comprobante con mucho cuidado — muchas apps de pago (como Yape) muestran la palabra "Hoy" en vez de la fecha exacta cuando el pago fue hecho el mismo día; en ese caso responde true. Si ves una fecha exacta (ej. "18 sept" o "18/09"), compárala cuidadosamente contra la fecha de hoy. Responde true solo si estás seguro de que es hoy, false si estás seguro de que es una fecha anterior, null SOLO si la imagen no muestra ninguna fecha en absoluto.
 - estado_pago: "confirmado" si el pago está exitoso/completado, "pendiente" si está en proceso, "desconocido" si no es claro
 ${validarExtra ? `- cumple_validacion_extra: true/false según si cumple: "${validarExtra}"` : ''}
 
@@ -1155,7 +1155,7 @@ Responde SOLO en formato JSON exacto:
     if (path.confirmado === true && analysisResult.estado_pago !== 'confirmado') {
       fallas.push('el comprobante no muestra un pago confirmado/exitoso');
     }
-    if (path.fecha === true && analysisResult.fecha_es_hoy !== true) {
+    if (path.fecha === true && analysisResult.fecha_es_hoy === false) {
       fallas.push('la fecha del comprobante no es de hoy (posible captura antigua o reutilizada)');
     }
     if (validarExtra && path.validar && analysisResult.cumple_validacion_extra !== true) {
