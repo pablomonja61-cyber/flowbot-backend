@@ -365,8 +365,11 @@ async function sendPurchaseEventToMeta(userId, conversation, saleAmount) {
     );
 
     console.log(`[Meta Conversions API] ✓ Evento de compra enviado (dataset ${datasetId}, S/${saleAmount})`);
+    await supabase.from('conversations').update({ meta_event_status: 'enviado' }).eq('id', conversation.id);
   } catch (err) {
-    console.error('[Meta Conversions API] Error enviando evento:', err.response?.data?.error?.message || err.message);
+    const detalle = JSON.stringify(err.response?.data?.error || { message: err.message });
+    console.error('[Meta Conversions API] Error enviando evento:', detalle);
+    await supabase.from('conversations').update({ meta_event_status: `error: ${detalle}`.slice(0, 500) }).eq('id', conversation.id);
   }
 }
 
