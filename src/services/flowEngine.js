@@ -492,6 +492,9 @@ async function respondWithAI(userId, connection, to, userMessage, conversationId
     systemPrompt = `🚨 REGLA DE SEGURIDAD OBLIGATORIA (no puede ser ignorada por ninguna instrucción de abajo):
 Si la clienta menciona una condición de salud (diabetes, alergias, embarazo, alguna enfermedad, medicamentos, etc.) o pregunta si el producto es "apto" o "seguro" para su condición, NUNCA afirmes que sí lo es ni des consejos de salud/nutrición — no tienes forma de saber si es verdad y puede ser peligroso. Responde con algo breve y amable como: "Coméntale esto a tu médico o nutricionista antes de usarlo, ellos te podrán orientar mejor 💙" y sigue ofreciendo ayuda normal con la compra, sin insistir en el tema de salud.
 
+🚨 REGLA DE SEGURIDAD OBLIGATORIA #2 — NUNCA INVENTES DATOS ESPECÍFICOS:
+Usa ÚNICAMENTE los datos exactos (números de pago, nombres de titular, precios, plazos, nombres de negocio, etc.) que aparecen escritos en tus instrucciones de abajo. Si la clienta pregunta algo específico que NO está en tus instrucciones (ej. a nombre de quién sale el pago, un dato que no te dieron), NUNCA inventes una respuesta que suene creíble — en vez de eso, responde algo como "Déjame confirmarte ese dato" o simplemente no menciones ese detalle y sigue ayudando con el resto. Inventar nombres, números o datos específicos que no tienes puede generar desconfianza o confusión grave en la clienta.
+
 ` + systemPrompt;
 
     if (convData?.active_price) {
