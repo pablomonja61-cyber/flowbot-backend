@@ -13,7 +13,9 @@ const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
 const supabase = require('../models/supabase');
-const bcrypt = require('bcryptjs');
+let bcrypt = null;
+try { bcrypt = require('bcryptjs'); }
+catch (e) { console.error('[Equipo] Falta el paquete "bcryptjs" — la aceptación de invitaciones queda desactivada. Ejecuta: npm install bcryptjs'); }
 const crypto = require('crypto');
 
 router.use(auth);
@@ -83,6 +85,7 @@ router.post('/invite', async (req, res, next) => {
 const publicRouter = express.Router();
 publicRouter.post('/accept', async (req, res, next) => {
   try {
+    if (!bcrypt) return res.status(503).json({ error: 'Esta función no está disponible todavía (falta instalar una dependencia en el servidor).' });
     const { token, name, password } = req.body || {};
     if (!token || !name || !password || password.length < 6) {
       return res.status(400).json({ error: 'Faltan datos, o la contraseña debe tener al menos 6 caracteres.' });
