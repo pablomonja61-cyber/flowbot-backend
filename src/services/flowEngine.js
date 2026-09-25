@@ -1405,7 +1405,7 @@ async function continueFlowFromButton(flowId, pausedNodeId, userResponse, connec
           const directEdge = (flow.edges || []).find(e => e.source === nextNode.id && e.sourceHandle === `path-${pathIndex}`);
           if (directEdge) {
             console.log(`[Flow] Salto directo: botón "${buttons[matchedIndex]}" → camino "${paths[pathIndex].label}" (sin pasar por la IA)`);
-            await supabase.from('conversations').update({ current_node_id: null, current_flow_id: null }).eq('id', conversationId);
+            await supabase.from('conversations').update({ current_node_id: null, current_flow_id: null, pending_payment_method: paths[pathIndex].label || null }).eq('id', conversationId);
             try { await cancelFollowups(conversationId); } catch (e) { console.error('[Flow] Error cancelando seguimientos:', e.message); }
             await executeFlow(flowId, contactPhone, userResponse, connection, conversationId, directEdge.target);
             return true;
