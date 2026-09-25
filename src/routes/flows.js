@@ -4,6 +4,7 @@ const auth = require('../middleware/auth');
 const supabase = require('../models/supabase');
 const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
+const { translateFlow } = require('../services/flowEngine');
 
 router.use(auth);
 
@@ -115,6 +116,18 @@ router.put('/:id', async (req, res, next) => {
       .single();
     if (error || !data) return res.status(404).json({ error: 'Flujo no encontrado' });
     res.json(data);
+  } catch (err) { next(err); }
+});
+
+// ── POST /api/flows/:id/translate ────────────────────────────
+// Traduce todos los textos de un flujo (mensajes, botones, nombres
+// de caminos) a otro idioma, usando la IA ya configurada del
+// usuario. Crea un flujo NUEVO — nunca modifica el original.
+router.post('/:id/translate', async (req, res, next) => {
+  try {
+    const { language } = req.body; // 'en' | 'pt' | 'es'
+    const nuevoFlow = await translateFlow(req.user.id, req.params.id, language);
+    res.status(201).json(nuevoFlow);
   } catch (err) { next(err); }
 });
 

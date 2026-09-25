@@ -1503,6 +1503,118 @@ async function saveMessage(conversationId, content, direction, msgType = 'text',
   await supabase.from('conversations').update(updateData).eq('id', conversationId);
 }
 
+// ════════════════════════════════════════════════════════════
+// TRADUCIR UN FLUJO COMPLETO (Inglés / Portugués / Español)
+// ════════════════════════════════════════════════════════════
+const NOMBRES_IDIOMA = { en: 'inglés', pt: 'portugués', es: 'español' };
+
+async function translateFlow(userId, flowId, targetLanguage) {
+  if (!NOMBRES_IDIOMA[targetLanguage]) throw Object.assign(new Error('Idioma no soportado. Usa en, pt o es.'), { status: 400 });
+
+  const { data: flow, error: flowError } = await supabase
+    .from('flows').select('*').eq('id', flowId).eq('user_id', userId).single();
+  if (flowError || !flow) throw Object.assign(new Error('Flujo no encontrado.'), { status: 404 });
+
+  // 1. Recolectar todos los textos traducibles del flujo, cada uno
+  // con una "ruta" única para poder ponerlos de vuelta en su lugar
+  // después de traducirlos.
+  const textos = {};
+  (flow.nodes || []).forEach((node, ni) => {
+    if (node.type === 'content' && Array.isArray(node.data?.items)) {
+      node.data.items.forEach((item, ii) => {
+        if (item.type === 'text' && item.text) textos[`n${ni}.item${ii}`] = item.text;
+      });
+    }
+    if (node.type === 'api') {
+      if (node.data?.body) textos[`n${ni}.body`] = node.data.body;
+      (node.data?.buttons || []).forEach((b, bi) => { textos[`n${ni}.btn${bi}`] = b; });
+    }
+    if ((node.type === 'ai' || node.type === 'ai_agent') && node.data?.context) {
+      textos[`n${ni}.context`] = node.data.context;
+      (node.data?.paths || []).forEach((p, pi) => { if (p.label) textos[`n${ni}.path${pi}`] = p.label; });
+    }
+    if (node.type === 'followup' && node.data?.contenido) {
+      (node.data.contenido.items || []).forEach((item, ii) => {
+        if (item.type === 'text' && item.text) textos[`n${ni}.followup${ii}`] = item.text;
+      });
+    }
+  });
+
+  if (Object.keys(textos).length === 0) throw Object.assign(new Error('Este flujo no tiene ningún texto para traducir.'), { status: 400 });
+
+  // 2. Traducir todo junto, en una sola llamada a la IA.
+  const { data: aiConfig } = await supabase.from('ai_config').select('*').eq('user_id', userId).eq('is_active', true).single();
+  if (!aiConfig) throw Object.assign(new Error('No tienes ninguna IA configurada (ChatGPT/Claude) para poder traducir.'), { status: 400 });
+
+  const provider = aiConfig.provider || 'openai';
+  const apiKey = resolveApiKey(aiConfig, provider);
+  const model = aiConfig.model || null;
+
+  const prompt = `Traduce cada valor de este objeto JSON al ${NOMBRES_IDIOMA[targetLanguage]}. Reglas:
+- Mantén las mismas claves (keys) exactas, solo traduce los valores (values).
+- Mantén EXACTAMENTE igual, sin traducir: números de teléfono, montos de dinero, nombres propios de personas o negocios, y emojis.
+- Conserva el tono y formato original (mayúsculas, saltos de línea, emojis en el mismo lugar).
+- Responde ÚNICAMENTE con el JSON traducido, sin explicaciones, sin markdown, sin \`\`\`.
+
+${JSON.stringify(textos, null, 2)}`;
+
+  const respuesta = await callAIProvider(provider, apiKey, model, 'Eres un traductor profesional preciso.', [{ role: 'user', content: prompt }], 4000);
+
+  let traducciones;
+  try {
+    traducciones = JSON.parse(respuesta.replace(/```json\n?|```/g, '').trim());
+  } catch (e) {
+    throw Object.assign(new Error('La IA no devolvió una traducción válida. Inténtalo de nuevo.'), { status: 502 });
+  }
+
+  // 3. Reconstruir el flujo con los textos ya traducidos.
+  const nodosTraducidos = (flow.nodes || []).map((node, ni) => {
+    const nuevo = JSON.parse(JSON.stringify(node));
+    if (node.type === 'content' && Array.isArray(node.data?.items)) {
+      nuevo.data.items = node.data.items.map((item, ii) =>
+        item.type === 'text' ? { ...item, text: traducciones[`n${ni}.item${ii}`] || item.text } : item
+      );
+    }
+    if (node.type === 'api') {
+      if (node.data?.body) nuevo.data.body = traducciones[`n${ni}.body`] || node.data.body;
+      if (Array.isArray(node.data?.buttons)) {
+        nuevo.data.buttons = node.data.buttons.map((b, bi) => traducciones[`n${ni}.btn${bi}`] || b);
+      }
+    }
+    if ((node.type === 'ai' || node.type === 'ai_agent') && node.data?.context) {
+      nuevo.data.context = traducciones[`n${ni}.context`] || node.data.context;
+      if (Array.isArray(node.data?.paths)) {
+        nuevo.data.paths = node.data.paths.map((p, pi) => p.label ? { ...p, label: traducciones[`n${ni}.path${pi}`] || p.label } : p);
+      }
+    }
+    if (node.type === 'followup' && node.data?.contenido?.items) {
+      nuevo.data.contenido = {
+        ...node.data.contenido,
+        items: node.data.contenido.items.map((item, ii) =>
+          item.type === 'text' ? { ...item, text: traducciones[`n${ni}.followup${ii}`] || item.text } : item
+        )
+      };
+    }
+    return nuevo;
+  });
+
+  // 4. Guardar como un flujo NUEVO (no se toca el original).
+  const sufijo = { en: '(English)', pt: '(Português)', es: '(Español)' }[targetLanguage];
+  const { data: nuevoFlow, error: saveError } = await supabase
+    .from('flows')
+    .insert({
+      user_id: userId,
+      name: `${flow.name} ${sufijo}`,
+      nodes: nodosTraducidos,
+      edges: flow.edges,
+      is_active: false
+    })
+    .select().single();
+  if (saveError) throw saveError;
+
+  return nuevoFlow;
+}
+
 module.exports = {
   executeFlow,
   saveMessage,
@@ -1519,5 +1631,6 @@ module.exports = {
   respondWithAI,
   showTypingCloud,
   sendFollowupContentCloud,
-  sendPurchaseEventToMeta
+  sendPurchaseEventToMeta,
+  translateFlow
 };
