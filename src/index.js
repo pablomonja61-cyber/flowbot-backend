@@ -82,6 +82,9 @@ app.use('/api/settings', require('./routes/settings'));
 app.use('/api/push', require('./routes/push'));
 app.use('/api/api-tokens', require('./routes/apiTokens'));
 app.use('/mcp', require('./routes/mcp'));
+const { router: teamRoutes, publicRouter: teamPublicRoutes } = require('./routes/team');
+app.use('/api/team', teamRoutes);
+app.use('/api/team-public', teamPublicRoutes);
 // ── Error handler global ────────────────────────────────────
 app.use((err, req, res, next) => {
   console.error('[ERROR]', err.message);
