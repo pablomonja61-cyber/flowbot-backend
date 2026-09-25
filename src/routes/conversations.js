@@ -294,7 +294,7 @@ router.get('/dashboard/stats', async (req, res, next) => {
       // "Pendientes" = se le pidió el pago (payment_requested_at) pero
       // todavía no se confirmó la venta (is_sale sigue en false).
       supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).eq('is_sale', false).not('payment_requested_at', 'is', null).gte('payment_requested_at', desde.toISOString()).lte('payment_requested_at', hasta.toISOString()),
-      supabase.from('conversations').select('sale_amount, sale_at').eq('user_id', req.user.id).eq('is_sale', true).gte('sale_at', desde.toISOString()).lte('sale_at', hasta.toISOString()),
+      supabase.from('conversations').select('sale_amount, sale_at, contact_phone').eq('user_id', req.user.id).eq('is_sale', true).gte('sale_at', desde.toISOString()).lte('sale_at', hasta.toISOString()),
       supabase.from('conversations').select('created_at').eq('user_id', req.user.id).gte('created_at', desde.toISOString()).lte('created_at', hasta.toISOString()).order('created_at', { ascending: true })
     ]);
 
@@ -400,6 +400,40 @@ router.get('/dashboard/stats', async (req, res, next) => {
     });
     const byFlow = Object.values(byFlowMap).map(f => ({ ...f, revenue: Number(f.revenue.toFixed(2)) }));
 
+    // Ventas por país — usa el código de país del número de teléfono
+    // (o las primeras 2 letras si es un identificador de privacidad
+    // tipo "PE.xxxx", que ya vienen con el código de país incluido).
+    const PAISES_POR_CODIGO = {
+      '51': 'Perú', '57': 'Colombia', '52': 'México', '54': 'Argentina',
+      '56': 'Chile', '593': 'Ecuador', '58': 'Venezuela', '591': 'Bolivia',
+      '595': 'Paraguay', '598': 'Uruguay', '506': 'Costa Rica', '502': 'Guatemala',
+      '503': 'El Salvador', '504': 'Honduras', '505': 'Nicaragua', '507': 'Panamá',
+      '34': 'España', '1': 'Estados Unidos/Canadá'
+    };
+    function paisDesdeNumero(phone) {
+      if (!phone) return 'Desconocido';
+      const bsuidMatch = /^([A-Z]{2})\./.exec(phone);
+      if (bsuidMatch) {
+        const nombresPorIso = { PE: 'Perú', CO: 'Colombia', MX: 'México', AR: 'Argentina', CL: 'Chile', EC: 'Ecuador', VE: 'Venezuela', BO: 'Bolivia', ES: 'España', US: 'Estados Unidos' };
+        return nombresPorIso[bsuidMatch[1]] || bsuidMatch[1];
+      }
+      const soloDigitos = phone.replace(/\D/g, '');
+      for (const codigo of ['593', '591', '595', '598', '506', '502', '503', '504', '505', '507'].concat(['51', '57', '52', '54', '56', '58', '34', '1'])) {
+        if (soloDigitos.startsWith(codigo)) return PAISES_POR_CODIGO[codigo];
+      }
+      return 'Otro';
+    }
+    const byCountryMap = {};
+    (salesData || []).forEach(s => {
+      const pais = paisDesdeNumero(s.contact_phone);
+      byCountryMap[pais] ??= { country: pais, sales: 0, revenue: 0 };
+      byCountryMap[pais].sales++;
+      byCountryMap[pais].revenue += (s.sale_amount || 0);
+    });
+    const byCountry = Object.values(byCountryMap)
+      .map(c => ({ ...c, revenue: Number(c.revenue.toFixed(2)) }))
+      .sort((a, b) => b.revenue - a.revenue);
+
     // Todos los montos se calcularon en Soles (PEN) — si el frontend
     // pidió otra moneda (?currency=USD), se convierten de verdad acá,
     // con tasas de cambio reales, antes de responder.
@@ -430,6 +464,7 @@ router.get('/dashboard/stats', async (req, res, next) => {
       by_hour: byHour,
       by_status: byStatus,
       by_flow: byFlow,
+      by_country: byCountry,
       // ROAS necesita el gasto real de Meta Ads — todavía no hay
       // ninguna cuenta publicitaria conectada, así que por ahora se
       // manda null (el frontend debe mostrar "--" o similar). En
