@@ -354,6 +354,52 @@ router.get('/dashboard/stats', async (req, res, next) => {
       byWeekday[diaSemanaLima(s.sale_at)].sales++;
     });
 
+    // Ventas por hora del día (0-23h, hora de Lima) — útil para saber
+    // a qué hora conviene más estar pendiente / mandar promociones.
+    const byHour = Array.from({ length: 24 }, (_, h) => ({ hour: h, sales: 0, conversations: 0 }));
+    function horaLima(fechaISO) {
+      const ms = new Date(fechaISO).getTime() - 5 * 60 * 60 * 1000;
+      return new Date(ms).getUTCHours();
+    }
+    (convByDay || []).forEach(c => { byHour[horaLima(c.created_at)].conversations++; });
+    (salesData || []).forEach(s => { if (s.sale_at) byHour[horaLima(s.sale_at)].sales++; });
+
+    // Ventas por estado de la conversación (vendido / pendiente de
+    // pago / en conversación / sin respuesta) — para el desglose de
+    // "Ventas por estado".
+    const { data: statusData } = await supabase
+      .from('conversations')
+      .select('is_sale, payment_requested_at, flow_active')
+      .eq('user_id', req.user.id)
+      .gte('created_at', desde.toISOString())
+      .lte('created_at', hasta.toISOString());
+    const byStatus = { vendido: 0, pendiente_de_pago: 0, en_conversacion: 0, sin_respuesta: 0 };
+    (statusData || []).forEach(c => {
+      if (c.is_sale) byStatus.vendido++;
+      else if (c.payment_requested_at) byStatus.pendiente_de_pago++;
+      else if (c.flow_active) byStatus.en_conversacion++;
+      else byStatus.sin_respuesta++;
+    });
+
+    // Rendimiento por flujo — usa trigger_id (que NO se borra cuando
+    // el flujo termina, a diferencia de current_flow_id) para saber
+    // de qué flujo vino cada conversación, incluso después de días.
+    const { data: flowPerfData } = await supabase
+      .from('conversations')
+      .select('is_sale, sale_amount, triggers(flow_id, flows(name))')
+      .eq('user_id', req.user.id)
+      .not('trigger_id', 'is', null)
+      .gte('created_at', desde.toISOString())
+      .lte('created_at', hasta.toISOString());
+    const byFlowMap = {};
+    (flowPerfData || []).forEach(c => {
+      const nombre = c.triggers?.flows?.name || 'Sin flujo';
+      byFlowMap[nombre] ??= { flow: nombre, conversations: 0, sales: 0, revenue: 0 };
+      byFlowMap[nombre].conversations++;
+      if (c.is_sale) { byFlowMap[nombre].sales++; byFlowMap[nombre].revenue += (c.sale_amount || 0); }
+    });
+    const byFlow = Object.values(byFlowMap).map(f => ({ ...f, revenue: Number(f.revenue.toFixed(2)) }));
+
     // Todos los montos se calcularon en Soles (PEN) — si el frontend
     // pidió otra moneda (?currency=USD), se convierten de verdad acá,
     // con tasas de cambio reales, antes de responder.
@@ -380,7 +426,17 @@ router.get('/dashboard/stats', async (req, res, next) => {
       avg_ticket: Number(avg_ticket_conv.toFixed(2)),
       conversion_rate: parseFloat(conversion_rate),
       daily_chart: daily_chart_convertido,
-      by_weekday: byWeekday
+      by_weekday: byWeekday,
+      by_hour: byHour,
+      by_status: byStatus,
+      by_flow: byFlow,
+      // ROAS necesita el gasto real de Meta Ads — todavía no hay
+      // ninguna cuenta publicitaria conectada, así que por ahora se
+      // manda null (el frontend debe mostrar "--" o similar). En
+      // cuanto se conecte una cuenta de Meta Ads, se puede calcular
+      // como total_revenue / ad_spend.
+      ad_spend: null,
+      roas: null
     });
   } catch (err) {
     console.error('[Dashboard error]', err);
@@ -438,6 +494,38 @@ router.patch('/:id/sale', async (req, res, next) => {
 // Cuando está apagado (flow_active = false), el bot se queda en
 // silencio y el negocio responde manualmente. Ya funciona así en
 // el backend (QR y API) — esta ruta solo expone el interruptor.
+// ── POST /api/conversations/:id/assign-flow ─────────────────────
+// Asigna manualmente un flujo a una conversación que no activó
+// ningún disparador (el cliente escribió algo distinto a la frase
+// clave) — el botón verde "Seleccionar flujo" en Chat en Vivo.
+router.post('/:id/assign-flow', async (req, res, next) => {
+  try {
+    const { flow_id } = req.body;
+    if (!flow_id) return res.status(400).json({ error: 'Falta flow_id.' });
+
+    const { data: conv, error: convError } = await supabase
+      .from('conversations')
+      .select('*, connections(*)')
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id)
+      .single();
+    if (convError) throw convError;
+    if (!conv) return res.status(404).json({ error: 'Conversación no encontrada.' });
+
+    const { data: flow, error: flowError } = await supabase
+      .from('flows')
+      .select('id, name')
+      .eq('id', flow_id)
+      .eq('user_id', req.user.id)
+      .single();
+    if (flowError || !flow) return res.status(404).json({ error: 'Flujo no encontrado.' });
+
+    await executeFlow(flow.id, conv.contact_phone, '', conv.connections, conv.id);
+
+    res.json({ success: true, flow_name: flow.name });
+  } catch (err) { next(err); }
+});
+
 router.patch('/:id/ai-toggle', async (req, res, next) => {
   try {
     const raw = req.body.active;

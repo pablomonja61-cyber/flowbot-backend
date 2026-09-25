@@ -76,6 +76,10 @@ app.use('/api/whop', whopRoutes);
 app.use('/api/meta', metaRoutes);
 app.use('/api/campaigns', campaignsRoutes);
 app.use('/api/capi', capiRoutes);
+app.use('/api/country-block', require('./routes/countryBlock'));
+app.use('/api/contacts', require('./routes/contacts'));
+app.use('/api/settings', require('./routes/settings'));
+app.use('/api/push', require('./routes/push'));
 // ── Error handler global ────────────────────────────────────
 app.use((err, req, res, next) => {
   console.error('[ERROR]', err.message);
