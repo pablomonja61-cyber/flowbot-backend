@@ -7,6 +7,20 @@ const {
 } = require('../services/flowEngine');
 const { v4: uuidv4 } = require('uuid');
 
+// Crea (o actualiza el nombre de) el contacto en el CRM cada vez que
+// alguien nuevo escribe — así "Contactos" se llena sola, sin que el
+// usuario tenga que agregar a nadie a mano.
+async function upsertContact(userId, phone, name) {
+  try {
+    await supabase.from('contacts').upsert(
+      { user_id: userId, phone, name: name || phone, origin: 'WhatsApp' },
+      { onConflict: 'user_id,phone', ignoreDuplicates: false }
+    );
+  } catch (e) {
+    console.error('[Contactos] No se pudo crear/actualizar el contacto:', e.message);
+  }
+}
+
 // ════════════════════════════════════════════════════════════
 // COLA DE PROCESAMIENTO POR CONTACTO
 // Cada mensaje entrante de Meta llega como una petición HTTP
@@ -150,9 +164,8 @@ async function processIncomingImageMessage(phoneNumberId, contactPhone, msg) {
       })
       .select().single();
     conversation = newConv;
+    upsertContact(userId, contactPhone, contactPhone);
   }
-
-  const mediaId = msg.image?.id;
   if (!mediaId) return;
 
   await processIncomingImageCloud(connection, contactPhone, mediaId, conversation.id);
@@ -225,6 +238,7 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
       return;
     }
     conversation = newConv;
+    upsertContact(userId, contactPhone, profileName || contactPhone);
   }
 
   // 3. Guardar mensaje entrante
