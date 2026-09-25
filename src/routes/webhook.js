@@ -166,6 +166,7 @@ async function processIncomingImageMessage(phoneNumberId, contactPhone, msg) {
     conversation = newConv;
     upsertContact(userId, contactPhone, contactPhone);
   }
+  const mediaId = msg.image?.id;
   if (!mediaId) return;
 
   await processIncomingImageCloud(connection, contactPhone, mediaId, conversation.id);
