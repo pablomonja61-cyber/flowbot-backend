@@ -85,6 +85,7 @@ app.use('/mcp', require('./routes/mcp'));
 const { router: teamRoutes, publicRouter: teamPublicRoutes } = require('./routes/team');
 app.use('/api/team', teamRoutes);
 app.use('/api/team-public', teamPublicRoutes);
+app.use('/api/broadcasts', require('./routes/broadcasts'));
 // ── Error handler global ────────────────────────────────────
 app.use((err, req, res, next) => {
   console.error('[ERROR]', err.message);
