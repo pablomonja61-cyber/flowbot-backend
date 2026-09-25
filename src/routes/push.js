@@ -2,12 +2,18 @@ const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
 const supabase = require('../models/supabase');
-const webPush = require('web-push');
+// Si el paquete "web-push" no está instalado, esta ruta específica
+// queda desactivada en vez de tumbar TODO el servidor — así un
+// olvido de "npm install" no deja caído el resto del negocio.
+let webPush = null;
+try { webPush = require('web-push'); }
+catch (e) { console.error('[Push] El paquete "web-push" no está instalado — notificaciones push desactivadas. Ejecuta: npm install web-push'); }
 
 router.use(auth);
 router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 const fail = (message, status = 400) => { throw Object.assign(new Error(message), { status }); };
 function vapid() {
+  if (!webPush) return null;
   const publicKey = process.env.VAPID_PUBLIC_KEY || '', privateKey = process.env.VAPID_PRIVATE_KEY || '', subject = process.env.VAPID_SUBJECT || '';
   if (!publicKey || !privateKey || !/^(mailto:|https:\/\/)/.test(subject)) return null;
   try { webPush.setVapidDetails(subject, publicKey, privateKey); } catch { return null; }
