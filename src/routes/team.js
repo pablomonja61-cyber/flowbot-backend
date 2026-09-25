@@ -13,9 +13,6 @@ const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
 const supabase = require('../models/supabase');
-let bcrypt = null;
-try { bcrypt = require('bcryptjs'); }
-catch (e) { console.error('[Equipo] Falta el paquete "bcryptjs" — la aceptación de invitaciones queda desactivada. Ejecuta: npm install bcryptjs'); }
 const crypto = require('crypto');
 
 router.use(auth);
@@ -85,7 +82,6 @@ router.post('/invite', async (req, res, next) => {
 const publicRouter = express.Router();
 publicRouter.post('/accept', async (req, res, next) => {
   try {
-    if (!bcrypt) return res.status(503).json({ error: 'Esta función no está disponible todavía (falta instalar una dependencia en el servidor).' });
     const { token, name, password } = req.body || {};
     if (!token || !name || !password || password.length < 6) {
       return res.status(400).json({ error: 'Faltan datos, o la contraseña debe tener al menos 6 caracteres.' });
@@ -100,10 +96,25 @@ publicRouter.post('/accept', async (req, res, next) => {
       .maybeSingle();
     if (!invitacion) return res.status(404).json({ error: 'Invitación inválida o vencida.' });
 
-    const password_hash = await bcrypt.hash(password, 10);
+    // El login real de AriaBot usa Supabase Auth — hay que crear la
+    // cuenta ahí (no solo guardar un hash en la tabla propia), o el
+    // miembro invitado nunca podría iniciar sesión de verdad.
+    const { data: authUser, error: authError } = await supabase.auth.admin.createUser({
+      email: invitacion.email,
+      password,
+      email_confirm: true,
+      user_metadata: { name }
+    });
+    if (authError) {
+      if (authError.message?.includes('already registered') || authError.code === 'email_exists') {
+        return res.status(409).json({ error: 'Ya existe una cuenta con ese correo.' });
+      }
+      throw authError;
+    }
+
     const { data: nuevoUsuario, error } = await supabase
       .from('users')
-      .insert({ name, email: invitacion.email, password_hash, owner_id: invitacion.owner_id, team_role: invitacion.role })
+      .upsert({ id: authUser.user.id, name, email: invitacion.email, owner_id: invitacion.owner_id, team_role: invitacion.role })
       .select('id, name, email, team_role').single();
     if (error) throw error;
 
