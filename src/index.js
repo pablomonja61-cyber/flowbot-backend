@@ -80,6 +80,8 @@ app.use('/api/country-block', require('./routes/countryBlock'));
 app.use('/api/contacts', require('./routes/contacts'));
 app.use('/api/settings', require('./routes/settings'));
 app.use('/api/push', require('./routes/push'));
+app.use('/api/api-tokens', require('./routes/apiTokens'));
+app.use('/mcp', require('./routes/mcp'));
 // ── Error handler global ────────────────────────────────────
 app.use((err, req, res, next) => {
   console.error('[ERROR]', err.message);
