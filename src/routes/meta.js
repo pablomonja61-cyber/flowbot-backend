@@ -3,6 +3,7 @@ const router = express.Router();
 const auth = require('../middleware/auth');
 const supabase = require('../models/supabase');
 const axios = require('axios');
+const svc = require('../services/metaProfiles');
 
 router.use(auth);
 
@@ -102,74 +103,75 @@ router.post('/callback', async (req, res, next) => {
   }
 });
 
+// ── Utilidades para métricas ─────────────────────────────────
+const PRESETS = new Set(['today', 'yesterday', 'last_7d', 'last_30d', 'this_month', 'last_month', 'maximum']);
+const presetOf = v => (PRESETS.has(v) ? v : 'last_30d');
+const INSIGHT_FIELDS = 'spend,impressions,clicks,reach,ctr,cpm,cpc,actions';
+
+// Aplana el bloque "insights" anidado que devuelve Meta.
+function flatInsights(node) {
+  const i = node.insights?.data?.[0] || {};
+  const conv = (i.actions || []).find(a => a.action_type === 'onsite_conversion.messaging_conversation_started_7d');
+  return {
+    spend: i.spend || '0', impressions: i.impressions || '0', clicks: i.clicks || '0',
+    reach: i.reach || '0', ctr: i.ctr || '0', cpm: i.cpm || '0', cpc: i.cpc || '0',
+    conversations: conv ? parseInt(conv.value || 0) : 0
+  };
+}
+
+const actId = id => (String(id).startsWith('act_') ? String(id) : `act_${id}`);
+
 // ── GET /api/meta/adaccounts ──────────────────────────────────
-// Lista las cuentas publicitarias a las que el token conectado
-// tiene acceso, para que el usuario elija cuál usar.
+// Cuentas publicitarias de TODOS los perfiles conectados del usuario
+// (más las del OAuth anterior, si existieran). Si no hay ninguna
+// devuelve lista vacía — no es un error, solo falta conectar.
 router.get('/adaccounts', async (req, res, next) => {
   try {
     res.set('Cache-Control', 'no-store');
-    const { data: config } = await supabase
-      .from('ads_config')
-      .select('access_token')
-      .eq('user_id', req.user.id)
-      .maybeSingle();
+    const accounts = await svc.listAllAccounts(req.user.id);
 
-    if (!config?.access_token) {
-      return res.status(404).json({ error: 'No hay una cuenta de Meta Ads conectada todavía' });
+    const legacy = await svc.legacyToken(req.user.id);
+    if (legacy) {
+      try {
+        const r = await axios.get(`https://graph.facebook.com/${GRAPH_VERSION}/me/adaccounts`, {
+          params: { access_token: legacy, fields: 'id,name,account_status,currency', limit: 100 }
+        });
+        const known = new Set(accounts.map(a => a.account_id));
+        for (const a of (r.data?.data || [])) {
+          const plain = String(a.id).replace(/^act_/, '');
+          if (known.has(plain)) continue;
+          accounts.push({ ...a, account_id: plain, profile_id: null, profile_name: 'Conexión anterior (Facebook)', profile_status: 'active' });
+        }
+      } catch (e) {
+        console.warn('[Meta Ads] El token del OAuth anterior ya no sirve:', e.response?.data?.error?.message || e.message);
+      }
     }
 
-    const accountsRes = await axios.get(`https://graph.facebook.com/${GRAPH_VERSION}/me/adaccounts`, {
-      params: {
-        access_token: config.access_token,
-        fields: 'id,name,account_status,currency'
-      }
-    });
-
-    console.log('[Meta Ads] Respuesta cruda de /me/adaccounts:', JSON.stringify(accountsRes.data));
-
-    res.json(accountsRes.data?.data || []);
-  } catch (err) {
-    console.error('[Meta Ads] Error listando cuentas:', err.response?.data || err.message);
-    next(err);
-  }
+    accounts.sort((a, b) => String(a.profile_name || '').localeCompare(String(b.profile_name || '')) || String(a.name || '').localeCompare(String(b.name || '')));
+    res.json(accounts);
+  } catch (err) { next(err); }
 });
 
 // ── GET /api/meta/pixels?ad_account_id=act_123 ────────────────
-// Lista los Pixels que ya existen en esa cuenta de anuncios — así
-// el usuario no tiene que escribir el Pixel ID a mano, solo elegir
-// de una lista (o se usa el único que tenga, automáticamente).
 router.get('/pixels', async (req, res, next) => {
   try {
     const { ad_account_id } = req.query;
     if (!ad_account_id) return res.status(400).json({ error: 'ad_account_id es requerido' });
-
-    const { data: config } = await supabase
-      .from('ads_config')
-      .select('access_token, currency')
-      .eq('user_id', req.user.id)
-      .maybeSingle();
-
-    if (!config?.access_token) {
-      return res.status(404).json({ error: 'No hay una cuenta de Meta Ads conectada todavía' });
-    }
-
-    const accountId = ad_account_id.startsWith('act_') ? ad_account_id : `act_${ad_account_id}`;
-
-    const pixelsRes = await axios.get(`https://graph.facebook.com/${GRAPH_VERSION}/${accountId}/adspixels`, {
-      params: { access_token: config.access_token, fields: 'id,name' }
+    const pixels = await svc.withToken(req.user.id, ad_account_id, async token => {
+      const r = await axios.get(`https://graph.facebook.com/${GRAPH_VERSION}/${actId(ad_account_id)}/adspixels`, {
+        params: { access_token: token, fields: 'id,name' }
+      });
+      return r.data?.data || [];
     });
-
-    res.json(pixelsRes.data?.data || []);
+    res.json(pixels);
   } catch (err) {
     console.error('[Meta Ads] Error listando pixels:', err.response?.data || err.message);
-    next(err);
+    svc.sendError(res, err, 'No se pudieron cargar los Pixels');
   }
 });
 
 // ── POST /api/meta/select-pixel ───────────────────────────────
-// Guarda el Pixel elegido (o el único que había) junto con el resto
-// de la config — usa el mismo access_token ya conectado, sin pedir
-// otro token aparte para esto.
+// (no usa token de Meta: solo guarda la configuración elegida)
 router.post('/select-pixel', async (req, res, next) => {
   try {
     const { pixel_id, ad_account_id, currency } = req.body;
@@ -196,166 +198,123 @@ router.post('/select-pixel', async (req, res, next) => {
 });
 
 // ── POST /api/meta/create-pixel ──────────────────────────────
-// Crea un Pixel NUEVO en Meta (uno que todavía no existe), usando
-// la cuenta de anuncios ya conectada — y de una vez lo guarda como
-// la configuración activa. El usuario no necesita ir a buscar
-// ningún token aparte: se reusa el mismo que ya autorizó al conectar
-// su cuenta publicitaria.
+// Necesita que el token tenga el permiso "ads_management".
 router.post('/create-pixel', async (req, res, next) => {
   try {
     const { ad_account_id, name } = req.body;
     if (!ad_account_id) return res.status(400).json({ error: 'ad_account_id es requerido' });
 
-    const { data: config } = await supabase
-      .from('ads_config')
-      .select('access_token, currency')
-      .eq('user_id', req.user.id)
-      .maybeSingle();
+    const newPixelId = await svc.withToken(req.user.id, ad_account_id, async token => {
+      const r = await axios.post(
+        `https://graph.facebook.com/${GRAPH_VERSION}/${actId(ad_account_id)}/adspixels`,
+        { name: name || 'Pixel AriaBot' },
+        { params: { access_token: token } }
+      );
+      return r.data?.id;
+    });
+    if (!newPixelId) return res.status(400).json({ error: 'Meta no devolvió el ID del Pixel creado' });
 
-    if (!config?.access_token) {
-      return res.status(404).json({ error: 'Primero conecta tu cuenta de Meta Ads' });
-    }
-
-    const accountId = ad_account_id.startsWith('act_') ? ad_account_id : `act_${ad_account_id}`;
-
-    const createRes = await axios.post(
-      `https://graph.facebook.com/${GRAPH_VERSION}/${accountId}/adspixels`,
-      { name: name || 'Pixel AriaBot' },
-      { params: { access_token: config.access_token } }
-    );
-
-    const newPixelId = createRes.data?.id;
-    if (!newPixelId) {
-      return res.status(400).json({ error: 'Meta no devolvió el ID del Pixel creado' });
-    }
-
-    // Guardar de una vez como la configuración activa — reusa el
-    // mismo access_token que ya se conectó antes, no hace falta pedir
-    // ninguno nuevo.
-    await supabase.from('ads_config').update({
-      pixel_id: newPixelId,
-      ad_account_id: accountId,
-      conversions_api: true,
-      updated_at: new Date().toISOString()
-    }).eq('user_id', req.user.id);
+    const { data: existing } = await supabase.from('ads_config').select('id').eq('user_id', req.user.id).maybeSingle();
+    const updates = { pixel_id: newPixelId, ad_account_id: actId(ad_account_id), conversions_api: true, updated_at: new Date().toISOString() };
+    if (existing) await supabase.from('ads_config').update(updates).eq('user_id', req.user.id);
+    else await supabase.from('ads_config').insert({ user_id: req.user.id, ...updates });
 
     console.log(`[Meta Ads] ✓ Pixel nuevo creado y conectado: ${newPixelId}`);
     res.status(201).json({ pixel_id: newPixelId });
   } catch (err) {
     console.error('[Meta Ads] Error creando Pixel:', err.response?.data || err.message);
-    res.status(400).json({ error: err.response?.data?.error?.message || 'No se pudo crear el Pixel' });
+    svc.sendError(res, err, 'No se pudo crear el Pixel');
   }
 });
 
-// ── GET /api/meta/campaigns?account_id=act_123 ────────────────
-// Lista las campañas de una cuenta publicitaria.
+// ── GET /api/meta/campaigns?account_id=act_123&date_preset=last_7d ──
+// Campañas de una cuenta, con estado real (effective_status) y métricas.
 router.get('/campaigns', async (req, res, next) => {
   try {
     res.set('Cache-Control', 'no-store');
     const { account_id } = req.query;
     if (!account_id) return res.status(400).json({ error: 'account_id es requerido' });
+    const preset = presetOf(req.query.date_preset);
 
-    const { data: config } = await supabase
-      .from('ads_config')
-      .select('access_token')
-      .eq('user_id', req.user.id)
-      .maybeSingle();
-
-    if (!config?.access_token) {
-      return res.status(404).json({ error: 'No hay una cuenta de Meta Ads conectada todavía' });
-    }
-
-    const accountId = account_id.startsWith('act_') ? account_id : `act_${account_id}`;
-
-    const campaignsRes = await axios.get(`https://graph.facebook.com/${GRAPH_VERSION}/${accountId}/campaigns`, {
-      params: { access_token: config.access_token, fields: 'name,status,objective' }
+    const campaigns = await svc.withToken(req.user.id, account_id, async token => {
+      const r = await axios.get(`https://graph.facebook.com/${GRAPH_VERSION}/${actId(account_id)}/campaigns`, {
+        params: {
+          access_token: token, limit: 200,
+          fields: `name,status,effective_status,objective,daily_budget,lifetime_budget,start_time,insights.date_preset(${preset}){${INSIGHT_FIELDS}}`
+        },
+        timeout: 20000
+      });
+      return r.data?.data || [];
     });
 
-    console.log('[Meta Ads] Respuesta cruda de /campaigns:', JSON.stringify(campaignsRes.data));
-
-    res.json(campaignsRes.data?.data || []);
+    res.json(campaigns.map(c => ({
+      id: c.id, name: c.name, status: c.status, effective_status: c.effective_status,
+      objective: c.objective, daily_budget: c.daily_budget, lifetime_budget: c.lifetime_budget,
+      start_time: c.start_time, account_id: String(account_id).replace(/^act_/, ''),
+      ...flatInsights(c)
+    })));
   } catch (err) {
     console.error('[Meta Ads] Error listando campañas:', err.response?.data || err.message);
-    res.status(400).json({ error: err.response?.data?.error?.message || 'No se pudieron cargar las campañas' });
+    svc.sendError(res, err, 'No se pudieron cargar las campañas');
   }
 });
 
-// ── GET /api/meta/adsets?campaign_id=xxx ───────────────────────
-// Lista los conjuntos de anuncios de una campaña.
+// ── GET /api/meta/adsets?campaign_id=xxx&date_preset=last_7d ────
 router.get('/adsets', async (req, res, next) => {
   try {
     res.set('Cache-Control', 'no-store');
     const { campaign_id } = req.query;
     if (!campaign_id) return res.status(400).json({ error: 'campaign_id es requerido' });
+    const preset = presetOf(req.query.date_preset);
 
-    const { data: config } = await supabase
-      .from('ads_config')
-      .select('access_token')
-      .eq('user_id', req.user.id)
-      .maybeSingle();
-
-    if (!config?.access_token) {
-      return res.status(404).json({ error: 'No hay una cuenta de Meta Ads conectada todavía' });
-    }
-
-    const adsetsRes = await axios.get(`https://graph.facebook.com/${GRAPH_VERSION}/${campaign_id}/adsets`, {
-      params: { access_token: config.access_token, fields: 'name,status' }
+    // Sin account_id: se prueba con los tokens de cada perfil hasta
+    // encontrar el que tenga acceso a esa campaña.
+    const adsets = await svc.withToken(req.user.id, null, async token => {
+      const r = await axios.get(`https://graph.facebook.com/${GRAPH_VERSION}/${campaign_id}/adsets`, {
+        params: {
+          access_token: token, limit: 200,
+          fields: `name,status,effective_status,daily_budget,insights.date_preset(${preset}){${INSIGHT_FIELDS}}`
+        },
+        timeout: 20000
+      });
+      return r.data?.data || [];
     });
 
-    res.json(adsetsRes.data?.data || []);
+    res.json(adsets.map(a => ({
+      id: a.id, name: a.name, status: a.status, effective_status: a.effective_status,
+      daily_budget: a.daily_budget, campaign_id, ...flatInsights(a)
+    })));
   } catch (err) {
     console.error('[Meta Ads] Error listando conjuntos de anuncios:', err.response?.data || err.message);
-    res.status(400).json({ error: err.response?.data?.error?.message || 'No se pudieron cargar los conjuntos de anuncios' });
+    svc.sendError(res, err, 'No se pudieron cargar los conjuntos de anuncios');
   }
 });
 
-// ── GET /api/meta/ads?adset_id=xxx ─────────────────────────────
-// Lista los anuncios de un conjunto, con sus métricas.
+// ── GET /api/meta/ads?adset_id=xxx&date_preset=last_30d ─────────
 router.get('/ads', async (req, res, next) => {
   try {
     res.set('Cache-Control', 'no-store');
     const { adset_id } = req.query;
     if (!adset_id) return res.status(400).json({ error: 'adset_id es requerido' });
+    const preset = presetOf(req.query.date_preset);
 
-    const { data: config } = await supabase
-      .from('ads_config')
-      .select('access_token')
-      .eq('user_id', req.user.id)
-      .maybeSingle();
-
-    if (!config?.access_token) {
-      return res.status(404).json({ error: 'No hay una cuenta de Meta Ads conectada todavía' });
-    }
-
-    const adsRes = await axios.get(`https://graph.facebook.com/${GRAPH_VERSION}/${adset_id}/ads`, {
-      params: {
-        access_token: config.access_token,
-        fields: 'name,status,insights.date_preset(last_30d){spend,impressions,clicks,reach,ctr,cpm,cpc}'
-      }
+    const ads = await svc.withToken(req.user.id, null, async token => {
+      const r = await axios.get(`https://graph.facebook.com/${GRAPH_VERSION}/${adset_id}/ads`, {
+        params: {
+          access_token: token, limit: 200,
+          fields: `name,status,effective_status,insights.date_preset(${preset}){${INSIGHT_FIELDS}}`
+        },
+        timeout: 20000
+      });
+      return r.data?.data || [];
     });
 
-    // "insights" viene como un objeto con .data[0] — lo aplanamos para
-    // que el frontend no tenga que lidiar con esa estructura anidada.
-    const ads = (adsRes.data?.data || []).map(ad => {
-      const insight = ad.insights?.data?.[0] || {};
-      return {
-        id: ad.id,
-        name: ad.name,
-        status: ad.status,
-        spend: insight.spend || '0',
-        impressions: insight.impressions || '0',
-        clicks: insight.clicks || '0',
-        reach: insight.reach || '0',
-        ctr: insight.ctr || '0',
-        cpm: insight.cpm || '0',
-        cpc: insight.cpc || '0'
-      };
-    });
-
-    res.json(ads);
+    res.json(ads.map(ad => ({
+      id: ad.id, name: ad.name, status: ad.status, effective_status: ad.effective_status, ...flatInsights(ad)
+    })));
   } catch (err) {
     console.error('[Meta Ads] Error listando anuncios:', err.response?.data || err.message);
-    res.status(400).json({ error: err.response?.data?.error?.message || 'No se pudieron cargar los anuncios' });
+    svc.sendError(res, err, 'No se pudieron cargar los anuncios');
   }
 });
 

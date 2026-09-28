@@ -86,6 +86,7 @@ const { router: teamRoutes, publicRouter: teamPublicRoutes } = require('./routes
 app.use('/api/team', teamRoutes);
 app.use('/api/team-public', teamPublicRoutes);
 app.use('/api/broadcasts', require('./routes/broadcasts'));
+app.use('/api/meta-profiles', require('./routes/metaProfiles'));
 // ── Error handler global ────────────────────────────────────
 app.use((err, req, res, next) => {
   console.error('[ERROR]', err.message);
