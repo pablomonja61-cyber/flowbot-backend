@@ -8,6 +8,7 @@ const { sendManualTextBaileys, sendManualMediaBaileys, executeFlowBaileys, activ
 const {
   sendWhatsAppImage, sendWhatsAppVideo, sendWhatsAppAudio, sendWhatsAppDocument, sendPurchaseEventToMeta, executeFlow
 } = require('../services/flowEngine');
+const metaSvc = require('../services/metaProfiles');
 
 // ── Conversión de moneda real para el Dashboard ─────────────────
 // Todos los montos de venta se guardan en Soles (PEN), la moneda del
@@ -41,6 +42,16 @@ async function convertirDesdeSoles(monto, monedaDestino) {
   const rates = await obtenerTasasCambio();
   if (!rates || !rates[monedaDestino]) return monto; // sin tasa disponible, devuelve el original sin convertir
   return monto * rates[monedaDestino];
+}
+// Inversa de la anterior — para el gasto de Meta Ads, que puede venir
+// en dólares u otra moneda según cómo esté configurada cada cuenta
+// publicitaria, y hay que pasarlo a soles antes de sumarlo con las
+// ventas (que siempre se registran en soles).
+async function convertirASoles(monto, monedaOrigen) {
+  if (!monedaOrigen || monedaOrigen === 'PEN') return monto;
+  const rates = await obtenerTasasCambio();
+  if (!rates || !rates[monedaOrigen]) return monto; // sin tasa disponible, devuelve el original sin convertir
+  return monto / rates[monedaOrigen];
 }
 router.use(auth);
 // ── GET /api/conversations ────────────────────────────────────
@@ -294,7 +305,7 @@ router.get('/dashboard/stats', async (req, res, next) => {
       // "Pendientes" = se le pidió el pago (payment_requested_at) pero
       // todavía no se confirmó la venta (is_sale sigue en false).
       supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('user_id', req.user.id).eq('is_sale', false).not('payment_requested_at', 'is', null).gte('payment_requested_at', desde.toISOString()).lte('payment_requested_at', hasta.toISOString()),
-      supabase.from('conversations').select('sale_amount, sale_at, contact_phone').eq('user_id', req.user.id).eq('is_sale', true).gte('sale_at', desde.toISOString()).lte('sale_at', hasta.toISOString()),
+      supabase.from('conversations').select('sale_amount, sale_at, contact_phone, sale_method').eq('user_id', req.user.id).eq('is_sale', true).gte('sale_at', desde.toISOString()).lte('sale_at', hasta.toISOString()),
       supabase.from('conversations').select('created_at').eq('user_id', req.user.id).gte('created_at', desde.toISOString()).lte('created_at', hasta.toISOString()).order('created_at', { ascending: true })
     ]);
 
@@ -434,13 +445,66 @@ router.get('/dashboard/stats', async (req, res, next) => {
       .map(c => ({ ...c, revenue: Number(c.revenue.toFixed(2)) }))
       .sort((a, b) => b.revenue - a.revenue);
 
+    // Ventas por método de pago (Yape, Plin, etc. — el mismo texto
+    // que ya guarda sale_method al confirmarse cada venta).
+    const byPaymentMethodMap = {};
+    (salesData || []).forEach(s => {
+      const metodo = s.sale_method || 'Sin especificar';
+      byPaymentMethodMap[metodo] ??= { method: metodo, sales: 0, revenue: 0 };
+      byPaymentMethodMap[metodo].sales++;
+      byPaymentMethodMap[metodo].revenue += (s.sale_amount || 0);
+    });
+    const byPaymentMethod = Object.values(byPaymentMethodMap)
+      .map(m => ({ ...m, revenue: Number(m.revenue.toFixed(2)) }))
+      .sort((a, b) => b.revenue - a.revenue);
+
+    // Gasto real en Meta Ads (de todas las cuentas conectadas, de
+    // todos los perfiles) para el mismo rango de fechas — usado para
+    // "Gasto Meta (Ad)", ROAS y Lucro. Si algo falla o no hay ninguna
+    // cuenta conectada, se deja en null (el frontend debe mostrar
+    // "--"), nunca se rompe el resto del Dashboard por esto.
+    let ad_spend = null;
+    try {
+      const cuentas = await metaSvc.listAllAccounts(req.user.id);
+      if (cuentas.length > 0) {
+        const since = desde.toISOString().slice(0, 10);
+        const until = hasta.toISOString().slice(0, 10);
+        const gastosPorCuenta = await Promise.all(cuentas.map(async cuenta => {
+          try {
+            const gastoOriginal = await metaSvc.withToken(req.user.id, cuenta.account_id, async token => {
+              const r = await axios.get(`${metaSvc.GRAPH}/act_${cuenta.account_id}/insights`, {
+                params: { access_token: token, time_range: JSON.stringify({ since, until }), fields: 'spend', level: 'account' },
+                timeout: 15000
+              });
+              return parseFloat(r.data?.data?.[0]?.spend || 0);
+            });
+            // Cada cuenta publicitaria puede estar en una moneda
+            // distinta (USD, etc.) — se convierte a soles con su
+            // propia moneda real antes de sumarla con las demás.
+            return await convertirASoles(gastoOriginal, cuenta.currency);
+          } catch (e) {
+            console.error(`[Dashboard] No se pudo traer el gasto de la cuenta ${cuenta.account_id}:`, metaSvc.metaError(e).message);
+            return 0;
+          }
+        }));
+        ad_spend = Number(gastosPorCuenta.reduce((a, b) => a + b, 0).toFixed(2));
+      }
+    } catch (e) {
+      console.error('[Dashboard] Error general trayendo gasto de Meta Ads:', e.message);
+    }
+    const roas = ad_spend && ad_spend > 0 ? Number((total_revenue / ad_spend).toFixed(2)) : null;
+    const lucro = ad_spend !== null ? Number((total_revenue - ad_spend).toFixed(2)) : null;
+
+
     // Todos los montos se calcularon en Soles (PEN) — si el frontend
     // pidió otra moneda (?currency=USD), se convierten de verdad acá,
     // con tasas de cambio reales, antes de responder.
     const monedaSolicitada = (req.query.currency || 'PEN').toUpperCase();
-    const [total_revenue_conv, avg_ticket_conv] = await Promise.all([
+    const [total_revenue_conv, avg_ticket_conv, ad_spend_conv, lucro_conv] = await Promise.all([
       convertirDesdeSoles(total_revenue, monedaSolicitada),
-      convertirDesdeSoles(avg_ticket, monedaSolicitada)
+      convertirDesdeSoles(avg_ticket, monedaSolicitada),
+      ad_spend !== null ? convertirDesdeSoles(ad_spend, monedaSolicitada) : Promise.resolve(null),
+      lucro !== null ? convertirDesdeSoles(lucro, monedaSolicitada) : Promise.resolve(null)
     ]);
     const tasaParaChart = monedaSolicitada === 'PEN' ? 1 : (await obtenerTasasCambio())?.[monedaSolicitada] || 1;
     const daily_chart_convertido = daily_chart.map(d => ({ ...d, revenue: Number((d.revenue * tasaParaChart).toFixed(2)) }));
@@ -465,13 +529,10 @@ router.get('/dashboard/stats', async (req, res, next) => {
       by_status: byStatus,
       by_flow: byFlow,
       by_country: byCountry,
-      // ROAS necesita el gasto real de Meta Ads — todavía no hay
-      // ninguna cuenta publicitaria conectada, así que por ahora se
-      // manda null (el frontend debe mostrar "--" o similar). En
-      // cuanto se conecte una cuenta de Meta Ads, se puede calcular
-      // como total_revenue / ad_spend.
-      ad_spend: null,
-      roas: null
+      by_payment_method: byPaymentMethod,
+      ad_spend: ad_spend !== null ? Number(ad_spend_conv.toFixed(2)) : null,
+      roas,
+      lucro: lucro !== null ? Number(lucro_conv.toFixed(2)) : null
     });
   } catch (err) {
     console.error('[Dashboard error]', err);

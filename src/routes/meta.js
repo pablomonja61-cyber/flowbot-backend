@@ -285,7 +285,49 @@ router.get('/adsets', async (req, res, next) => {
       daily_budget: a.daily_budget, campaign_id, ...flatInsights(a)
     })));
   } catch (err) {
-    console.error('[Meta Ads] Error listando conjuntos de anuncios:', err.response?.data || err.message);
+    console.error('[Meta Ads] Error listando conjuntos de anuncios:', JSON.stringify(err.response?.data || { message: err.message }));
+    svc.sendError(res, err, 'No se pudieron cargar los conjuntos de anuncios');
+  }
+});
+
+// ── GET /api/meta/adsets/all?campaign_ids=id1,id2,id3&date_preset= ──
+// NUEVO — igual que /adsets, pero para varias campañas A LA VEZ, en
+// paralelo. Evita que el frontend tenga que pedirlas una por una
+// (que es lo que hacía lento la carga de Campañas).
+router.get('/adsets/all', async (req, res, next) => {
+  try {
+    res.set('Cache-Control', 'no-store');
+    const campaignIds = String(req.query.campaign_ids || '').split(',').map(s => s.trim()).filter(Boolean);
+    if (!campaignIds.length) return res.status(400).json({ error: 'campaign_ids es requerido (separados por coma).' });
+    const preset = presetOf(req.query.date_preset);
+
+    const porCampaña = await Promise.all(campaignIds.map(async campaign_id => {
+      try {
+        const adsets = await svc.withToken(req.user.id, null, async token => {
+          const r = await axios.get(`https://graph.facebook.com/${GRAPH_VERSION}/${campaign_id}/adsets`, {
+            params: {
+              access_token: token, limit: 200,
+              fields: `name,status,effective_status,daily_budget,insights.date_preset(${preset}){${INSIGHT_FIELDS}}`
+            },
+            timeout: 20000
+          });
+          return r.data?.data || [];
+        });
+        return {
+          campaign_id,
+          adsets: adsets.map(a => ({
+            id: a.id, name: a.name, status: a.status, effective_status: a.effective_status,
+            daily_budget: a.daily_budget, campaign_id, ...flatInsights(a)
+          }))
+        };
+      } catch (err) {
+        return { campaign_id, error: svc.metaError(err).message, adsets: [] };
+      }
+    }));
+
+    res.json(porCampaña);
+  } catch (err) {
+    console.error('[Meta Ads] Error listando conjuntos de anuncios (lote):', JSON.stringify(err.response?.data || { message: err.message }));
     svc.sendError(res, err, 'No se pudieron cargar los conjuntos de anuncios');
   }
 });
