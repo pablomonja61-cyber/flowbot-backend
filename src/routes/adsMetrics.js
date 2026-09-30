@@ -45,7 +45,7 @@ async function computeMetricsForAccount(userId, accountId, dateFrom, dateTo) {
       params: {
         access_token: token,
         time_range: JSON.stringify({ since: dateFrom, until: dateTo }),
-        fields: 'ad_id,ad_name,campaign_name,campaign_id,adset_name,spend,impressions,clicks,cpc,cpm,reach,actions',
+        fields: 'ad_id,ad_name,campaign_name,campaign_id,adset_name,spend,impressions,clicks,cpc,cpm,ctr,reach,actions',
         level: 'ad',
         limit: 200
       },
@@ -126,8 +126,12 @@ async function computeMetricsForAccount(userId, accountId, dateFrom, dateTo) {
       roi: Number((spend > 0 ? ((stats.revenue - spend) / spend) * 100 : 0).toFixed(1)),
       clicks: parseInt(ad.clicks || 0),
       impressions: parseInt(ad.impressions || 0),
+      reach: parseInt(ad.reach || 0),
       cpc: Number(parseFloat(ad.cpc || 0).toFixed(2)),
+      cpm: Number(parseFloat(ad.cpm || 0).toFixed(2)),
+      ctr: Number(parseFloat(ad.ctr || 0).toFixed(2)),
       status: (statusByAdId[ad.ad_id] || 'UNKNOWN').toLowerCase(),
+      effective_status: statusByAdId[ad.ad_id] || 'UNKNOWN',
       ad_link: ad.ad_id ? `https://www.facebook.com/adsmanager/manage/ads?act=${accountId}&selected_ad_ids=${ad.ad_id}` : null
     };
   });
