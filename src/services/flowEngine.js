@@ -1192,6 +1192,15 @@ Responde SOLO en formato JSON exacto:
 
     if (fallas.length > 0) {
       console.log(`[CloudAPI Payment] Validación falló: ${fallas.join(' | ')}`);
+      // Aunque no se pudo confirmar la venta sola, guardamos lo que la
+      // IA sí logró leer de la captura (monto, número de operación) —
+      // así el panel de "Registrar venta manual" en Chat en Vivo se
+      // pre-llena solo, y el agente no tiene que volver a leer la
+      // captura y escribir todo a mano.
+      await supabase.from('conversations').update({
+        suggested_sale_amount: monto || null,
+        suggested_operation_code: analysisResult.numero_operacion || null
+      }).eq('id', conversation.id);
       if (paidPathInfo.node?.data?.respondIfNoMatch !== false) {
         const contexto = `El cliente envió un comprobante de pago, pero la validación falló por: ${fallas.join('; ')}. Explícale amablemente por qué no se pudo validar y qué debe hacer.`;
         await respondWithAI(userId, connection, to, contexto, conversation.id, paidPathInfo.node?.data?.ai_config_id, paidPathInfo.node?.data?.context);
