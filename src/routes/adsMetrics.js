@@ -9,6 +9,40 @@ router.use(auth);
 
 const GRAPH = svc.GRAPH;
 
+// ── Conversión de moneda (igual criterio que el Dashboard) ──────
+// Las tasas se guardan en caché 1 hora para no golpear la API
+// externa en cada petición.
+let cacheTasasCambio = { rates: null, fetchedAt: 0 };
+const UNA_HORA_MS = 60 * 60 * 1000;
+async function obtenerTasasCambio() {
+  const ahora = Date.now();
+  if (cacheTasasCambio.rates && (ahora - cacheTasasCambio.fetchedAt) < UNA_HORA_MS) return cacheTasasCambio.rates;
+  try {
+    const { data } = await axios.get('https://open.er-api.com/v6/latest/PEN', { timeout: 8000 });
+    if (data?.result === 'success' && data.rates) {
+      cacheTasasCambio = { rates: data.rates, fetchedAt: ahora };
+      return data.rates;
+    }
+  } catch (e) {
+    console.error('[Ads metrics] Error obteniendo tasas de cambio:', e.message);
+  }
+  return cacheTasasCambio.rates || null;
+}
+// Convierte un monto de CUALQUIER moneda a CUALQUIER otra, usando
+// soles como punto intermedio (las tasas que da la API son todas
+// "desde 1 sol hacia X"). Si falta alguna tasa, devuelve el monto
+// original sin convertir (mejor eso que romper la respuesta).
+async function convertirMoneda(monto, monedaOrigen, monedaDestino) {
+  if (!monto || monedaOrigen === monedaDestino) return monto;
+  const rates = await obtenerTasasCambio();
+  if (!rates) return monto;
+  const enSoles = monedaOrigen && monedaOrigen !== 'PEN'
+    ? (rates[monedaOrigen] ? monto / rates[monedaOrigen] : monto)
+    : monto;
+  if (!monedaDestino || monedaDestino === 'PEN') return enSoles;
+  return rates[monedaDestino] ? enSoles * rates[monedaDestino] : enSoles;
+}
+
 // ── Fechas (hora de Lima) ────────────────────────────────────
 const limaToday = () => new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 10);
 function addDays(d, n) { const t = new Date(d + 'T00:00:00Z'); t.setUTCDate(t.getUTCDate() + n); return t.toISOString().slice(0, 10); }
@@ -64,7 +98,7 @@ function sumActionValues(actionValues, tipos) {
 // Calcula las métricas de UNA cuenta publicitaria. Separado en su
 // propia función para poder llamarlo muchas veces en paralelo (ver
 // GET /all más abajo) sin repetir código.
-async function computeMetricsForAccount(userId, accountId, dateFrom, dateTo) {
+async function computeMetricsForAccount(userId, accountId, dateFrom, dateTo, monedaCuenta, monedaDestino) {
   const { ads, statusByAdId } = await svc.withToken(userId, accountId, async token => {
     const r = await axios.get(`${GRAPH}/act_${accountId}/insights`, {
       params: {
@@ -88,11 +122,19 @@ async function computeMetricsForAccount(userId, accountId, dateFrom, dateTo) {
     const statuses = {};
     await Promise.all(lotes.map(async lote => {
       try {
-        const s = await axios.get(`${GRAPH}/`, {
-          params: { ids: lote.join(','), fields: 'effective_status,name', access_token: token },
+        // GET /?ids=... quedó eliminado en Graph API v26+ — la forma
+        // vigente es pedir el listado de anuncios de la cuenta
+        // filtrado por esos ids puntuales.
+        const s = await axios.get(`${GRAPH}/act_${accountId}/ads`, {
+          params: {
+            fields: 'id,effective_status',
+            filtering: JSON.stringify([{ field: 'id', operator: 'IN', value: lote }]),
+            limit: lote.length,
+            access_token: token
+          },
           timeout: 20000
         });
-        for (const id of lote) if (s.data[id]) statuses[id] = s.data[id].effective_status || 'UNKNOWN';
+        for (const row of (s.data?.data || [])) statuses[row.id] = row.effective_status || 'UNKNOWN';
       } catch (e) {
         console.error('[Ads metrics] Error obteniendo estados:', JSON.stringify(e.response?.data || { message: e.message }));
       }
@@ -111,12 +153,19 @@ async function computeMetricsForAccount(userId, accountId, dateFrom, dateTo) {
       presupuesto = await svc.withToken(userId, accountId, async token => {
         let total = 0;
         for (let i = 0; i < adsetIds.length; i += 50) {
-          const r = await axios.get(`${GRAPH}/`, {
-            params: { ids: adsetIds.slice(i, i + 50).join(','), fields: 'daily_budget,lifetime_budget', access_token: token },
+          const lote = adsetIds.slice(i, i + 50);
+          // Misma corrección que en los estados: GET /?ids=... ya no
+          // existe en v26+, se usa el listado filtrado de la cuenta.
+          const r = await axios.get(`${GRAPH}/act_${accountId}/adsets`, {
+            params: {
+              fields: 'id,daily_budget,lifetime_budget',
+              filtering: JSON.stringify([{ field: 'id', operator: 'IN', value: lote }]),
+              limit: lote.length,
+              access_token: token
+            },
             timeout: 20000
           });
-          for (const id of Object.keys(r.data || {})) {
-            const c = r.data[id];
+          for (const c of (r.data?.data || [])) {
             // Meta manda el presupuesto en centavos de la moneda de la cuenta.
             total += parseInt(c.daily_budget || c.lifetime_budget || 0) / 100;
           }
@@ -199,23 +248,40 @@ async function computeMetricsForAccount(userId, accountId, dateFrom, dateTo) {
     };
   });
 
+  // Convierte todos los montos en dinero a la moneda que haya pedido
+  // el frontend (?currency=...) — el gasto y el presupuesto vienen
+  // en la moneda propia de CADA cuenta (puede ser distinta entre
+  // cuentas), así que primero se pasan por soles y de ahí a la
+  // moneda final pedida; el revenue/ganancia de AriaBot ya nace en
+  // soles, así que solo se convierte si se pidió otra moneda.
+  const destino = monedaDestino || 'PEN';
+  const [presupuestoConv, totalSpendConv, totalRevenueConv, gananciaConv, facturacionMetaConv, gananciaMetaConv] = await Promise.all([
+    convertirMoneda(presupuesto, monedaCuenta, destino),
+    convertirMoneda(totalSpend, monedaCuenta, destino),
+    convertirMoneda(totalRevenue, 'PEN', destino),
+    convertirMoneda(ganancia, 'PEN', destino),
+    convertirMoneda(facturacionMeta, monedaCuenta, destino),
+    convertirMoneda(gananciaMeta, monedaCuenta, destino)
+  ]);
+
   return {
     summary: {
-      presupuesto: Number(presupuesto.toFixed(2)),
-      total_spend: Number(totalSpend.toFixed(2)),
+      presupuesto: Number(presupuestoConv.toFixed(2)),
+      total_spend: Number(totalSpendConv.toFixed(2)),
       total_conversations: totalConversationsFromMeta,
       total_sales: totalSales,
-      total_revenue: Number(totalRevenue.toFixed(2)),
-      ganancia,
+      total_revenue: Number(totalRevenueConv.toFixed(2)),
+      ganancia: Number(gananciaConv.toFixed(2)),
       margen,
       roi, cpa,
       total_clicks: totalClicks,
       total_impressions: totalImpressions,
       compras_pixel: comprasPixel,
-      facturacion_meta: facturacionMeta,
-      ganancia_meta: gananciaMeta,
+      facturacion_meta: Number(facturacionMetaConv.toFixed(2)),
+      ganancia_meta: Number(gananciaMetaConv.toFixed(2)),
       roas_meta: roasMeta,
       pagos_iniciados: pagosIniciados,
+      currency: destino,
       ultima_actualizacion: new Date().toISOString()
     },
     ads: adsDetail
@@ -232,7 +298,10 @@ router.get('/', async (req, res, next) => {
     if (!accountId) return res.status(400).json({ error: 'Falta account_id (elige una cuenta publicitaria).' });
 
     const { from: dateFrom, to: dateTo } = rangeFromQuery(req.query);
-    const resultado = await computeMetricsForAccount(req.user.id, accountId, dateFrom, dateTo);
+    const cuentas = await svc.listAllAccounts(req.user.id);
+    const monedaCuenta = cuentas.find(c => c.account_id === accountId)?.currency || 'PEN';
+    const monedaDestino = (req.query.currency || 'PEN').toUpperCase();
+    const resultado = await computeMetricsForAccount(req.user.id, accountId, dateFrom, dateTo, monedaCuenta, monedaDestino);
     res.json(resultado);
   } catch (err) {
     console.error('[Ads metrics error]', JSON.stringify(err.response?.data || { message: err.message }));
@@ -251,10 +320,11 @@ router.get('/all', async (req, res, next) => {
   try {
     const { from: dateFrom, to: dateTo } = rangeFromQuery(req.query);
     const cuentas = await svc.listAllAccounts(req.user.id);
+    const monedaDestino = (req.query.currency || 'PEN').toUpperCase();
 
     const resultados = await Promise.all(cuentas.map(async cuenta => {
       try {
-        const data = await computeMetricsForAccount(req.user.id, cuenta.account_id, dateFrom, dateTo);
+        const data = await computeMetricsForAccount(req.user.id, cuenta.account_id, dateFrom, dateTo, cuenta.currency || 'PEN', monedaDestino);
         return { account_id: cuenta.account_id, account_name: cuenta.name, profile_name: cuenta.profile_name, ...data };
       } catch (err) {
         const mensaje = svc.metaError(err).message;
@@ -285,6 +355,7 @@ router.get('/all', async (req, res, next) => {
     totales.ganancia_meta = Number((totales.facturacion_meta - totales.total_spend).toFixed(2));
     totales.roas_meta = totales.total_spend > 0 ? Number((totales.facturacion_meta / totales.total_spend).toFixed(2)) : null;
     totales.ultima_actualizacion = new Date().toISOString();
+    totales.currency = monedaDestino;
     totales.presupuesto = Number(totales.presupuesto.toFixed(2));
     totales.total_spend = Number(totales.total_spend.toFixed(2));
     totales.total_revenue = Number(totales.total_revenue.toFixed(2));

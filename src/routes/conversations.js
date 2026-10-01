@@ -392,22 +392,22 @@ router.get('/dashboard/stats', async (req, res, next) => {
       else byStatus.sin_respuesta++;
     });
 
-    // Rendimiento por flujo — usa trigger_id (que NO se borra cuando
-    // el flujo termina, a diferencia de current_flow_id) para saber
-    // de qué flujo vino cada conversación, incluso después de días.
+    // Rendimiento por flujo — usa trigger_executions (que vincula de
+    // forma permanente cada conversación con el disparador/flujo que
+    // la originó, sin borrarse nunca) en vez de current_flow_id (que
+    // sí se limpia apenas se completa una venta).
     const { data: flowPerfData } = await supabase
-      .from('conversations')
-      .select('is_sale, sale_amount, triggers(flow_id, flows(name))')
-      .eq('user_id', req.user.id)
-      .not('trigger_id', 'is', null)
-      .gte('created_at', desde.toISOString())
-      .lte('created_at', hasta.toISOString());
+      .from('trigger_executions')
+      .select('conversation_id, triggers(flow_id, flows(name)), conversations(is_sale, sale_amount, user_id, created_at)')
+      .gte('executed_at', desde.toISOString())
+      .lte('executed_at', hasta.toISOString());
     const byFlowMap = {};
-    (flowPerfData || []).forEach(c => {
-      const nombre = c.triggers?.flows?.name || 'Sin flujo';
+    (flowPerfData || []).forEach(te => {
+      if (te.conversations?.user_id !== req.user.id) return;
+      const nombre = te.triggers?.flows?.name || 'Sin flujo';
       byFlowMap[nombre] ??= { flow: nombre, conversations: 0, sales: 0, revenue: 0 };
       byFlowMap[nombre].conversations++;
-      if (c.is_sale) { byFlowMap[nombre].sales++; byFlowMap[nombre].revenue += (c.sale_amount || 0); }
+      if (te.conversations?.is_sale) { byFlowMap[nombre].sales++; byFlowMap[nombre].revenue += (te.conversations.sale_amount || 0); }
     });
     const byFlow = Object.values(byFlowMap).map(f => ({ ...f, revenue: Number(f.revenue.toFixed(2)) }));
 
