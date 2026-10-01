@@ -57,16 +57,19 @@ router.use(auth);
 // ── GET /api/conversations ────────────────────────────────────
 router.get('/', async (req, res, next) => {
   try {
-    const { page = 1, limit = 30 } = req.query;
+    const { page = 1, limit = 30, is_sale } = req.query;
     const offset = (page - 1) * limit;
-    const { data, error, count } = await supabase
+    let query = supabase
       .from('conversations')
       .select(`
         id, contact_phone, contact_name, last_message,
         last_message_at, unread_count, status, connection_id, tag, profile_pic_url, flow_active, last_message_direction, bot_ever_responded, ever_replied,
+        is_sale, sale_amount, sale_method, sale_at, operation_code, meta_event_status,
         connections(name)
       `, { count: 'exact' })
-      .eq('user_id', req.user.id)
+      .eq('user_id', req.user.id);
+    if (is_sale !== undefined) query = query.eq('is_sale', is_sale === 'true');
+    const { data, error, count } = await query
       .order('last_message_at', { ascending: false })
       .range(offset, offset + limit - 1);
     if (error) throw error;
