@@ -64,7 +64,7 @@ router.get('/', async (req, res, next) => {
       .select(`
         id, contact_phone, contact_name, last_message,
         last_message_at, unread_count, status, connection_id, tag, profile_pic_url, flow_active, last_message_direction, bot_ever_responded, ever_replied,
-        is_sale, sale_amount, sale_method, sale_at, operation_code, meta_event_status,
+        is_sale, sale_amount, sale_method, sale_at, operation_code, meta_event_status, sale_closed_by,
         connections(name)
       `, { count: 'exact' })
       .eq('user_id', req.user.id);
@@ -546,14 +546,20 @@ router.get('/dashboard/stats', async (req, res, next) => {
 // ── PATCH /api/conversations/:id/sale ─────────────────────────
 router.patch('/:id/sale', async (req, res, next) => {
   try {
-    const { is_sale, sale_amount } = req.body;
+    const { is_sale, sale_amount, sale_method, operation_code } = req.body;
+    const updates = {
+      is_sale: is_sale ?? true,
+      sale_amount: sale_amount || 0,
+      sale_at: is_sale ? new Date().toISOString() : null
+    };
+    if (is_sale ?? true) {
+      updates.sale_closed_by = 'manual';
+      if (sale_method !== undefined) updates.sale_method = sale_method || null;
+      if (operation_code !== undefined) updates.operation_code = operation_code || null;
+    }
     const { data, error } = await supabase
       .from('conversations')
-      .update({
-        is_sale: is_sale ?? true,
-        sale_amount: sale_amount || 0,
-        sale_at: is_sale ? new Date().toISOString() : null
-      })
+      .update(updates)
       .eq('id', req.params.id)
       .eq('user_id', req.user.id)
       .select()
