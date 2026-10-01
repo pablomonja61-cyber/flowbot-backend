@@ -283,17 +283,22 @@ router.get('/campaigns', async (req, res, next) => {
 
     const resultado = await Promise.all(campaigns.map(async c => {
       const insights = flatInsights(c);
+      const tienePresupuestoPropio = c.daily_budget != null || c.lifetime_budget != null;
       // Meta manda el presupuesto en centavos de la moneda de la cuenta.
-      const presupuestoOriginal = parseInt(c.daily_budget || c.lifetime_budget || 0) / 100;
+      const presupuestoOriginal = tienePresupuestoPropio ? parseInt(c.daily_budget || c.lifetime_budget || 0) / 100 : null;
       const [presupuesto, spendConv] = await Promise.all([
-        convertirMoneda(presupuestoOriginal, monedaCuenta, monedaDestino),
+        tienePresupuestoPropio ? convertirMoneda(presupuestoOriginal, monedaCuenta, monedaDestino) : Promise.resolve(null),
         convertirMoneda(parseFloat(insights.spend), monedaCuenta, monedaDestino)
       ]);
       return {
         id: c.id, name: c.name, status: c.status, effective_status: c.effective_status || c.status || 'UNKNOWN',
         objective: c.objective,
-        daily_budget: Number(presupuesto.toFixed(2)),
-        budget_type: c.daily_budget ? 'diario' : (c.lifetime_budget ? 'total' : null),
+        // null = esta campaña NO tiene presupuesto puesto a nivel de
+        // campaña (Meta lo está manejando a nivel de conjunto de
+        // anuncios en su lugar) — el frontend debe mostrar "-" en
+        // ese caso, nunca "PEN 0.00".
+        daily_budget: presupuesto !== null ? Number(presupuesto.toFixed(2)) : null,
+        budget_type: c.daily_budget != null ? 'diario' : (c.lifetime_budget != null ? 'total' : null),
         start_time: c.start_time, account_id: String(account_id).replace(/^act_/, ''),
         currency: monedaDestino,
         ...insights,
@@ -331,7 +336,7 @@ router.get('/adsets', async (req, res, next) => {
 
     res.json(adsets.map(a => ({
       id: a.id, name: a.name, status: a.status, effective_status: a.effective_status || a.status || 'UNKNOWN',
-      daily_budget: Number((parseInt(a.daily_budget || 0) / 100).toFixed(2)), campaign_id, ...flatInsights(a)
+      daily_budget: a.daily_budget != null ? Number((parseInt(a.daily_budget) / 100).toFixed(2)) : null, campaign_id, ...flatInsights(a)
     })));
   } catch (err) {
     console.error('[Meta Ads] Error listando conjuntos de anuncios:', JSON.stringify(err.response?.data || { message: err.message }));
@@ -366,7 +371,7 @@ router.get('/adsets/all', async (req, res, next) => {
           campaign_id,
           adsets: adsets.map(a => ({
             id: a.id, name: a.name, status: a.status, effective_status: a.effective_status || a.status || 'UNKNOWN',
-            daily_budget: Number((parseInt(a.daily_budget || 0) / 100).toFixed(2)), campaign_id, ...flatInsights(a)
+            daily_budget: a.daily_budget != null ? Number((parseInt(a.daily_budget) / 100).toFixed(2)) : null, campaign_id, ...flatInsights(a)
           }))
         };
       } catch (err) {
