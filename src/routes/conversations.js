@@ -882,27 +882,60 @@ router.get('/dashboard/ranking-tiendas', async (req, res, next) => {
     if (!conexiones?.length) return res.json({ tiendas: [] });
 
     const monedaSolicitada = (req.query.currency || 'PEN').toUpperCase();
+    const inicioMes = new Date(); inicioMes.setDate(1); inicioMes.setHours(0, 0, 0, 0);
 
     const tiendas = await Promise.all(conexiones.map(async (conn) => {
       const [
         { count: contactos },
         { count: mensajes },
         { count: ventas },
-        { data: ventasData }
+        { data: ventasData },
+        { data: ventasMesData }
       ] = await Promise.all([
         supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('connection_id', conn.id),
         supabase.from('messages').select('conversations!inner(connection_id)', { count: 'exact', head: true }).eq('conversations.connection_id', conn.id),
         supabase.from('conversations').select('*', { count: 'exact', head: true }).eq('connection_id', conn.id).eq('is_sale', true),
-        supabase.from('conversations').select('sale_amount').eq('connection_id', conn.id).eq('is_sale', true)
+        supabase.from('conversations').select('sale_amount, ad_id').eq('connection_id', conn.id).eq('is_sale', true),
+        supabase.from('conversations').select('sale_amount').eq('connection_id', conn.id).eq('is_sale', true).gte('sale_at', inicioMes.toISOString())
       ]);
 
       const facturacionSoles = (ventasData || []).reduce((sum, v) => sum + (v.sale_amount || 0), 0);
+      const ingresosMesSoles = (ventasMesData || []).reduce((sum, v) => sum + (v.sale_amount || 0), 0);
       const ticketPromSoles = ventas > 0 ? facturacionSoles / ventas : 0;
       const tasaDeCierre = contactos > 0 ? ((ventas / contactos) * 100) : 0;
 
-      const [facturacion, ticketProm] = await Promise.all([
+      // ROAS por tienda: se busca el gasto real de los anuncios
+      // puntuales que trajeron a ESTOS clientes (por su ad_id), no el
+      // gasto general de la cuenta — así cada WhatsApp tiene su ROAS
+      // real, aunque compartan la misma cuenta publicitaria.
+      const adIds = [...new Set((ventasData || []).map(v => v.ad_id).filter(Boolean))];
+      let gastoAnuncios = 0;
+      if (adIds.length > 0) {
+        const gastos = await Promise.all(adIds.map(async adId => {
+          try {
+            return await metaSvc.withToken(req.user.id, null, async token => {
+              const r = await axios.get(`${metaSvc.GRAPH}/${adId}/insights`, {
+                params: { access_token: token, date_preset: 'maximum', fields: 'spend' },
+                timeout: 15000
+              });
+              return parseFloat(r.data?.data?.[0]?.spend || 0);
+            });
+          } catch (e) {
+            return 0; // anuncio viejo/inaccesible — no debe tumbar el ranking completo
+          }
+        }));
+        gastoAnuncios = gastos.reduce((a, b) => a + b, 0);
+      }
+      // El gasto de Meta ya viene en la moneda de cada cuenta publicitaria
+      // mezclada — se aproxima convirtiendo con la tasa general, igual
+      // que el resto del Dashboard (no hay forma más precisa sin saber
+      // la cuenta exacta de cada anuncio individual).
+      const roasTienda = gastoAnuncios > 0 ? Number((facturacionSoles / gastoAnuncios).toFixed(2)) : null;
+
+      const [facturacion, ticketProm, ingresosMes] = await Promise.all([
         convertirDesdeSoles(facturacionSoles, monedaSolicitada),
-        convertirDesdeSoles(ticketPromSoles, monedaSolicitada)
+        convertirDesdeSoles(ticketPromSoles, monedaSolicitada),
+        convertirDesdeSoles(ingresosMesSoles, monedaSolicitada)
       ]);
 
       return {
@@ -912,8 +945,10 @@ router.get('/dashboard/ranking-tiendas', async (req, res, next) => {
         mensajes: mensajes || 0,
         ventas: ventas || 0,
         facturacion: Number(facturacion.toFixed(2)),
+        ingresos_mes: Number(ingresosMes.toFixed(2)),
         ticket_promedio: Number(ticketProm.toFixed(2)),
-        tasa_de_cierre: Number(tasaDeCierre.toFixed(1))
+        tasa_de_cierre: Number(tasaDeCierre.toFixed(1)),
+        roas: roasTienda
       };
     }));
 
