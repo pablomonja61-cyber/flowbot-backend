@@ -10,6 +10,37 @@ router.use(auth);
 const META_APP_ID = process.env.META_APP_ID;
 const META_APP_SECRET = process.env.META_APP_SECRET;
 const GRAPH_VERSION = 'v26.0';
+
+// ── Conversión de moneda (mismo criterio que Dashboard/ads-metrics) ──
+let cacheTasasCambio = { rates: null, fetchedAt: 0 };
+const UNA_HORA_MS = 60 * 60 * 1000;
+async function obtenerTasasCambio() {
+  const ahora = Date.now();
+  if (cacheTasasCambio.rates && (ahora - cacheTasasCambio.fetchedAt) < UNA_HORA_MS) return cacheTasasCambio.rates;
+  try {
+    const { data } = await axios.get('https://open.er-api.com/v6/latest/PEN', { timeout: 8000 });
+    if (data?.result === 'success' && data.rates) {
+      cacheTasasCambio = { rates: data.rates, fetchedAt: ahora };
+      return data.rates;
+    }
+  } catch (e) {
+    console.error('[Meta Ads] Error obteniendo tasas de cambio:', e.message);
+  }
+  return cacheTasasCambio.rates || null;
+}
+async function convertirMoneda(monto, monedaOrigen, monedaDestino) {
+  if (!monto || monedaOrigen === monedaDestino) return monto;
+  const rates = await obtenerTasasCambio();
+  if (!rates) return monto;
+  const enSoles = monedaOrigen && monedaOrigen !== 'PEN' ? (rates[monedaOrigen] ? monto / rates[monedaOrigen] : monto) : monto;
+  if (!monedaDestino || monedaDestino === 'PEN') return enSoles;
+  return rates[monedaDestino] ? enSoles * rates[monedaDestino] : enSoles;
+}
+async function monedaDeCuenta(userId, accountId) {
+  const cuentas = await svc.listAllAccounts(userId);
+  return cuentas.find(c => c.account_id === String(accountId).replace(/^act_/, ''))?.currency || 'PEN';
+}
+
 // Fijo en el código a propósito — Meta exige que el redirect_uri sea
 // IDÉNTICO, byte por byte, entre el paso de autorización y el de
 // intercambio del código. Dejarlo fijo acá evita cualquier diferencia
@@ -247,12 +278,30 @@ router.get('/campaigns', async (req, res, next) => {
       return r.data?.data || [];
     });
 
-    res.json(campaigns.map(c => ({
-      id: c.id, name: c.name, status: c.status, effective_status: c.effective_status,
-      objective: c.objective, daily_budget: c.daily_budget, lifetime_budget: c.lifetime_budget,
-      start_time: c.start_time, account_id: String(account_id).replace(/^act_/, ''),
-      ...flatInsights(c)
-    })));
+    const monedaCuenta = await monedaDeCuenta(req.user.id, account_id);
+    const monedaDestino = (req.query.currency || 'PEN').toUpperCase();
+
+    const resultado = await Promise.all(campaigns.map(async c => {
+      const insights = flatInsights(c);
+      // Meta manda el presupuesto en centavos de la moneda de la cuenta.
+      const presupuestoOriginal = parseInt(c.daily_budget || c.lifetime_budget || 0) / 100;
+      const [presupuesto, spendConv] = await Promise.all([
+        convertirMoneda(presupuestoOriginal, monedaCuenta, monedaDestino),
+        convertirMoneda(parseFloat(insights.spend), monedaCuenta, monedaDestino)
+      ]);
+      return {
+        id: c.id, name: c.name, status: c.status, effective_status: c.effective_status || c.status || 'UNKNOWN',
+        objective: c.objective,
+        daily_budget: Number(presupuesto.toFixed(2)),
+        budget_type: c.daily_budget ? 'diario' : (c.lifetime_budget ? 'total' : null),
+        start_time: c.start_time, account_id: String(account_id).replace(/^act_/, ''),
+        currency: monedaDestino,
+        ...insights,
+        spend: Number(spendConv.toFixed(2))
+      };
+    }));
+
+    res.json(resultado);
   } catch (err) {
     console.error('[Meta Ads] Error listando campañas:', err.response?.data || err.message);
     svc.sendError(res, err, 'No se pudieron cargar las campañas');
@@ -281,8 +330,8 @@ router.get('/adsets', async (req, res, next) => {
     });
 
     res.json(adsets.map(a => ({
-      id: a.id, name: a.name, status: a.status, effective_status: a.effective_status,
-      daily_budget: a.daily_budget, campaign_id, ...flatInsights(a)
+      id: a.id, name: a.name, status: a.status, effective_status: a.effective_status || a.status || 'UNKNOWN',
+      daily_budget: Number((parseInt(a.daily_budget || 0) / 100).toFixed(2)), campaign_id, ...flatInsights(a)
     })));
   } catch (err) {
     console.error('[Meta Ads] Error listando conjuntos de anuncios:', JSON.stringify(err.response?.data || { message: err.message }));
@@ -316,8 +365,8 @@ router.get('/adsets/all', async (req, res, next) => {
         return {
           campaign_id,
           adsets: adsets.map(a => ({
-            id: a.id, name: a.name, status: a.status, effective_status: a.effective_status,
-            daily_budget: a.daily_budget, campaign_id, ...flatInsights(a)
+            id: a.id, name: a.name, status: a.status, effective_status: a.effective_status || a.status || 'UNKNOWN',
+            daily_budget: Number((parseInt(a.daily_budget || 0) / 100).toFixed(2)), campaign_id, ...flatInsights(a)
           }))
         };
       } catch (err) {
