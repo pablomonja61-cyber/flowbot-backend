@@ -7,7 +7,7 @@ router.use(auth);
 router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 const fail = (message, status = 400) => { throw Object.assign(new Error(message), { status }); };
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
-const allowed = ['companies', 'selectedCompany', 'company', 'departments', 'workHours', 'labelStyles', 'translations', 'credentials', 'mcpUrl', 'invitations', 'broadcasts', 'team', 'supportAccess'];
+const allowed = ['companies', 'selectedCompany', 'company', 'departments', 'workHours', 'labelStyles', 'translations', 'credentials', 'mcpUrl', 'invitations', 'broadcasts', 'team', 'supportAccess', 'kanban'];
 const conflict = () => fail('La configuración cambió en otra pestaña. Recarga la página antes de guardar.', 409);
 function validate(input) {
   if (!object(input) || !object(input.settingsData) || !Array.isArray(input.quickReplies) || !Array.isArray(input.labels)) fail('La configuración no tiene un formato válido.');
@@ -18,7 +18,8 @@ function validate(input) {
   for (const key of ['companies', 'departments', 'translations', 'invitations', 'broadcasts', 'team', 'credentials', 'supportAccess']) {
     if (settingsData[key] !== undefined && (!Array.isArray(settingsData[key]) || settingsData[key].length > 2000 || settingsData[key].some(row => !object(row) || typeof row.id !== 'string'))) fail('Revisa la lista de ' + key + '.');
   }
-  for (const key of ['company', 'workHours', 'labelStyles']) if (settingsData[key] !== undefined && !object(settingsData[key])) fail('Revisa la configuración de ' + key + '.');
+  for (const key of ['company', 'workHours', 'labelStyles', 'kanban']) if (settingsData[key] !== undefined && !object(settingsData[key])) fail('Revisa la configuración de ' + key + '.');
+  if (settingsData.kanban?.labels !== undefined && (!Array.isArray(settingsData.kanban.labels) || settingsData.kanban.labels.length > 200)) fail('Revisa las etiquetas del Kanban.');
   if (settingsData.selectedCompany !== undefined && typeof settingsData.selectedCompany !== 'string') fail('Revisa la empresa seleccionada.');
   if (settingsData.credentials) settingsData.credentials = settingsData.credentials.map(row => ({ id: row.id.slice(0, 100), name: String(row.name || '').slice(0, 80), type: row.type === 'oauth' ? 'oauth' : 'static' }));
   if (settingsData.mcpUrl) { try { const url = new URL(settingsData.mcpUrl); if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) throw Error(); } catch { fail('La URL de MCP no es válida.'); } }

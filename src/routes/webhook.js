@@ -5,6 +5,7 @@ const {
   executeFlow, saveMessage, isCountryBlocked,
   checkOtherFlowTrigger, continueFlowFromButton, processIncomingImageCloud, respondWithAI, cancelFollowups, showTypingCloud
 } = require('../services/flowEngine');
+const { estaBloqueado: estaEnListaNegra } = require('./globalBlacklist');
 const { v4: uuidv4 } = require('uuid');
 
 // Crea (o actualiza el nombre de) el contacto en el CRM cada vez que
@@ -258,10 +259,24 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
     .eq('connection_id', connection.id)
     .eq('is_active', true);
 
-  const earlyMatch = (allActiveTriggersEarly || []).find(t => {
+  let earlyMatch = (allActiveTriggersEarly || []).find(t => {
     const kw = (t.keyword || '').toLowerCase().trim();
     return kw && (normalizedMsgEarly === kw || normalizedMsgEarly.includes(kw));
   });
+
+  // Lista Negra Global — si este usuario activó la protección y el
+  // número está reportado por fraude (por cualquier cuenta de
+  // AriaBot), no se le dispara ningún flujo automático.
+  if (earlyMatch) {
+    try {
+      if (await estaEnListaNegra(userId, contactPhone)) {
+        console.log(`[Webhook] ${contactPhone} está en la Lista Negra Global — no se dispara el flujo.`);
+        earlyMatch = null;
+      }
+    } catch (e) {
+      console.error('[Webhook] Error revisando la Lista Negra Global:', e.message);
+    }
+  }
 
   if (earlyMatch) {
     // Si NO es repetible, hay que revisar si ya se ejecutó antes para
