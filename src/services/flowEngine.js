@@ -239,6 +239,44 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// ── Guardar sticker/audio/documento/video entrante ───────────
+// A diferencia de processIncomingImageCloud, esto NO intenta leer
+// un comprobante de pago — solo descarga el archivo de Meta, lo
+// sube a Storage, y lo guarda en la conversación para que el agente
+// lo pueda ver/escuchar/abrir en Chat en Vivo. Antes, estos 3 tipos
+// de mensaje se descartaban por completo, sin guardarse nada.
+async function processIncomingMediaCloud(connection, contactPhone, mediaId, conversationId, tipo) {
+  const accessToken = connection.access_token;
+  const { data: conversation } = await supabase.from('conversations').select('id, user_id, is_blocked').eq('id', conversationId).single();
+  if (!conversation || conversation.is_blocked) return;
+
+  let buffer = null, mimeType = 'application/octet-stream';
+  try {
+    const media = await downloadWhatsAppMedia(mediaId, accessToken);
+    buffer = media.buffer;
+    mimeType = media.mimeType;
+  } catch (err) {
+    console.error(`[CloudAPI] Error descargando ${tipo}:`, err.response?.data || err.message);
+    return;
+  }
+
+  let publicMediaUrl = null;
+  try {
+    const ext = (mimeType.split('/')[1] || tipo).split(';')[0];
+    const filePath = `${connection.user_id}/${conversation.id}/${Date.now()}.${ext}`;
+    const { error: uploadError } = await supabase.storage.from('media').upload(filePath, buffer, { contentType: mimeType, upsert: false });
+    if (!uploadError) {
+      const { data: publicUrlData } = supabase.storage.from('media').getPublicUrl(filePath);
+      publicMediaUrl = publicUrlData?.publicUrl || null;
+    }
+  } catch (upErr) {
+    console.error(`[CloudAPI] Error subiendo ${tipo} a Storage:`, upErr.message);
+  }
+
+  const etiquetas = { sticker: '[Sticker]', audio: '[Audio]', document: '[Documento]', video: '[Video]' };
+  await saveMessage(conversation.id, etiquetas[tipo] || `[${tipo}]`, 'inbound', tipo, publicMediaUrl);
+}
+
 // ════════════════════════════════════════════════════════════
 // BLOQUEO POR PAÍS (idéntico al de baileys.js)
 // ════════════════════════════════════════════════════════════
@@ -1645,6 +1683,7 @@ module.exports = {
   checkOtherFlowTrigger,
   continueFlowFromButton,
   processIncomingImageCloud,
+  processIncomingMediaCloud,
   respondWithAI,
   showTypingCloud,
   sendFollowupContentCloud,

@@ -3,7 +3,7 @@ const router = express.Router();
 const supabase = require('../models/supabase');
 const {
   executeFlow, saveMessage, isCountryBlocked,
-  checkOtherFlowTrigger, continueFlowFromButton, processIncomingImageCloud, respondWithAI, cancelFollowups, showTypingCloud
+  checkOtherFlowTrigger, continueFlowFromButton, processIncomingImageCloud, processIncomingMediaCloud, respondWithAI, cancelFollowups, showTypingCloud
 } = require('../services/flowEngine');
 const { estaBloqueado: estaEnListaNegra } = require('./globalBlacklist');
 const { v4: uuidv4 } = require('uuid');
@@ -95,6 +95,13 @@ router.post('/whatsapp', async (req, res) => {
             continue;
           }
 
+          if (['sticker', 'audio', 'document', 'video'].includes(msg.type)) {
+            enqueueForContact(queueKey, () => processIncomingMediaMessage(phoneNumberId, contactPhone, msg, msg.type)).catch(err => {
+              console.error(`[Webhook] Error procesando ${msg.type}:`, err.message);
+            });
+            continue;
+          }
+
           if (msg.type !== 'text' && msg.type !== 'interactive') continue;
 
           const userMessage = msg.type === 'text'
@@ -177,6 +184,55 @@ async function processIncomingImageMessage(phoneNumberId, contactPhone, msg) {
   if (!mediaId) return;
 
   await processIncomingImageCloud(connection, contactPhone, mediaId, conversation.id);
+}
+
+// Sticker, audio, documento (PDF, etc) y video entrantes — antes se
+// descartaban por completo sin guardar nada. Ahora se guardan en la
+// conversación (con su archivo) para que el agente los vea, igual
+// que ya pasaba con las imágenes.
+const ETIQUETAS_MEDIA = { sticker: '[Sticker]', audio: '[Audio]', document: '[Documento]', video: '[Video]' };
+async function processIncomingMediaMessage(phoneNumberId, contactPhone, msg, tipo) {
+  const { data: connection } = await supabase
+    .from('connections')
+    .select('*')
+    .eq('phone_number_id', phoneNumberId)
+    .eq('is_active', true)
+    .single();
+
+  if (!connection) return;
+  const userId = connection.user_id;
+
+  if (await isCountryBlocked(userId, contactPhone)) {
+    console.log(`[Webhook] 🚫 País bloqueado — ignorando ${tipo} de ${contactPhone}`);
+    return;
+  }
+
+  let { data: conversation } = await supabase
+    .from('conversations')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('contact_phone', contactPhone)
+    .eq('connection_id', connection.id)
+    .single();
+
+  if (!conversation) {
+    const { data: newConv } = await supabase
+      .from('conversations')
+      .insert({
+        id: uuidv4(), user_id: userId, connection_id: connection.id,
+        contact_phone: contactPhone, contact_name: contactPhone,
+        status: 'active', unread_count: 1, flow_active: false,
+        last_message: ETIQUETAS_MEDIA[tipo] || `[${tipo}]`, last_message_at: new Date().toISOString()
+      })
+      .select().single();
+    conversation = newConv;
+    upsertContact(userId, contactPhone, contactPhone);
+  }
+
+  const mediaId = msg[tipo]?.id;
+  if (!mediaId) return;
+
+  await processIncomingMediaCloud(connection, contactPhone, mediaId, conversation.id, tipo);
 }
 
 // ════════════════════════════════════════════════════════════
