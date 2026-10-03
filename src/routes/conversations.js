@@ -65,6 +65,7 @@ router.get('/', async (req, res, next) => {
         id, contact_phone, contact_name, last_message,
         last_message_at, unread_count, status, connection_id, tag, profile_pic_url, flow_active, last_message_direction, bot_ever_responded, ever_replied,
         is_sale, sale_amount, sale_method, sale_at, operation_code, meta_event_status, sale_closed_by,
+        current_flow_id, ad_id, ad_name, campaign_name, ctwa_clid,
         connections(name)
       `, { count: 'exact' })
       .eq('user_id', req.user.id);
@@ -73,6 +74,21 @@ router.get('/', async (req, res, next) => {
       .order('last_message_at', { ascending: false })
       .range(offset, offset + limit - 1);
     if (error) throw error;
+    // "Flujo" (de dónde viene la persona) necesita salir SIEMPRE,
+    // incluso en ventas ya cerradas — current_flow_id se borra apenas
+    // se completa una venta, así que se busca aparte en
+    // trigger_executions, que nunca se borra.
+    const idsDeEstaPagina = (data || []).map(c => c.id);
+    if (idsDeEstaPagina.length > 0) {
+      const { data: origenes } = await supabase
+        .from('trigger_executions')
+        .select('conversation_id, triggers(flows(name))')
+        .in('conversation_id', idsDeEstaPagina);
+      const nombrePorConversacion = {};
+      (origenes || []).forEach(o => { nombrePorConversacion[o.conversation_id] = o.triggers?.flows?.name; });
+      data.forEach(c => { c.flow_name = nombrePorConversacion[c.id] || null; });
+    }
+
     res.json({ data, total: count, page: +page, limit: +limit });
   } catch (err) { next(err); }
 });
