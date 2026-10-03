@@ -406,7 +406,7 @@ router.get('/ads', async (req, res, next) => {
     });
 
     res.json(ads.map(ad => ({
-      id: ad.id, name: ad.name, status: ad.status, effective_status: ad.effective_status, ...flatInsights(ad)
+      id: ad.id, name: ad.name, status: ad.status, effective_status: ad.effective_status || ad.status || 'UNKNOWN', ...flatInsights(ad)
     })));
   } catch (err) {
     console.error('[Meta Ads] Error listando anuncios:', err.response?.data || err.message);
@@ -483,5 +483,46 @@ function crearRutaDePresupuesto(tipo) {
 }
 router.post('/campaigns/:id/budget', crearRutaDePresupuesto('la campaña'));
 router.post('/adsets/:id/budget', crearRutaDePresupuesto('el conjunto de anuncios'));
+
+// ── GET /api/meta/ads/all?adset_ids=id1,id2,id3&date_preset= ────
+// Igual que /api/meta/adsets/all, pero para traer los anuncios de
+// varios conjuntos A LA VEZ, en paralelo.
+router.get('/ads/all', async (req, res, next) => {
+  try {
+    res.set('Cache-Control', 'no-store');
+    const adsetIds = String(req.query.adset_ids || '').split(',').map(s => s.trim()).filter(Boolean);
+    if (!adsetIds.length) return res.status(400).json({ error: 'adset_ids es requerido (separados por coma).' });
+    const preset = presetOf(req.query.date_preset);
+
+    const porConjunto = await Promise.all(adsetIds.map(async adset_id => {
+      try {
+        const ads = await svc.withToken(req.user.id, null, async token => {
+          const r = await axios.get(`https://graph.facebook.com/${GRAPH_VERSION}/${adset_id}/ads`, {
+            params: {
+              access_token: token, limit: 200,
+              fields: `name,status,effective_status,insights.date_preset(${preset}){${INSIGHT_FIELDS}}`
+            },
+            timeout: 20000
+          });
+          return r.data?.data || [];
+        });
+        return {
+          adset_id,
+          ads: ads.map(ad => ({
+            id: ad.id, name: ad.name, status: ad.status, effective_status: ad.effective_status || ad.status || 'UNKNOWN',
+            adset_id, ...flatInsights(ad)
+          }))
+        };
+      } catch (err) {
+        return { adset_id, error: svc.metaError(err).message, ads: [] };
+      }
+    }));
+
+    res.json(porConjunto);
+  } catch (err) {
+    console.error('[Meta Ads] Error listando anuncios (lote):', JSON.stringify(err.response?.data || { message: err.message }));
+    svc.sendError(res, err, 'No se pudieron cargar los anuncios');
+  }
+});
 
 module.exports = router;
