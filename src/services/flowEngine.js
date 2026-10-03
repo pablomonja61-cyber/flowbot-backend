@@ -245,7 +245,7 @@ function sleep(ms) {
 // sube a Storage, y lo guarda en la conversación para que el agente
 // lo pueda ver/escuchar/abrir en Chat en Vivo. Antes, estos 3 tipos
 // de mensaje se descartaban por completo, sin guardarse nada.
-async function processIncomingMediaCloud(connection, contactPhone, mediaId, conversationId, tipo) {
+async function processIncomingMediaCloud(connection, contactPhone, mediaId, conversationId, tipo, nombreOriginal = null) {
   const accessToken = connection.access_token;
   const { data: conversation } = await supabase.from('conversations').select('id, user_id, is_blocked').eq('id', conversationId).single();
   if (!conversation || conversation.is_blocked) return;
@@ -274,7 +274,8 @@ async function processIncomingMediaCloud(connection, contactPhone, mediaId, conv
   }
 
   const etiquetas = { sticker: '[Sticker]', audio: '[Audio]', document: '[Documento]', video: '[Video]' };
-  await saveMessage(conversation.id, etiquetas[tipo] || `[${tipo}]`, 'inbound', tipo, publicMediaUrl);
+  const contenido = nombreOriginal ? `[${tipo === 'document' ? 'Documento' : tipo}] ${nombreOriginal}` : (etiquetas[tipo] || `[${tipo}]`);
+  await saveMessage(conversation.id, contenido, 'inbound', tipo, publicMediaUrl);
 }
 
 // ════════════════════════════════════════════════════════════

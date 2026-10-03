@@ -231,8 +231,11 @@ async function processIncomingMediaMessage(phoneNumberId, contactPhone, msg, tip
 
   const mediaId = msg[tipo]?.id;
   if (!mediaId) return;
+  // WhatsApp solo manda el nombre original del archivo en documentos
+  // (ej. "Comprobante.pdf") — en audio/video/sticker no existe ese dato.
+  const nombreOriginal = msg[tipo]?.filename || null;
 
-  await processIncomingMediaCloud(connection, contactPhone, mediaId, conversation.id, tipo);
+  await processIncomingMediaCloud(connection, contactPhone, mediaId, conversation.id, tipo, nombreOriginal);
 }
 
 // ════════════════════════════════════════════════════════════
