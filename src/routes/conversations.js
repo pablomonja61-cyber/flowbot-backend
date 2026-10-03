@@ -65,7 +65,7 @@ router.get('/', async (req, res, next) => {
         id, contact_phone, contact_name, last_message,
         last_message_at, unread_count, status, connection_id, tag, profile_pic_url, flow_active, last_message_direction, bot_ever_responded, ever_replied,
         is_sale, sale_amount, sale_method, sale_at, operation_code, meta_event_status, sale_closed_by,
-        current_flow_id, ad_id, ad_name, campaign_name, ctwa_clid,
+        current_flow_id, ad_id, ad_name, campaign_name, ctwa_clid, ad_source_url, ad_headline, ad_image_url,
         connections(name)
       `, { count: 'exact' })
       .eq('user_id', req.user.id);

@@ -113,7 +113,13 @@ router.post('/whatsapp', async (req, res) => {
           // Si el mensaje viene de un clic en un anuncio "Enviar mensaje"
           // (Click to WhatsApp), Meta manda este dato en el primer mensaje.
           const referral = msg.referral
-            ? { ad_id: msg.referral.source_id || null, ctwa_clid: msg.referral.ctwa_clid || null }
+            ? {
+                ad_id: msg.referral.source_id || null,
+                ctwa_clid: msg.referral.ctwa_clid || null,
+                source_url: msg.referral.source_url || null,
+                headline: msg.referral.headline || null,
+                image_url: msg.referral.image_url || msg.referral.thumbnail_url || null
+              }
             : null;
 
           enqueueForContact(queueKey, () => processIncomingMessage(phoneNumberId, contactPhone, userMessage, msg.id, referral, profileName)).catch(err => {
@@ -229,6 +235,9 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
         flow_active: false,
         ad_id: referral?.ad_id || null,
         ctwa_clid: referral?.ctwa_clid || null,
+        ad_source_url: referral?.source_url || null,
+        ad_headline: referral?.headline || null,
+        ad_image_url: referral?.image_url || null,
         last_message: userMessage.slice(0, 100),
         last_message_at: new Date().toISOString()
       })
