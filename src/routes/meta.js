@@ -414,4 +414,74 @@ router.get('/ads', async (req, res, next) => {
   }
 });
 
+// ── POST /api/meta/campaigns/:id/status  { status: 'ACTIVE'|'PAUSED' } ──
+// ── POST /api/meta/adsets/:id/status ─────────────────────────
+// ── POST /api/meta/ads/:id/status ────────────────────────────
+// Pausar/activar — necesita que el token tenga el permiso
+// "ads_management" (no alcanza con "ads_read", que es de solo
+// lectura). Si el token no lo tiene, Meta lo rechaza con un error
+// claro que se le pasa tal cual al usuario.
+function crearRutaDeEstado(tipo) {
+  return async (req, res, next) => {
+    try {
+      const status = String(req.body?.status || '').toUpperCase();
+      if (!['ACTIVE', 'PAUSED'].includes(status)) return res.status(400).json({ error: 'status debe ser ACTIVE o PAUSED.' });
+
+      await svc.withToken(req.user.id, null, async token => {
+        await axios.post(
+          `https://graph.facebook.com/${GRAPH_VERSION}/${req.params.id}`,
+          null,
+          { params: { status, access_token: token }, timeout: 20000 }
+        );
+      });
+      res.json({ success: true, status });
+    } catch (err) {
+      console.error(`[Meta Ads] Error cambiando estado de ${tipo}:`, JSON.stringify(err.response?.data || { message: err.message }));
+      svc.sendError(res, err, `No se pudo cambiar el estado de ${tipo}.`);
+    }
+  };
+}
+router.post('/campaigns/:id/status', crearRutaDeEstado('la campaña'));
+router.post('/adsets/:id/status', crearRutaDeEstado('el conjunto de anuncios'));
+router.post('/ads/:id/status', crearRutaDeEstado('el anuncio'));
+
+// ── POST /api/meta/campaigns/:id/budget  { daily_budget: 50, currency: 'PEN' } ──
+// ── POST /api/meta/adsets/:id/budget ─────────────────────────
+// El monto que manda el frontend viene en la moneda que el usuario
+// esté viendo en pantalla — se convierte a la moneda REAL de la
+// cuenta antes de mandarlo a Meta (que siempre lo espera en la
+// moneda de la cuenta, en centavos).
+function crearRutaDePresupuesto(tipo) {
+  return async (req, res, next) => {
+    try {
+      const montoIngresado = parseFloat(req.body?.daily_budget);
+      const monedaIngresada = (req.body?.currency || 'PEN').toUpperCase();
+      if (!montoIngresado || montoIngresado <= 0) return res.status(400).json({ error: 'Ingresa un presupuesto válido, mayor a 0.' });
+
+      await svc.withToken(req.user.id, null, async (token, c) => {
+        let monedaCuenta = 'PEN';
+        if (c.profileId) {
+          const cuentas = await svc.listAllAccounts(req.user.id);
+          const match = cuentas.find(a => a.profile_id === c.profileId);
+          if (match) monedaCuenta = match.currency || 'PEN';
+        }
+        const montoEnMonedaDeLaCuenta = await convertirMoneda(montoIngresado, monedaIngresada, monedaCuenta);
+        const centavos = Math.round(montoEnMonedaDeLaCuenta * 100);
+
+        await axios.post(
+          `https://graph.facebook.com/${GRAPH_VERSION}/${req.params.id}`,
+          null,
+          { params: { daily_budget: centavos, access_token: token }, timeout: 20000 }
+        );
+      });
+      res.json({ success: true });
+    } catch (err) {
+      console.error(`[Meta Ads] Error cambiando presupuesto de ${tipo}:`, JSON.stringify(err.response?.data || { message: err.message }));
+      svc.sendError(res, err, `No se pudo actualizar el presupuesto de ${tipo}. Si la campaña usa presupuesto a nivel de CBO (Campaign Budget Optimization) o tiene reglas automáticas activas, Meta puede rechazar el cambio.`);
+    }
+  };
+}
+router.post('/campaigns/:id/budget', crearRutaDePresupuesto('la campaña'));
+router.post('/adsets/:id/budget', crearRutaDePresupuesto('el conjunto de anuncios'));
+
 module.exports = router;
