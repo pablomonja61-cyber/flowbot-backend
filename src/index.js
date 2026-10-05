@@ -92,6 +92,9 @@ app.use('/api/team', teamRoutes);
 app.use('/api/team-public', teamPublicRoutes);
 app.use('/api/broadcasts', require('./routes/broadcasts'));
 app.use('/api/global-blacklist', require('./routes/globalBlacklist'));
+const connectionHealth = require('./routes/connectionHealth');
+app.use('/api/connection-health', connectionHealth);
+connectionHealth.startMonitor();
 app.use('/api/meta-profiles', require('./routes/metaProfiles'));
 // ── Error handler global ────────────────────────────────────
 app.use((err, req, res, next) => {

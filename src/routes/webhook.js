@@ -6,6 +6,7 @@ const {
   checkOtherFlowTrigger, continueFlowFromButton, processIncomingImageCloud, processIncomingMediaCloud, respondWithAI, cancelFollowups, showTypingCloud
 } = require('../services/flowEngine');
 const { estaBloqueado: estaEnListaNegra } = require('./globalBlacklist');
+const { manejarAlertaDeMeta } = require('../services/connectionStatus');
 const { v4: uuidv4 } = require('uuid');
 
 // Crea (o actualiza el nombre de) el contacto en el CRM cada vez que
@@ -67,6 +68,12 @@ router.post('/whatsapp', async (req, res) => {
 
     for (const entry of body.entry || []) {
       for (const change of entry.changes || []) {
+        // Avisos de Meta sobre la cuenta/número (bloqueo, restricción, calidad):
+        // se atienden al instante para marcar el número en rojo en AriaBot.
+        if (change.field === 'account_update' || change.field === 'phone_number_quality_update') {
+          manejarAlertaDeMeta(entry.id, change).catch(e => console.error('[Webhook] Error atendiendo aviso de Meta:', e.message));
+          continue;
+        }
         if (change.field !== 'messages') continue;
 
         const value = change.value;

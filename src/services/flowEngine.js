@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const supabase = require('../models/supabase');
 const { v4: uuidv4 } = require('uuid');
 
+const { avisarSiNumeroBloqueado } = require('./connectionStatus');
 const GRAPH_VERSION = 'v26.0';
 
 // ── Detectar automáticamente si un mensaje del bot está pidiendo el
@@ -109,6 +110,7 @@ async function sendWhatsAppMessage(phoneNumberId, accessToken, to, message, conv
     if (conversationId) await saveMessage(conversationId, message, 'outbound', 'text');
     console.log(`[CloudAPI] ✓ Texto enviado`);
   } catch (err) {
+    avisarSiNumeroBloqueado(phoneNumberId, err);
     console.error('[WhatsApp send error]', err.response?.data || err.message);
   }
 }
@@ -153,6 +155,7 @@ async function sendWhatsAppButtons(phoneNumberId, accessToken, to, bodyText, but
     }
     console.log(`[CloudAPI] ✓ Botones enviados${header ? ` (header: ${header.type})` : ''}`);
   } catch (err) {
+    avisarSiNumeroBloqueado(phoneNumberId, err);
     console.error('[WhatsApp buttons error]', err.response?.data || err.message);
     const text = bodyText + '\n\n' + buttons.map((b, i) => `${i + 1}. ${b}`).join('\n');
     await sendWhatsAppMessage(phoneNumberId, accessToken, to, text, conversationId);
@@ -170,6 +173,7 @@ async function sendWhatsAppImage(phoneNumberId, accessToken, to, url, caption, c
     if (conversationId) await saveMessage(conversationId, caption || '[Imagen]', 'outbound', 'image', url);
     console.log(`[CloudAPI] ✓ Imagen enviada`);
   } catch (err) {
+    avisarSiNumeroBloqueado(phoneNumberId, err);
     console.error('[WhatsApp image error]', err.response?.data || err.message);
     if (caption) await sendWhatsAppMessage(phoneNumberId, accessToken, to, caption, conversationId);
   }
@@ -186,6 +190,7 @@ async function sendWhatsAppVideo(phoneNumberId, accessToken, to, url, caption, c
     if (conversationId) await saveMessage(conversationId, caption || '[Video]', 'outbound', 'video', url);
     console.log(`[CloudAPI] ✓ Video enviado`);
   } catch (err) {
+    avisarSiNumeroBloqueado(phoneNumberId, err);
     console.error('[WhatsApp video error]', err.response?.data || err.message);
   }
 }
@@ -201,6 +206,7 @@ async function sendWhatsAppAudio(phoneNumberId, accessToken, to, url, conversati
     if (conversationId) await saveMessage(conversationId, '[Audio]', 'outbound', 'audio', url);
     console.log(`[CloudAPI] ✓ Audio enviado`);
   } catch (err) {
+    avisarSiNumeroBloqueado(phoneNumberId, err);
     console.error('[WhatsApp audio error]', err.response?.data || err.message);
   }
 }
@@ -217,6 +223,7 @@ async function sendWhatsAppDocument(phoneNumberId, accessToken, to, url, fileNam
     if (conversationId) await saveMessage(conversationId, `[Documento: ${nombre}]`, 'outbound', 'document', url);
     console.log(`[CloudAPI] ✓ Documento enviado: ${nombre}`);
   } catch (err) {
+    avisarSiNumeroBloqueado(phoneNumberId, err);
     console.error('[WhatsApp document error]', err.response?.data || err.message);
   }
 }
