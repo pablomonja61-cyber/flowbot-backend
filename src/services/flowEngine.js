@@ -99,33 +99,57 @@ function destinatarioFields(to) {
     : { to };
 }
 
-// ── Variables globales (Configuraciones → Variables globales) ──
-// Reemplaza {{g_nombre}} por el valor guardado por el usuario.
+// ── Variables en mensajes ──────────────────────────────────────
+// {{g_nombre}}   → Variables globales (Configuraciones)
+// {{c_campo}}    → Campos personalizados del contacto
+// Variables del sistema: {{full_name}} {{first_name}} {{phone_number}}
+// {{hora}} {{data}} {{dia}} {{ctwa_clid}} {{source_id}} {{source_url}}
+// {{media_url}} {{thumbnail_url}}
 const _cacheVarsGlobales = new Map();   // userId -> { t, vars }
-const _cacheUsuarioConv = new Map();    // conversationId -> userId
+const _DIAS_ES = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+const _slugCampo = n => String(n || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+function _variablesDeTiempo() {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: 'America/Lima', hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit', hour12: false }).formatToParts(new Date()).map(x => [x.type, x.value]));
+  const dow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Lima' })).getDay();
+  return { hora: `${p.hour}:${p.minute}`, data: `${p.day}/${p.month}`, dia: _DIAS_ES[dow] };
+}
 async function aplicarVariablesGlobales(conversationId, texto) {
   try {
-    if (typeof texto !== 'string' || !texto.includes('g_') || !conversationId) return texto;
-    if (!/\{\{?\s*g_[a-z_][a-z0-9_]*\s*\}?\}/i.test(texto)) return texto;
-    let userId = _cacheUsuarioConv.get(conversationId);
-    if (!userId) {
-      const { data } = await supabase.from('conversations').select('user_id').eq('id', conversationId).maybeSingle();
-      userId = data?.user_id;
-      if (!userId) return texto;
-      if (_cacheUsuarioConv.size > 5000) _cacheUsuarioConv.clear();
-      _cacheUsuarioConv.set(conversationId, userId);
-    }
-    let entry = _cacheVarsGlobales.get(userId);
+    if (typeof texto !== 'string' || !conversationId || !texto.includes('{')) return texto;
+    if (!/\{\{?\s*[a-zA-Z_][\w.]*\s*\}?\}/.test(texto)) return texto;
+    const { data: conv } = await supabase.from('conversations')
+      .select('user_id, contact_name, contact_phone, ctwa_clid, ad_id, ad_source_url, ad_image_url').eq('id', conversationId).maybeSingle();
+    if (!conv?.user_id) return texto;
+    const vars = { ..._variablesDeTiempo() };
+    const nombre = (conv.contact_name || '').trim();
+    const telefono = /^[A-Z]{2}\./.test(conv.contact_phone || '') ? '' : (conv.contact_phone || '');
+    Object.assign(vars, {
+      usernumber: telefono, full_name: nombre, first_name: nombre.split(/\s+/)[0] || '', phone_number: telefono,
+      ctwa_clid: conv.ctwa_clid || '', source_id: conv.ad_id || '', source_url: conv.ad_source_url || '',
+      media_url: conv.ad_image_url || '', thumbnail_url: conv.ad_image_url || ''
+    });
+    // Variables globales del usuario (caché 60 s)
+    let entry = _cacheVarsGlobales.get(conv.user_id);
     if (!entry || Date.now() - entry.t > 60000) {
-      const { data } = await supabase.from('user_settings').select('data').eq('user_id', userId).maybeSingle();
+      const { data } = await supabase.from('user_settings').select('data').eq('user_id', conv.user_id).maybeSingle();
+      const g = {};
       const lista = data?.data?.settingsData?.variables;
-      const vars = {};
-      if (Array.isArray(lista)) for (const v of lista) if (v && typeof v.name === 'string') vars[v.name.toLowerCase()] = v.value;
-      entry = { t: Date.now(), vars };
-      _cacheVarsGlobales.set(userId, entry);
+      if (Array.isArray(lista)) for (const v of lista) if (v && typeof v.name === 'string') g[v.name.toLowerCase()] = v.value;
+      entry = { t: Date.now(), vars: g };
+      if (_cacheVarsGlobales.size > 2000) _cacheVarsGlobales.clear();
+      _cacheVarsGlobales.set(conv.user_id, entry);
     }
-    return texto.replace(/\{\{\s*(g_[a-z_][a-z0-9_]*)\s*\}\}|\{(g_[a-z_][a-z0-9_]*)\}/gi, (m, a, b) => {
-      const val = entry.vars[(a || b).toLowerCase()];
+    Object.assign(vars, entry.vars);
+    // Campos personalizados del contacto: {{c_ciudad}}
+    if (/\{\{?\s*c_/i.test(texto) && conv.contact_phone) {
+      const solo = String(conv.contact_phone).replace(/\D/g, '');
+      const { data: contactos } = await supabase.from('contacts').select('phone, custom_fields').eq('user_id', conv.user_id).in('phone', [conv.contact_phone, '+' + solo, solo]).limit(1);
+      const campos = contactos?.[0]?.custom_fields;
+      if (Array.isArray(campos)) for (const c of campos) if (c?.name) vars['c_' + _slugCampo(c.name)] = c.value ?? '';
+    }
+    return texto.replace(/\{\{\s*([a-zA-Z_][\w.]*)\s*\}\}|\{(g_[a-z_][a-z0-9_]*)\}/gi, (m, a, b) => {
+      const key = (a || b).toLowerCase();
+      const val = Object.hasOwn(vars, key) ? vars[key] : undefined;
       return val === undefined || val === null ? m : String(val);
     });
   } catch (e) { return texto; }
