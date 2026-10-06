@@ -99,7 +99,40 @@ function destinatarioFields(to) {
     : { to };
 }
 
+// ── Variables globales (Configuraciones → Variables globales) ──
+// Reemplaza {{g_nombre}} por el valor guardado por el usuario.
+const _cacheVarsGlobales = new Map();   // userId -> { t, vars }
+const _cacheUsuarioConv = new Map();    // conversationId -> userId
+async function aplicarVariablesGlobales(conversationId, texto) {
+  try {
+    if (typeof texto !== 'string' || !texto.includes('g_') || !conversationId) return texto;
+    if (!/\{\{?\s*g_[a-z_][a-z0-9_]*\s*\}?\}/i.test(texto)) return texto;
+    let userId = _cacheUsuarioConv.get(conversationId);
+    if (!userId) {
+      const { data } = await supabase.from('conversations').select('user_id').eq('id', conversationId).maybeSingle();
+      userId = data?.user_id;
+      if (!userId) return texto;
+      if (_cacheUsuarioConv.size > 5000) _cacheUsuarioConv.clear();
+      _cacheUsuarioConv.set(conversationId, userId);
+    }
+    let entry = _cacheVarsGlobales.get(userId);
+    if (!entry || Date.now() - entry.t > 60000) {
+      const { data } = await supabase.from('user_settings').select('data').eq('user_id', userId).maybeSingle();
+      const lista = data?.data?.settingsData?.variables;
+      const vars = {};
+      if (Array.isArray(lista)) for (const v of lista) if (v && typeof v.name === 'string') vars[v.name.toLowerCase()] = v.value;
+      entry = { t: Date.now(), vars };
+      _cacheVarsGlobales.set(userId, entry);
+    }
+    return texto.replace(/\{\{\s*(g_[a-z_][a-z0-9_]*)\s*\}\}|\{(g_[a-z_][a-z0-9_]*)\}/gi, (m, a, b) => {
+      const val = entry.vars[(a || b).toLowerCase()];
+      return val === undefined || val === null ? m : String(val);
+    });
+  } catch (e) { return texto; }
+}
+
 async function sendWhatsAppMessage(phoneNumberId, accessToken, to, message, conversationId) {
+  message = await aplicarVariablesGlobales(conversationId, message);
   if (!message || !message.trim()) return;
   try {
     await axios.post(
@@ -116,6 +149,9 @@ async function sendWhatsAppMessage(phoneNumberId, accessToken, to, message, conv
 }
 
 async function sendWhatsAppButtons(phoneNumberId, accessToken, to, bodyText, buttons, conversationId, header = null, footerText = null) {
+  bodyText = await aplicarVariablesGlobales(conversationId, bodyText);
+  if (footerText) footerText = await aplicarVariablesGlobales(conversationId, footerText);
+  if (header?.type === 'text' && header.text) header = { ...header, text: await aplicarVariablesGlobales(conversationId, header.text) };
   try {
     const interactive = {
       type: 'button',
@@ -163,6 +199,7 @@ async function sendWhatsAppButtons(phoneNumberId, accessToken, to, bodyText, but
 }
 
 async function sendWhatsAppImage(phoneNumberId, accessToken, to, url, caption, conversationId) {
+  caption = await aplicarVariablesGlobales(conversationId, caption);
   if (!url || url.startsWith('data:')) return;
   try {
     await axios.post(
@@ -180,6 +217,7 @@ async function sendWhatsAppImage(phoneNumberId, accessToken, to, url, caption, c
 }
 
 async function sendWhatsAppVideo(phoneNumberId, accessToken, to, url, caption, conversationId) {
+  caption = await aplicarVariablesGlobales(conversationId, caption);
   if (!url || url.startsWith('data:')) return;
   try {
     await axios.post(

@@ -57,19 +57,24 @@ router.use(auth);
 // ── GET /api/conversations ────────────────────────────────────
 router.get('/', async (req, res, next) => {
   try {
-    const { page = 1, limit = 30, is_sale } = req.query;
-    const offset = (page - 1) * limit;
+    const { page = 1, is_sale, search } = req.query;
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 200);
+    const offset = req.query.offset !== undefined && Number.isFinite(Number(req.query.offset)) ? Math.max(Number(req.query.offset), 0) : (page - 1) * limit;
     let query = supabase
       .from('conversations')
       .select(`
         id, contact_phone, contact_name, last_message,
-        last_message_at, unread_count, status, connection_id, tag, profile_pic_url, flow_active, last_message_direction, bot_ever_responded, ever_replied,
+        last_message_at, unread_count, status, connection_id, tag, manual_tags, profile_pic_url, flow_active, last_message_direction, bot_ever_responded, ever_replied,
         is_sale, sale_amount, sale_method, sale_at, operation_code, meta_event_status, sale_closed_by,
         current_flow_id, ad_id, ad_name, campaign_name, ctwa_clid, ad_source_url, ad_headline, ad_image_url,
         connections(name)
       `, { count: 'exact' })
       .eq('user_id', req.user.id);
     if (is_sale !== undefined) query = query.eq('is_sale', is_sale === 'true');
+    if (typeof search === 'string' && search.trim()) {
+      const termino = search.trim().slice(0, 60).replace(/[,()%*\\]/g, ' ').trim();
+      if (termino) query = query.or(`contact_phone.ilike.%${termino}%,contact_name.ilike.%${termino}%`);
+    }
     const { data, error, count } = await query
       .order('last_message_at', { ascending: false })
       .range(offset, offset + limit - 1);
@@ -971,6 +976,98 @@ router.get('/dashboard/ranking-tiendas', async (req, res, next) => {
     tiendas.sort((a, b) => b.facturacion - a.facturacion);
 
     res.json({ currency: monedaSolicitada, tiendas });
+  } catch (err) { next(err); }
+});
+
+// ── POST /api/conversations/:id/send-purchase-event ────────────
+// Reenvía el evento Purchase a Meta para una venta ya registrada
+// (botón "Enviar compra a Meta" del Chat en Vivo).
+router.post('/:id/send-purchase-event', async (req, res, next) => {
+  try {
+    const { data: conv, error } = await supabase
+      .from('conversations').select('*')
+      .eq('id', req.params.id).eq('user_id', req.user.id).maybeSingle();
+    if (error) throw error;
+    if (!conv) return res.status(404).json({ error: 'Conversación no encontrada.' });
+    if (!conv.is_sale) return res.status(400).json({ error: 'Esta conversación todavía no tiene una venta registrada.' });
+    await sendPurchaseEventToMeta(req.user.id, conv, conv.sale_amount || 0);
+    const { data: despues } = await supabase.from('conversations').select('meta_event_status').eq('id', conv.id).maybeSingle();
+    res.json({ success: true, meta_event_status: despues?.meta_event_status || null });
+  } catch (err) { next(err); }
+});
+
+// ── POST /api/conversations/:id/messages/audio ──────────────────
+// Audio grabado en el navegador → se sube a Meta y se envía (API Oficial).
+let multer = null;
+try { multer = require('multer'); } catch (e) { console.warn('[Audio] multer no está instalado: npm i multer'); }
+const audioUpload = multer
+  ? multer({ storage: multer.memoryStorage(), limits: { fileSize: 16 * 1024 * 1024 } })
+  : { single: () => (req, res) => res.status(501).json({ error: 'Falta instalar multer en el servidor (npm i multer).' }) };
+router.post('/:id/messages/audio', audioUpload.single('audio'), async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No se recibió ningún archivo de audio.' });
+    const { data: conv, error: convError } = await supabase
+      .from('conversations').select('*, connections(*)')
+      .eq('id', req.params.id).eq('user_id', req.user.id).maybeSingle();
+    if (convError) throw convError;
+    if (!conv) return res.status(404).json({ error: 'Conversación no encontrada.' });
+    const { phone_number_id, access_token } = conv.connections || {};
+    if (!phone_number_id || !access_token) return res.status(400).json({ error: 'El envío de audio por ahora solo está disponible para conexiones de API Oficial.' });
+
+    const form = new FormData();
+    form.append('file', new Blob([req.file.buffer], { type: req.file.mimetype }), req.file.originalname || 'audio.ogg');
+    form.append('messaging_product', 'whatsapp');
+    const uploadRes = await fetch(`https://graph.facebook.com/v26.0/${phone_number_id}/media`, { method: 'POST', headers: { Authorization: `Bearer ${access_token}` }, body: form });
+    const uploadData = await uploadRes.json();
+    if (!uploadRes.ok) return res.status(502).json({ error: 'No se pudo subir el audio a Meta: ' + (uploadData.error?.message || 'error desconocido') });
+
+    const esBsuid = /^[A-Z]{2}\.\w+/.test(String(conv.contact_phone || ''));
+    const destino = esBsuid ? { recipient: conv.contact_phone, recipient_type: 'individual' } : { to: conv.contact_phone };
+    const sendRes = await fetch(`https://graph.facebook.com/v26.0/${phone_number_id}/messages`, {
+      method: 'POST', headers: { Authorization: `Bearer ${access_token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messaging_product: 'whatsapp', ...destino, type: 'audio', audio: { id: uploadData.id } })
+    });
+    const sendData = await sendRes.json();
+    if (!sendRes.ok) return res.status(502).json({ error: 'No se pudo enviar el audio: ' + (sendData.error?.message || 'error desconocido') });
+
+    const { data: msg, error: insertError } = await supabase.from('messages')
+      .insert({ conversation_id: req.params.id, content: '[Audio]', direction: 'outbound', msg_type: 'audio', created_at: new Date().toISOString() })
+      .select().single();
+    if (insertError) console.error('[Audio] No se pudo guardar el mensaje:', insertError.message);
+    await supabase.from('conversations').update({ last_message: '[Audio]', last_message_at: new Date().toISOString(), last_message_direction: 'outbound', bot_ever_responded: true }).eq('id', req.params.id);
+    res.status(201).json(msg || { success: true });
+  } catch (err) { next(err); }
+});
+
+// ── PUT /api/conversations/:id/tags (etiquetas manuales del chat) ──
+router.put('/:id/tags', async (req, res, next) => {
+  try {
+    const tags = req.body?.tags;
+    if (!Array.isArray(tags) || tags.length > 20 || tags.some(t => typeof t !== 'string' || !t.trim() || t.length > 40)) return res.status(400).json({ error: 'Revisa las etiquetas (máximo 20, hasta 40 caracteres).' });
+    const limpias = [...new Map(tags.map(t => [t.trim().toLowerCase(), t.trim()])).values()];
+    const { data, error } = await supabase.from('conversations').update({ manual_tags: limpias })
+      .eq('id', req.params.id).eq('user_id', req.user.id).select('id, manual_tags').maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Conversación no encontrada.' });
+    res.json({ data });
+  } catch (err) { next(err); }
+});
+
+// ── GET /api/conversations/:id (detalle) ───────────────────────
+// Va al final y solo acepta UUID para no chocar con /rewards, /stats, etc.
+router.get('/:id', async (req, res, next) => {
+  try {
+    if (!/^[0-9a-fA-F-]{36}$/.test(req.params.id)) return next();
+    const { data, error } = await supabase.from('conversations')
+      .select(`id, contact_phone, contact_name, last_message, last_message_at, unread_count, status, connection_id, tag, manual_tags, profile_pic_url, flow_active, last_message_direction, bot_ever_responded, ever_replied,
+        is_sale, sale_amount, sale_method, sale_at, operation_code, meta_event_status, sale_closed_by, suggested_sale_amount, suggested_operation_code,
+        current_flow_id, ad_id, ad_name, campaign_name, ctwa_clid, ad_source_url, ad_headline, ad_image_url, connections(name)`)
+      .eq('id', req.params.id).eq('user_id', req.user.id).maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Conversación no encontrada.' });
+    const { data: origenes } = await supabase.from('trigger_executions').select('conversation_id, triggers(flows(name))').eq('conversation_id', data.id).limit(1);
+    data.flow_name = origenes?.[0]?.triggers?.flows?.name || null;
+    res.json({ data });
   } catch (err) { next(err); }
 });
 

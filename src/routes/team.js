@@ -35,14 +35,22 @@ router.get('/', async (req, res, next) => {
       .order('created_at', { ascending: true });
     if (error) throw error;
 
-    const { data: invitaciones } = await supabase
+    const { data: todas } = await supabase
       .from('team_invitations')
       .select('id, email, role, accepted, expires_at, created_at')
       .eq('owner_id', req.user.id)
-      .eq('accepted', false)
-      .gte('expires_at', new Date().toISOString());
+      .order('created_at', { ascending: false })
+      .limit(500);
+    const ahora = Date.now();
+    const nombreDueno = (data || []).find(m => m.id === req.user.id)?.name || '';
+    const invitaciones = (todas || []).map(i => ({
+      ...i,
+      status: i.accepted ? 'accepted' : (new Date(i.expires_at).getTime() < ahora ? 'expired' : 'pending'),
+      inviter_name: nombreDueno
+    }));
+    const pendientes = invitaciones.filter(i => i.status === 'pending');
 
-    res.json({ miembros: data || [], invitaciones_pendientes: invitaciones || [] });
+    res.json({ miembros: (data || []).map(m => m.id === req.user.id ? { ...m, team_role: 'owner' } : m), invitaciones_pendientes: pendientes, invitaciones });
   } catch (err) { next(err); }
 });
 
