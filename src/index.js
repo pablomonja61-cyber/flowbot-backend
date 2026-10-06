@@ -32,6 +32,11 @@ const PORT = process.env.PORT || 3000;
 // ── Seguridad y utilidades ──────────────────────────────────
 app.use(helmet());
 app.use(morgan('combined'));
+// OAuth del MCP: va antes de cors() porque tiene su propio CORS abierto
+// (los clientes de IA no son un origen conocido).
+const { wellKnown: mcpWellKnown, oauthRouter: mcpOauthRouter } = require('./routes/mcpOauth');
+app.use(mcpWellKnown);
+app.use('/oauth', mcpOauthRouter);
 app.use(cors({
   origin: [
     process.env.FRONTEND_URL,

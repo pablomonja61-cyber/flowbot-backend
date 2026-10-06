@@ -14,6 +14,8 @@ const express = require('express');
 const router = express.Router();
 const supabase = require('../models/supabase');
 const crypto = require('crypto');
+let oauth = null;
+try { oauth = require('./mcpOauth'); } catch (e) { console.warn('[MCP] OAuth no disponible:', e.message); }
 
 let McpServer, StreamableHTTPServerTransport, z;
 try {
@@ -28,11 +30,25 @@ function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
-// ── Autenticación por Token de API (Bearer) ─────────────────────
+// ── Autenticación: Token estático (Bearer) u OAuth ──────────────
+// Si falta el token o no sirve, se responde 401 con la ruta de metadatos
+// OAuth para que Claude/ChatGPT inicien el login automáticamente.
+function noAutorizado(res, mensaje) {
+  const base = (process.env.MCP_PUBLIC_URL || 'https://mcp.ariabot.app').replace(/\/+$/, '');
+  res.set('WWW-Authenticate', `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource"`);
+  return res.status(401).json({ error: mensaje });
+}
 async function authByToken(req, res, next) {
   const authHeader = req.headers.authorization || '';
-  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
-  if (!token) return res.status(401).json({ error: 'Falta el token de acceso.' });
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
+  if (!token) return noAutorizado(res, 'Falta el token de acceso.');
+
+  if (token.startsWith('ariaat_')) {
+    const r = oauth ? await oauth.userIdDesdeAccessToken(token) : null;
+    if (!r) return noAutorizado(res, 'Token OAuth inválido o vencido.');
+    req.mcpUserId = r.userId;
+    return next();
+  }
 
   const { data, error } = await supabase
     .from('api_tokens')
@@ -40,7 +56,7 @@ async function authByToken(req, res, next) {
     .eq('token_hash', hashToken(token))
     .maybeSingle();
 
-  if (error || !data || data.revoked) return res.status(401).json({ error: 'Token inválido o revocado.' });
+  if (error || !data || data.revoked) return noAutorizado(res, 'Token inválido o revocado.');
 
   supabase.from('api_tokens').update({ last_used_at: new Date().toISOString() }).eq('id', data.id).then(() => {});
   req.mcpUserId = data.user_id;
@@ -139,5 +155,10 @@ router.post('/', authByToken, async (req, res) => {
     if (!res.headersSent) res.status(500).json({ error: 'Error interno del servidor MCP.' });
   }
 });
+
+// Servidor sin sesión: no hay flujo GET/DELETE.
+const noPermitido = (req, res) => res.status(405).set('Allow', 'POST').json({ jsonrpc: '2.0', error: { code: -32000, message: 'Método no permitido.' }, id: null });
+router.get('/', noPermitido);
+router.delete('/', noPermitido);
 
 module.exports = router;
