@@ -155,6 +155,15 @@ async function aplicarVariablesGlobales(conversationId, texto) {
   } catch (e) { return texto; }
 }
 
+// Estado de pago que alimenta la pantalla Ventas (pendiente / requiere acción / rechazado).
+async function marcarEstadoPago(conversationId, status, reason) {
+  try {
+    await supabase.from('conversations').update({
+      payment_status: status, payment_reason: reason || null, payment_status_at: new Date().toISOString()
+    }).eq('id', conversationId).or('is_sale.is.null,is_sale.eq.false');
+  } catch (e) { console.error('[Pago] No se pudo guardar el estado de pago:', e.message); }
+}
+
 async function sendWhatsAppMessage(phoneNumberId, accessToken, to, message, conversationId) {
   message = await aplicarVariablesGlobales(conversationId, message);
   if (!message || !message.trim()) return;
@@ -1187,6 +1196,7 @@ async function processIncomingImageCloud(connection, contactPhone, mediaId, conv
 
   if (usoAnterior) {
     console.log(`[CloudAPI Payment] ⚠️ Comprobante duplicado detectado (hash ya usado antes) — no se da acceso`);
+    await marcarEstadoPago(conversation.id, 'rejected', 'Comprobante duplicado: esta captura ya se usó antes');
     await sendWhatsAppMessage(phoneNumberId, accessToken, to, 'Este comprobante ya fue utilizado anteriormente. Por favor, envía la captura del pago correspondiente a esta compra. 🙏', conversation.id);
     return;
   }
@@ -1234,6 +1244,7 @@ Responde SOLO en formato JSON exacto:
   }
 
   if (!analysisResult || !analysisResult.es_comprobante) {
+    if (conversation.pending_payment_method) await marcarEstadoPago(conversation.id, 'pending', 'No se pudo leer el comprobante; se pidió otra captura');
     await sendWhatsAppMessage(phoneNumberId, accessToken, to, msgNoValido, conversation.id);
     return;
   }
@@ -1309,6 +1320,7 @@ Responde SOLO en formato JSON exacto:
         suggested_sale_amount: monto || null,
         suggested_operation_code: analysisResult.numero_operacion || null
       }).eq('id', conversation.id);
+      await marcarEstadoPago(conversation.id, reusado ? 'rejected' : 'review', fallas.join('; ').slice(0, 500));
       if (paidPathInfo.node?.data?.respondIfNoMatch !== false) {
         const contexto = `El cliente envió un comprobante de pago, pero la validación falló por: ${fallas.join('; ')}. Explícale amablemente por qué no se pudo validar y qué debe hacer.`;
         await respondWithAI(userId, connection, to, contexto, conversation.id, paidPathInfo.node?.data?.ai_config_id, paidPathInfo.node?.data?.context);
@@ -1342,7 +1354,8 @@ Responde SOLO en formato JSON exacto:
       current_node_id: null, current_flow_id: null,
       sale_method: conversation.pending_payment_method || null,
       operation_code: analysisResult.numero_operacion || null,
-      sale_closed_by: 'ia'
+      sale_closed_by: 'ia',
+      payment_status: 'approved', payment_reason: null, payment_status_at: new Date().toISOString()
     }).eq('id', conversation.id);
 
     sendPurchaseEventToMeta(userId, conversation, monto).catch(() => {});
@@ -1365,6 +1378,7 @@ Responde SOLO en formato JSON exacto:
   if (titularEsperadoLegado) {
     const titularDetectado = (analysisResult.titular_destino || '').toLowerCase().trim();
     if (titularDetectado && !titularDetectado.includes(titularEsperadoLegado) && !titularEsperadoLegado.includes(titularDetectado)) {
+      await marcarEstadoPago(conversation.id, 'rejected', 'El comprobante está dirigido a otro titular');
       await sendWhatsAppMessage(phoneNumberId, accessToken, to, 'Disculpa, el comprobante no está dirigido a nuestra cuenta. Por favor verifica el destinatario e intenta de nuevo.', conversation.id);
       return;
     }
@@ -1381,7 +1395,8 @@ Responde SOLO en formato JSON exacto:
     is_sale: true, sale_amount: monto, sale_at: new Date().toISOString(), flow_active: false,
     sale_method: conversation.pending_payment_method || null,
     operation_code: analysisResult.numero_operacion || null,
-    sale_closed_by: 'ia'
+    sale_closed_by: 'ia',
+    payment_status: 'approved', payment_reason: null, payment_status_at: new Date().toISOString()
   }).eq('id', conversation.id);
   sendPurchaseEventToMeta(userId, conversation, monto).catch(() => {});
   try { await cancelFollowups(conversation.id); } catch (e) { console.error('[CloudAPI Payment] Error cancelando seguimientos:', e.message); }
@@ -1531,6 +1546,7 @@ async function continueFlowFromButton(flowId, pausedNodeId, userResponse, connec
           if (directEdge) {
             console.log(`[Flow] Salto directo: botón "${buttons[matchedIndex]}" → camino "${paths[pathIndex].label}" (sin pasar por la IA)`);
             await supabase.from('conversations').update({ current_node_id: null, current_flow_id: null, pending_payment_method: paths[pathIndex].label || null }).eq('id', conversationId);
+            await marcarEstadoPago(conversationId, 'pending', 'Esperando comprobante (' + (paths[pathIndex].label || 'método de pago') + ')');
             try { await cancelFollowups(conversationId); } catch (e) { console.error('[Flow] Error cancelando seguimientos:', e.message); }
             await executeFlow(flowId, contactPhone, userResponse, connection, conversationId, directEdge.target);
             return true;

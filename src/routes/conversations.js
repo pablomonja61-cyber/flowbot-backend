@@ -57,7 +57,7 @@ router.use(auth);
 // ── GET /api/conversations ────────────────────────────────────
 router.get('/', async (req, res, next) => {
   try {
-    const { page = 1, is_sale, search } = req.query;
+    const { page = 1, is_sale, search, payments } = req.query;
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 200);
     const offset = req.query.offset !== undefined && Number.isFinite(Number(req.query.offset)) ? Math.max(Number(req.query.offset), 0) : (page - 1) * limit;
     let query = supabase
@@ -66,11 +66,18 @@ router.get('/', async (req, res, next) => {
         id, contact_phone, contact_name, last_message,
         last_message_at, unread_count, status, connection_id, tag, manual_tags, profile_pic_url, flow_active, last_message_direction, bot_ever_responded, ever_replied,
         is_sale, sale_amount, sale_method, sale_at, operation_code, meta_event_status, sale_closed_by,
+        payment_status, payment_reason, payment_status_at, payment_resolved_from, suggested_sale_amount, suggested_operation_code, pending_payment_method,
         current_flow_id, ad_id, ad_name, campaign_name, ctwa_clid, ad_source_url, ad_headline, ad_image_url,
         connections(name)
       `, { count: 'exact' })
       .eq('user_id', req.user.id);
     if (is_sale !== undefined) query = query.eq('is_sale', is_sale === 'true');
+    if (payments === 'true') {
+      // Pantalla Ventas: ventas confirmadas + pagos que requieren seguimiento.
+      // Los "pendientes" muy viejos se omiten para no llenar la lista.
+      const hace14 = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+      query = query.or(`is_sale.eq.true,payment_status.in.(review,rejected,resolved),and(payment_status.eq.pending,payment_status_at.gte.${hace14})`);
+    }
     if (typeof search === 'string' && search.trim()) {
       const termino = search.trim().slice(0, 60).replace(/[,()%*\\]/g, ' ').trim();
       if (termino) query = query.or(`contact_phone.ilike.%${termino}%,contact_name.ilike.%${termino}%`);
@@ -92,6 +99,15 @@ router.get('/', async (req, res, next) => {
       const nombrePorConversacion = {};
       (origenes || []).forEach(o => { nombrePorConversacion[o.conversation_id] = o.triggers?.flows?.name; });
       data.forEach(c => { c.flow_name = nombrePorConversacion[c.id] || null; });
+    }
+    if (payments === 'true') {
+      (data || []).forEach(c => {
+        if (!c.payment_status && c.is_sale) c.payment_status = 'approved';
+        c.payment_amount = c.sale_amount ?? c.suggested_sale_amount ?? null;
+        c.payment_method = c.sale_method || c.pending_payment_method || null;
+        c.payment_date = c.sale_at || c.payment_status_at || c.last_message_at || null;
+        c.payment_operation_code = c.operation_code || c.suggested_operation_code || null;
+      });
     }
 
     res.json({ data, total: count, page: +page, limit: +limit });
@@ -620,6 +636,63 @@ router.patch('/:id/sale', async (req, res, next) => {
 // Cuando está apagado (flow_active = false), el bot se queda en
 // silencio y el negocio responde manualmente. Ya funciona así en
 // el backend (QR y API) — esta ruta solo expone el interruptor.
+// ── PATCH /api/conversations/:id/payment-status ─────────────────
+// Acciones de la pantalla Ventas: aprobar, rechazar (fraude), marcar
+// como resuelto o devolver a revisión. Todo queda guardado de verdad.
+router.patch('/:id/payment-status', async (req, res, next) => {
+  try {
+    const estados = ['pending', 'review', 'rejected', 'approved', 'resolved'];
+    const { status, reason, amount, method, operation_code } = req.body || {};
+    if (!estados.includes(status)) return res.status(400).json({ error: 'Estado de pago no válido.' });
+
+    const { data: conv, error: e1 } = await supabase.from('conversations').select('*')
+      .eq('id', req.params.id).eq('user_id', req.user.id).maybeSingle();
+    if (e1) throw e1;
+    if (!conv) return res.status(404).json({ error: 'Conversación no encontrada.' });
+
+    const anterior = conv.payment_status || (conv.is_sale ? 'approved' : null);
+    const ahora = new Date().toISOString();
+    const updates = { payment_status: status, payment_status_at: ahora, payment_resolved_from: anterior };
+    if (typeof reason === 'string') updates.payment_reason = reason.slice(0, 500) || null;
+    let nuevaVenta = false;
+
+    if (status === 'approved') {
+      const monto = Number(amount ?? conv.sale_amount ?? conv.suggested_sale_amount);
+      if (!Number.isFinite(monto) || monto <= 0) return res.status(400).json({ error: 'Indica el monto del pago para aprobarlo.' });
+      nuevaVenta = !conv.is_sale;
+      Object.assign(updates, {
+        is_sale: true, sale_amount: monto, sale_at: conv.sale_at || ahora, payment_reason: null,
+        sale_method: (method ?? conv.sale_method ?? conv.pending_payment_method) || null,
+        operation_code: (operation_code ?? conv.operation_code ?? conv.suggested_operation_code) || null,
+        sale_closed_by: conv.sale_closed_by || 'manual'
+      });
+    } else if (status === 'rejected') {
+      updates.is_sale = false;                      // deja de sumar a los totales (se conserva el monto)
+      if (reason === undefined) updates.payment_reason = conv.is_sale ? 'Marcado como fraude' : (conv.payment_reason || 'Rechazado manualmente');
+    } else if (status === 'resolved') {
+      updates.is_sale = anterior === 'approved' || (anterior === 'resolved' && !!conv.is_sale);    // resuelto desde aprobado sigue contando como venta
+    } else {
+      updates.is_sale = false;                      // pending / review
+    }
+
+    const { data, error } = await supabase.from('conversations').update(updates)
+      .eq('id', conv.id).eq('user_id', req.user.id).select().single();
+    if (error) throw error;
+
+    if (nuevaVenta) {
+      sendPurchaseEventToMeta(req.user.id, data, data.sale_amount || 0).catch(e => console.error('[Meta Conversions API] Error inesperado:', e.message));
+      (async () => {
+        try {
+          const usd = await convertirDesdeSoles(data.sale_amount || 0, 'USD');
+          const { data: u } = await supabase.from('users').select('lifetime_revenue_usd').eq('id', req.user.id).single();
+          await supabase.from('users').update({ lifetime_revenue_usd: (u?.lifetime_revenue_usd || 0) + usd }).eq('id', req.user.id);
+        } catch (e) { console.error('[Recompensas] Error sumando al total histórico:', e.message); }
+      })();
+    }
+    res.json({ data });
+  } catch (err) { next(err); }
+});
+
 // ── POST /api/conversations/:id/assign-flow ─────────────────────
 // Asigna manualmente un flujo a una conversación que no activó
 // ningún disparador (el cliente escribió algo distinto a la frase
