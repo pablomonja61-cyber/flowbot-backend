@@ -99,7 +99,7 @@ function sumActionValues(actionValues, tipos) {
 // propia función para poder llamarlo muchas veces en paralelo (ver
 // GET /all más abajo) sin repetir código.
 async function computeMetricsForAccount(userId, accountId, dateFrom, dateTo, monedaCuenta, monedaDestino) {
-  const { ads, statusByAdId } = await svc.withToken(userId, accountId, async token => {
+  const { ads, statusByAdId, statusByCampaignId } = await svc.withToken(userId, accountId, async token => {
     const r = await axios.get(`${GRAPH}/act_${accountId}/insights`, {
       params: {
         access_token: token,
@@ -140,7 +140,31 @@ async function computeMetricsForAccount(userId, accountId, dateFrom, dateTo, mon
       }
     }));
 
-    return { ads: adsList, statusByAdId: statuses };
+    // Estado real de cada CAMPAÑA, pedido aquí mismo para que el primer
+    // dibujo de Campañas ya salga con el estado correcto (antes llegaba
+    // vacío y el frontend lo corregía con otra petición 2 s después).
+    const campIds = [...new Set(adsList.map(a => a.campaign_id).filter(Boolean))];
+    const campLotes = [];
+    for (let i = 0; i < campIds.length; i += 50) campLotes.push(campIds.slice(i, i + 50));
+    const campStatuses = {};
+    await Promise.all(campLotes.map(async lote => {
+      try {
+        const c = await axios.get(`${GRAPH}/act_${accountId}/campaigns`, {
+          params: {
+            fields: 'id,status,effective_status',
+            filtering: JSON.stringify([{ field: 'id', operator: 'IN', value: lote }]),
+            limit: lote.length,
+            access_token: token
+          },
+          timeout: 20000
+        });
+        for (const row of (c.data?.data || [])) campStatuses[row.id] = { status: row.status, effective_status: row.effective_status };
+      } catch (e) {
+        console.error('[Ads metrics] Error obteniendo estados de campañas:', JSON.stringify(e.response?.data || { message: e.message }));
+      }
+    }));
+
+    return { ads: adsList, statusByAdId: statuses, statusByCampaignId: campStatuses };
   });
 
   // Presupuesto: se lee de los conjuntos de anuncios (no existe a
@@ -244,6 +268,8 @@ async function computeMetricsForAccount(userId, accountId, dateFrom, dateTo, mon
       ctr: Number(parseFloat(ad.ctr || 0).toFixed(2)),
       status: (statusByAdId[ad.ad_id] || 'UNKNOWN').toLowerCase(),
       effective_status: statusByAdId[ad.ad_id] || 'UNKNOWN',
+      campaign_status: statusByCampaignId[ad.campaign_id]?.status || null,
+      campaign_effective_status: statusByCampaignId[ad.campaign_id]?.effective_status || null,
       ad_link: ad.ad_id ? `https://www.facebook.com/adsmanager/manage/ads?act=${accountId}&selected_ad_ids=${ad.ad_id}` : null
     };
   });
