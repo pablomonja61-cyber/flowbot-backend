@@ -52,6 +52,7 @@ app.use(cors({
     'https://ariabot-oct02.ariabot-app.chatgpt.site',
     'https://ariabot-octubre.iamblezts.chatgpt.site',
     'https://ariabot-pablo.k4el-ux.chatgpt.site',
+    'https://ariabot-octubre-2026.iamblezts.chatgpt.site',
     'http://localhost:5173',
     'https://ventas-vista.lovable.app'
   ],
