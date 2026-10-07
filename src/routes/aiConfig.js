@@ -4,7 +4,16 @@ const auth = require('../middleware/auth');
 const supabase = require('../models/supabase');
 const { v4: uuidv4 } = require('uuid');
 
-router.use(auth);
+// Nunca se devuelven las claves al navegador. Una config SIN clave propia
+// (la IA de la plataforma, que funciona por debajo) se muestra como
+// desconectada: solo figura "conectada" cuando la persona puso la suya.
+function publico(row) {
+  if (!row) return row;
+  const { openai_api_key, claude_api_key, gemini_api_key, groq_api_key, ...resto } = row;
+  const prov = (row.provider || 'openai').toLowerCase();
+  const propia = { openai: openai_api_key, claude: claude_api_key, anthropic: claude_api_key, gemini: gemini_api_key, google: gemini_api_key }[prov] || groq_api_key;
+  return { ...resto, is_active: propia ? row.is_active : false };
+}
 
 // ── GET /api/ai-config — listar todas las configs ──────────
 router.get('/', async (req, res, next) => {
@@ -14,11 +23,8 @@ router.get('/', async (req, res, next) => {
       .select('*')
       .eq('user_id', req.user.id)
       .order('created_at', { ascending: false });
-
     if (error) throw error;
-
-    // Si no hay configs, devolver array vacío
-    res.json(data || []);
+    res.json((data || []).map(publico));
   } catch (err) { next(err); }
 });
 
@@ -56,7 +62,7 @@ router.post('/', async (req, res, next) => {
       .single();
 
     if (error) throw error;
-    res.json({ success: true, data });
+    res.json({ success: true, data: publico(data) });
   } catch (err) { next(err); }
 });
 
@@ -93,7 +99,7 @@ router.put('/:id', async (req, res, next) => {
       .single();
 
     if (error) throw error;
-    res.json({ success: true, data });
+    res.json({ success: true, data: publico(data) });
   } catch (err) { next(err); }
 });
 
@@ -144,7 +150,7 @@ router.patch('/:id', async (req, res, next) => {
       .single();
 
     if (error) throw error;
-    res.json({ success: true, data });
+    res.json({ success: true, data: publico(data) });
   } catch (err) { next(err); }
 });
 
@@ -171,7 +177,7 @@ router.put('/', async (req, res, next) => {
         .select()
         .single();
       if (error) throw error;
-      return res.json({ success: true, data });
+      return res.json({ success: true, data: publico(data) });
     } else {
       const { data, error } = await supabase
         .from('ai_config')
@@ -193,7 +199,7 @@ router.put('/', async (req, res, next) => {
         .select()
         .single();
       if (error) throw error;
-      return res.json({ success: true, data });
+      return res.json({ success: true, data: publico(data) });
     }
   } catch (err) { next(err); }
 });

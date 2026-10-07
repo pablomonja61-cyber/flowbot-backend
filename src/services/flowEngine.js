@@ -514,6 +514,49 @@ function resolveApiKey(aiConfig, provider) {
   return aiConfig?.groq_api_key || process.env.GROQ_API_KEY;
 }
 
+// ── Clave de IA de la plataforma (invisible para los clientes) ──
+// Si la persona no puso su propia clave, se usa la de AriaBot
+// (variables OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY).
+function usaClavePlataforma(aiConfig, provider) {
+  const prov = (provider || 'openai').toLowerCase();
+  if (prov === 'openai') return !aiConfig?.openai_api_key;
+  if (prov === 'claude' || prov === 'anthropic') return !aiConfig?.claude_api_key;
+  if (prov === 'gemini' || prov === 'google') return !aiConfig?.gemini_api_key;
+  return !aiConfig?.groq_api_key;
+}
+
+// Configuración "virtual" por defecto: no se guarda en la base de datos, así que
+// en Integraciones la cuenta sigue apareciendo DESCONECTADA hasta que la persona
+// ponga su propia clave. Mientras tanto la IA responde con la clave de la plataforma.
+function configIAPorDefecto() {
+  if (!process.env.OPENAI_API_KEY) return null;
+  return { id: null, provider: 'openai', model: process.env.PLATFORM_AI_MODEL || 'gpt-4o-mini', system_prompt: '', is_active: true, openai_api_key: null, claude_api_key: null, gemini_api_key: null };
+}
+
+// Contador mensual de respuestas de IA (propia vs. de la plataforma) y
+// límite opcional PLATFORM_AI_MONTHLY_LIMIT (0 o vacío = sin límite).
+const _usoIA = new Map();   // userId -> { t, n }
+const mesActual = () => new Date().toISOString().slice(0, 7);
+async function iaPlataformaPermitida(userId) {
+  const limite = Number(process.env.PLATFORM_AI_MONTHLY_LIMIT || 0);
+  if (!limite) return true;
+  try {
+    let e = _usoIA.get(userId);
+    if (!e || Date.now() - e.t > 60000) {
+      const { data } = await supabase.from('ai_usage').select('platform_replies').eq('user_id', userId).eq('month', mesActual()).maybeSingle();
+      e = { t: Date.now(), n: data?.platform_replies || 0 };
+      _usoIA.set(userId, e);
+    }
+    return e.n < limite;
+  } catch { return true; }
+}
+async function registrarUsoIA(userId, plataforma) {
+  try {
+    await supabase.rpc('increment_ai_usage', { p_user: userId, p_month: mesActual(), p_platform: !!plataforma });
+    const e = _usoIA.get(userId); if (e) e.n += plataforma ? 1 : 0;
+  } catch (err) { console.error('[IA] No se pudo registrar el uso:', err.message); }
+}
+
 // ════════════════════════════════════════════════════════════
 // CALLAR A CUALQUIER PROVEEDOR DE IA (Groq, OpenAI, Claude o Gemini)
 // ════════════════════════════════════════════════════════════
@@ -596,6 +639,7 @@ async function respondWithAI(userId, connection, to, userMessage, conversationId
       const { data: c } = await supabase.from('ai_config').select('*').eq('user_id', userId).eq('is_active', true).single();
       if (c) aiConfig = c;
     }
+    if (!aiConfig) aiConfig = configIAPorDefecto();
     if (!aiConfig && !nodePrompt) {
       console.log('[CloudAPI AI] No hay configuración de IA ni prompt de nodo para este usuario');
       return;
@@ -645,7 +689,13 @@ Usa ÚNICAMENTE los datos exactos (números de pago, nombres de titular, precios
     // de llegar a la respuesta real; con muy pocos tokens, la
     // respuesta se corta a mitad del pensamiento y no queda nada
     // útil que mandarle al cliente después de limpiar el <think>.
+    const conPlataforma = usaClavePlataforma(aiConfig, provider);
+    if (conPlataforma && !(await iaPlataformaPermitida(userId))) {
+      console.warn(`[IA] Usuario ${userId} alcanzó el límite mensual de la IA de la plataforma`);
+      return;
+    }
     const aiResponse = await callAIProvider(provider, apiKey, model, systemPrompt, conversationMessages, 1500);
+    registrarUsoIA(userId, conPlataforma);
 
     if (!aiResponse || !aiResponse.trim()) {
       console.warn('[CloudAPI AI] La respuesta quedó vacía después de limpiar el razonamiento — usando mensaje de respaldo');
@@ -1684,7 +1734,8 @@ async function translateFlow(userId, flowId, targetLanguage) {
   if (Object.keys(textos).length === 0) throw Object.assign(new Error('Este flujo no tiene ningún texto para traducir.'), { status: 400 });
 
   // 2. Traducir todo junto, en una sola llamada a la IA.
-  const { data: aiConfig } = await supabase.from('ai_config').select('*').eq('user_id', userId).eq('is_active', true).single();
+  const { data: aiConfigGuardada } = await supabase.from('ai_config').select('*').eq('user_id', userId).eq('is_active', true).single();
+  const aiConfig = aiConfigGuardada || configIAPorDefecto();
   if (!aiConfig) throw Object.assign(new Error('No tienes ninguna IA configurada (ChatGPT/Claude) para poder traducir.'), { status: 400 });
 
   const provider = aiConfig.provider || 'openai';
@@ -1757,6 +1808,7 @@ ${JSON.stringify(textos, null, 2)}`;
 }
 
 module.exports = {
+  configIAPorDefecto, usaClavePlataforma,
   executeFlow,
   saveMessage,
   sendWhatsAppMessage,
