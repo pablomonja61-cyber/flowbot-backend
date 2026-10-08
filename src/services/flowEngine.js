@@ -1,4 +1,5 @@
 const axios = require('axios');
+const plans = require('./plans');
 const crypto = require('crypto');
 const supabase = require('../models/supabase');
 const { v4: uuidv4 } = require('uuid');
@@ -354,6 +355,7 @@ async function processIncomingMediaCloud(connection, contactPhone, mediaId, conv
   const etiquetas = { sticker: '[Sticker]', audio: '[Audio]', document: '[Documento]', video: '[Video]' };
   const contenido = nombreOriginal ? `[${tipo === 'document' ? 'Documento' : tipo}] ${nombreOriginal}` : (etiquetas[tipo] || `[${tipo}]`);
   await saveMessage(conversation.id, contenido, 'inbound', tipo, publicMediaUrl);
+  if (!(await plans.botPermitido(connection.user_id))) return; // cuenta suspendida
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1227,6 +1229,7 @@ async function processIncomingImageCloud(connection, contactPhone, mediaId, conv
   }
 
   await saveMessage(conversation.id, '[Imagen recibida - posible comprobante]', 'inbound', 'image', publicMediaUrl);
+  if (!(await plans.botPermitido(userId))) return; // cuenta suspendida: se guarda pero el bot no responde
 
   if (conversation.flow_active === false) return;
   if (!imageBuffer) return;

@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const plans = require('../services/plans');
 const auth = require('../middleware/auth');
 const supabase = require('../models/supabase');
 const { v4: uuidv4 } = require('uuid');
@@ -26,6 +27,8 @@ router.post('/', async (req, res, next) => {
     if (!name || !phone_number_id || !waba_id || !access_token) {
       return res.status(400).json({ error: 'Todos los campos son requeridos' });
     }
+    const permiso = await plans.puedeConectar(req.user.id, 'api', 'primary');
+    if (!permiso.ok) return res.status(permiso.code === 'PLAN_SUSPENDED' ? 402 : 403).json({ error: permiso.message, code: permiso.code });
     try {
       const verify = await axios.get(
         `https://graph.facebook.com/v26.0/${phone_number_id}`,
@@ -127,6 +130,9 @@ router.post('/embedded-signup', async (req, res, next) => {
     if (!code || !phone_number_id || !waba_id) {
       return res.status(400).json({ error: 'code, phone_number_id y waba_id son requeridos' });
     }
+    const rol = req.body.role === 'warmup' ? 'warmup' : 'primary';
+    const permiso = await plans.puedeConectar(req.user.id, 'api', rol);
+    if (!permiso.ok) return res.status(permiso.code === 'PLAN_SUSPENDED' ? 402 : 403).json({ error: permiso.message, code: permiso.code });
 
     const appId = process.env.META_APP_ID;
     const appSecret = process.env.META_APP_SECRET;
@@ -206,12 +212,62 @@ router.post('/embedded-signup', async (req, res, next) => {
       .single();
     if (error) throw error;
 
-    console.log(`[Embedded Signup] Nueva conexión creada para user ${req.user.id}: ${displayPhone}`);
-    res.status(201).json(data);
+    if (rol === 'warmup') await plans.marcarRol(req.user.id, data.id, 'warmup').catch(e => console.error('[Embedded Signup] No se guardó el rol:', e.message));
+    console.log(`[Embedded Signup] Nueva conexión creada para user ${req.user.id}: ${displayPhone} (${rol})`);
+    res.status(201).json({ ...data, role: rol });
   } catch (err) {
     console.error('[Embedded Signup] Error:', err.response?.data || err.message);
     next(err);
   }
+});
+
+// ── POST /api/connections/qr ──────────────────────────────────
+// Crea una conexión nueva por QR y arranca la sesión de Baileys.
+router.post('/qr', async (req, res, next) => {
+  try {
+    const { name } = req.body;
+    const permiso = await plans.puedeConectar(req.user.id, 'qr');
+    if (!permiso.ok) return res.status(permiso.code === 'PLAN_SUSPENDED' ? 402 : 403).json({ error: permiso.message, code: permiso.code });
+    const id = uuidv4();
+
+    const { data, error } = await supabase
+      .from('connections')
+      .insert({
+        id,
+        user_id: req.user.id,
+        name: name || 'WhatsApp (QR)',
+        connection_type: 'qr',
+        qr_status: 'pending',
+        is_active: false
+      })
+      .select('id, name, connection_type, qr_status, created_at')
+      .single();
+    if (error) throw error;
+
+    // Arranca la sesión de Baileys en segundo plano — no se espera
+    // aquí, porque generar el QR toma unos segundos.
+    const { startQRSession } = require('../services/baileys');
+    startQRSession(id, req.user.id).catch(e => console.error('[QR] Error iniciando sesión:', e.message));
+
+    res.status(201).json(data);
+  } catch (err) { next(err); }
+});
+
+// ── GET /api/connections/qr/:id ────────────────────────────────
+// Para hacer polling: devuelve el QR actual (si sigue pendiente) o
+// el estado de conexión.
+router.get('/qr/:id', async (req, res, next) => {
+  try {
+    const { data, error } = await supabase
+      .from('connections')
+      .select('id, name, phone_number, qr_code, qr_status')
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id)
+      .single();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Conexión no encontrada' });
+    res.json(data);
+  } catch (err) { next(err); }
 });
 
 module.exports = router;

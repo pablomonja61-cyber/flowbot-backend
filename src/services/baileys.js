@@ -5,6 +5,7 @@ const supabase = require('../models/supabase');
 const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
 const crypto = require('crypto');
+const plans = require('../services/plans');
 const path = require('path');
 const fs = require('fs');
 const { cancelFollowups, sendFollowupContentCloud, sendPurchaseEventToMeta } = require('../services/flowEngine');
@@ -1143,6 +1144,13 @@ async function processScheduledFollowups() {
     console.log(`[Followups] ${due.length} seguimiento(s) pendiente(s) de enviar`);
 
     for (const item of due) {
+      if (item.connection_id) {
+        const { data: dueno } = await supabase.from('connections').select('user_id').eq('id', item.connection_id).maybeSingle();
+        if (dueno && !(await plans.botPermitido(dueno.user_id))) {
+          await supabase.from('scheduled_followups').update({ status: 'failed' }).eq('id', item.id);
+          continue;
+        }
+      }
       const sock = item.connection_id ? activeSessions[item.connection_id] : null;
 
       if (!sock) {
@@ -1487,6 +1495,7 @@ async function processIncomingImageBaileys(connectionId, userId, sock, contactPh
   }
 
   await saveMsg(conversation.id, '[Imagen recibida - posible comprobante]', 'inbound', 'image', publicMediaUrl);
+  if (!(await plans.botPermitido(userId))) return; // cuenta suspendida: se guarda pero el bot no responde
 
   if (conversation.flow_active === false) {
     console.log(`[Baileys Payment] Flujo desactivado para ${conversation.id} — bot no responde más`);
@@ -1859,6 +1868,7 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
   updateProfilePicIfMissing(sock, jid, conversation.id, conversation.profile_pic_url);
 
   await saveMsg(conversation.id, isImage ? '[Imagen recibida]' : userMessage, 'inbound', isImage ? 'image' : 'text');
+  if (!(await plans.botPermitido(userId))) return; // cuenta suspendida: se guarda pero el bot no responde
 
   // Antes de aplicar el apagado de IA o revisar si hay un flujo pausado,
   // chequeamos si el mensaje coincide con CUALQUIER disparador activo

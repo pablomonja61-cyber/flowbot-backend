@@ -2,12 +2,13 @@ const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
 const supabase = require('../models/supabase');
+const plans = require('../services/plans');
 
 router.use(auth);
 router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 const fail = (message, status = 400) => { throw Object.assign(new Error(message), { status }); };
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
-const allowed = ['defaultFlows', 'products', 'templates', 'variables', 'customFields', 'companies', 'selectedCompany', 'company', 'departments', 'workHours', 'labelStyles', 'translations', 'credentials', 'mcpUrl', 'invitations', 'broadcasts', 'team', 'supportAccess', 'kanban'];
+const allowed = ['defaultFlows', 'products', 'templates', 'variables', 'customFields', 'companies', 'selectedCompany', 'company', 'departments', 'workHours', 'labelStyles', 'translations', 'credentials', 'mcpUrl', 'invitations', 'broadcasts', 'team', 'supportAccess', 'kanban', 'connectionRoles', 'billingReceipts'];
 const conflict = () => fail('La configuración cambió en otra pestaña. Recarga la página antes de guardar.', 409);
 function validate(input) {
   if (!object(input) || !object(input.settingsData) || !Array.isArray(input.quickReplies) || !Array.isArray(input.labels)) fail('La configuración no tiene un formato válido.');
@@ -38,6 +39,8 @@ function validate(input) {
     if (!String(row.name || '').trim()) fail('Los campos personalizados necesitan nombre.');
     return { id: row.id.slice(0, 100), name: String(row.name).trim().slice(0, 80), type: ['Texto', 'Número', 'Fecha', 'Sí / No'].includes(row.type) ? row.type : 'Texto' };
   });
+  if (settingsData.connectionRoles !== undefined && !object(settingsData.connectionRoles)) fail('Revisa los roles de conexión.');
+  if (settingsData.billingReceipts !== undefined && (!Array.isArray(settingsData.billingReceipts) || settingsData.billingReceipts.length > 50 || settingsData.billingReceipts.some(row => !object(row) || typeof row.id !== 'string'))) fail('Revisa los comprobantes.');
   if (settingsData.selectedCompany !== undefined && typeof settingsData.selectedCompany !== 'string') fail('Revisa la empresa seleccionada.');
   if (settingsData.credentials) settingsData.credentials = settingsData.credentials.map(row => ({ id: row.id.slice(0, 100), name: String(row.name || '').slice(0, 80), type: row.type === 'oauth' ? 'oauth' : 'static' }));
   if (settingsData.mcpUrl) { try { const url = new URL(settingsData.mcpUrl); if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) throw Error(); } catch { fail('La URL de MCP no es válida.'); } }
@@ -72,6 +75,21 @@ router.put('/', async (req, res, next) => {
     const revision = req.body?.revision;
     if (!Number.isSafeInteger(revision) || revision < 0) fail('Vuelve a cargar la configuración.');
     const input = validate(req.body.data), current = await read(req.user.id);
+    if (input.settingsData.connectionRoles !== undefined) {
+      // Solo se aceptan números de API del propio usuario, y no más que los de su plan.
+      const { data: cons } = await supabase.from('connections').select('id,connection_type').eq('user_id', req.user.id);
+      const validos = new Set((cons || []).filter(c => (c.connection_type || 'api') !== 'qr').map(c => c.id));
+      const roles = {};
+      for (const [id, rol] of Object.entries(input.settingsData.connectionRoles)) if (rol === 'warmup' && validos.has(id)) roles[id] = 'warmup';
+      const actuales = current?.data?.settingsData?.connectionRoles || {};
+      const nuevos = Object.keys(roles).filter(id => actuales[id] !== 'warmup');
+      if (nuevos.length) {
+        const e = await plans.estadoCuenta(req.user.id);
+        if (e.suspended) fail(plans.mensajeSuspension(e), 402);
+        if (Object.keys(roles).length > e.limits.warmup) fail(e.limits.warmup <= 0 ? 'Tu plan no incluye números de calentamiento.' : `Tu plan incluye ${e.limits.warmup} número(s) de calentamiento.`, 403);
+      }
+      input.settingsData.connectionRoles = roles;
+    }
     if ((current?.revision ?? 0) !== revision) conflict();
     const nextRevision = await save(req.user.id, revision, { ...input, organization: current?.data?.organization || [] });
     if (nextRevision === null) conflict();

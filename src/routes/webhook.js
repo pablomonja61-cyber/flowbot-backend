@@ -8,6 +8,7 @@ const {
 const { estaBloqueado: estaEnListaNegra } = require('./globalBlacklist');
 const { manejarAlertaDeMeta } = require('../services/connectionStatus');
 const { v4: uuidv4 } = require('uuid');
+const plans = require('../services/plans');
 
 // Crea (o actualiza el nombre de) el contacto en el CRM cada vez que
 // alguien nuevo escribe — así "Contactos" se llena sola, sin que el
@@ -316,10 +317,23 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
     }
     conversation = newConv;
     upsertContact(userId, contactPhone, profileName || contactPhone);
+    // Tope diario de clientes nuevos automatizados (plan de US$19 y prueba gratuita)
+    if (await plans.pasoTopeDiario(userId, newConv.id)) conversation = { ...newConv, daily_limit_blocked: true };
   }
 
   // 3. Guardar mensaje entrante
   await saveMessage(conversation.id, userMessage, 'inbound');
+
+  // Cuenta suspendida (prueba terminada o plan vencido): el mensaje queda guardado, pero el bot no responde.
+  if (!(await plans.botPermitido(userId))) {
+    console.log(`[Webhook] ⏸ Cuenta suspendida — mensaje guardado sin respuesta del bot (user ${userId})`);
+    return;
+  }
+  // Cliente nuevo que pasó el tope diario de hoy: se guarda y se atiende a mano.
+  if (conversation.daily_limit_blocked && plans.esDeHoyLima(conversation.created_at)) {
+    console.log(`[Webhook] ⏸ Tope diario del plan alcanzado — sin bot para ${contactPhone}`);
+    return;
+  }
 
   // Antes de aplicar el apagado de IA o revisar si hay un flujo pausado,
   // chequeamos si el mensaje coincide con CUALQUIER disparador activo

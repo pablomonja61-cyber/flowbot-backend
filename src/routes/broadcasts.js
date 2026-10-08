@@ -11,6 +11,7 @@
 
 const express = require('express');
 const router = express.Router();
+const plans = require('../services/plans');
 const auth = require('../middleware/auth');
 const supabase = require('../models/supabase');
 const axios = require('axios');
@@ -51,7 +52,7 @@ router.get('/templates', async (req, res, next) => {
 // ── POST /api/broadcasts/send ────────────────────────────────────
 // Manda el envío masivo de verdad. Body esperado:
 // { connection_id, template_name, template_language, contact_ids: ['id1','id2'] | 'all' }
-router.post('/send', async (req, res, next) => {
+router.post('/send', plans.requireActive, async (req, res, next) => {
   try {
     const { connection_id, template_name, template_language, contact_ids } = req.body;
     if (!connection_id || !template_name || !template_language) {

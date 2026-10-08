@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken');
 const axios = require('axios');
 const supabase = require('../models/supabase');
 const { v4: uuidv4 } = require('uuid');
+const plans = require('../services/plans');
 const { enviarCorreoVerificacion, enviarCorreoRecuperacion } = require('../services/email');
 
 const MAX_CUENTAS_POR_IP = 5;
@@ -32,18 +33,7 @@ router.post('/register', async (req, res, next) => {
     const emailNormalizado = email.toLowerCase().trim();
     const ip = obtenerIP(req);
 
-    // 1. Verificar que este correo tenga una compra aprobada en Hotmart
-    const { data: compra } = await supabase
-      .from('hotmart_purchases')
-      .select('status')
-      .eq('email', emailNormalizado)
-      .maybeSingle();
-
-    if (!compra || compra.status !== 'approved') {
-      return res.status(403).json({
-        error: 'Este correo no tiene una compra válida de AriaBot. Usa el mismo correo con el que compraste, o adquiere tu acceso primero.'
-      });
-    }
+    // 1. Registro abierto: cualquiera puede crear su cuenta y recibe la prueba gratuita de 7 días.
 
     // 2. Límite de cuentas por IP — evita que una sola persona cree
     // decenas de cuentas para abusar de pruebas gratis, etc.
@@ -84,13 +74,15 @@ router.post('/register', async (req, res, next) => {
         email: emailNormalizado,
         name,
         phone,
-        plan: 'free',
+        plan: 'trial',
+        trial_ends_at: new Date(Date.now() + plans.DIAS_PRUEBA * 86400000).toISOString(),
         registration_ip: ip,
         email_verified: false
       })
       .select()
       .single();
     if (profileError) throw profileError;
+    try { require('./hotmart').aplicarComprasPendientes(profile); } catch (_) {}
 
     // 5. Generar y guardar el código de verificación
     const codigo = generarCodigo();
@@ -261,7 +253,8 @@ router.get('/me', authMiddleware, async (req, res, next) => {
       .select('*')
       .eq('id', req.user.id)
       .single();
-    res.json(profile);
+    const billing = await plans.billingParaFrontend(req.user.id).catch(() => null);
+    res.json({ ...profile, billing });
   } catch (err) {
     next(err);
   }

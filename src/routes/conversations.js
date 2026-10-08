@@ -9,6 +9,7 @@ const {
   sendWhatsAppImage, sendWhatsAppVideo, sendWhatsAppAudio, sendWhatsAppDocument, sendPurchaseEventToMeta, executeFlow
 } = require('../services/flowEngine');
 const metaSvc = require('../services/metaProfiles');
+const plans = require('../services/plans');
 
 // ── Conversión de moneda real para el Dashboard ─────────────────
 // Todos los montos de venta se guardan en Soles (PEN), la moneda del
@@ -115,7 +116,7 @@ router.get('/', async (req, res, next) => {
 });
 
 // ── POST /api/conversations/:id/messages (envío manual) ───────
-router.post('/:id/messages', async (req, res, next) => {
+router.post('/:id/messages', plans.requireActive, async (req, res, next) => {
   try {
     const { content, direction = 'outbound', media_url, media_type, file_name } = req.body;
     const esMedia = !!media_url;
@@ -697,7 +698,7 @@ router.patch('/:id/payment-status', async (req, res, next) => {
 // Asigna manualmente un flujo a una conversación que no activó
 // ningún disparador (el cliente escribió algo distinto a la frase
 // clave) — el botón verde "Seleccionar flujo" en Chat en Vivo.
-router.post('/:id/assign-flow', async (req, res, next) => {
+router.post('/:id/assign-flow', plans.requireActive, async (req, res, next) => {
   try {
     const { flow_id } = req.body;
     if (!flow_id) return res.status(400).json({ error: 'Falta flow_id.' });
@@ -774,7 +775,7 @@ router.get('/:id/flows-list', async (req, res, next) => {
 // entra al chat y elige un flujo del selector. Activa el flujo
 // (incluyendo sus pausas y seguimientos adjuntos, igual que un
 // disparador automático) y prende el botón "IA" de la conversación.
-router.post('/:id/activate-flow', async (req, res, next) => {
+router.post('/:id/activate-flow', plans.requireActive, async (req, res, next) => {
   try {
     const { flow_id } = req.body;
     if (!flow_id) return res.status(400).json({ error: 'flow_id requerido' });
@@ -1076,7 +1077,7 @@ try { multer = require('multer'); } catch (e) { console.warn('[Audio] multer no 
 const audioUpload = multer
   ? multer({ storage: multer.memoryStorage(), limits: { fileSize: 16 * 1024 * 1024 } })
   : { single: () => (req, res) => res.status(501).json({ error: 'Falta instalar multer en el servidor (npm i multer).' }) };
-router.post('/:id/messages/audio', audioUpload.single('audio'), async (req, res, next) => {
+router.post('/:id/messages/audio', plans.requireActive, audioUpload.single('audio'), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No se recibió ningún archivo de audio.' });
     const { data: conv, error: convError } = await supabase
