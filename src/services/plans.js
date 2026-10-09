@@ -197,6 +197,23 @@ async function marcarRol(userId, connectionId, rol) {
   return false;
 }
 
+async function enlacesHotmart(userId) {
+  let mapa = {};
+  try { mapa = JSON.parse(process.env.HOTMART_CHECKOUTS || '{}'); } catch { return {}; }
+  const { data: u } = await supabase.from('users').select('email,name').eq('id', userId).maybeSingle();
+  const out = {};
+  for (const [n, url] of Object.entries(mapa)) {
+    try {
+      const link = new URL(url);
+      // El correo del pago debe coincidir con el de la cuenta para activar el plan solo
+      if (u?.email) link.searchParams.set('email', u.email);
+      if (u?.name) link.searchParams.set('name', u.name);
+      out[n] = link.href;
+    } catch { /* enlace inválido: se omite */ }
+  }
+  return out;
+}
+
 // Estructura que espera la página Cobranza del frontend
 async function billingParaFrontend(userId) {
   const e = await estadoCuenta(userId);
@@ -228,6 +245,8 @@ async function billingParaFrontend(userId) {
       }
     },
     invoices: [],
+    // Enlaces de pago de Hotmart (exterior) por cantidad de API. Variable HOTMART_CHECKOUTS: {"1":"https://pay.hotmart.com/…","2":"…"}
+    checkout_urls: await enlacesHotmart(userId),
     plans_url: process.env.BILLING_PLANS_URL || null,
     portal_url: process.env.BILLING_PORTAL_URL || null,
     support_url: process.env.SUPPORT_URL || null
