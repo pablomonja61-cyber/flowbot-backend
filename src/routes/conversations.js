@@ -11,6 +11,13 @@ const {
 const metaSvc = require('../services/metaProfiles');
 const plans = require('../services/plans');
 
+// Una conversación está "finalizada" hasta que alguien vuelve a escribir (el cliente o tú).
+function estaFinalizada(c) {
+  if (!c?.finished_at) return false;
+  const ult = c.last_message_at ? new Date(c.last_message_at).getTime() : 0;
+  return ult <= new Date(c.finished_at).getTime() + 2000;
+}
+
 // ── Envío manual por el canal correcto (compartido por mensajes y respuestas rápidas) ──
 // Devuelve { ok, error }: ya no se oculta si WhatsApp rechazó el envío.
 async function enviarManual(conv, { content, media_url, media_type, file_name }) {
@@ -153,7 +160,7 @@ router.get('/', async (req, res, next) => {
       .from('conversations')
       .select(`
         id, contact_phone, contact_name, last_message,
-        last_message_at, unread_count, status, connection_id, tag, manual_tags, profile_pic_url, flow_active, last_message_direction, bot_ever_responded, ever_replied,
+        last_message_at, unread_count, status, connection_id, tag, manual_tags, profile_pic_url, flow_active, is_blocked, finished_at, last_message_direction, bot_ever_responded, ever_replied,
         is_sale, sale_amount, sale_method, sale_at, operation_code, meta_event_status, sale_closed_by,
         payment_status, payment_reason, payment_status_at, payment_resolved_from, suggested_sale_amount, suggested_operation_code, pending_payment_method,
         current_flow_id, ad_id, ad_name, campaign_name, ctwa_clid, ad_source_url, ad_headline, ad_image_url,
@@ -189,6 +196,7 @@ router.get('/', async (req, res, next) => {
       (origenes || []).forEach(o => { nombrePorConversacion[o.conversation_id] = o.triggers?.flows?.name; });
       data.forEach(c => { c.flow_name = nombrePorConversacion[c.id] || null; });
     }
+    (data || []).forEach(c => { c.finished = estaFinalizada(c); });
     if (payments === 'true') {
       (data || []).forEach(c => {
         if (!c.payment_status && c.is_sale) c.payment_status = 'approved';
@@ -217,6 +225,7 @@ router.post('/:id/messages', plans.requireActive, async (req, res, next) => {
       .eq('user_id', req.user.id)
       .single();
     if (!conv) return res.status(404).json({ error: 'Conversación no encontrada' });
+    if (conv.is_blocked && direction === 'outbound') return res.status(403).json({ code: 'CHAT_BLOCKED', error: 'Este chat está bloqueado. Desbloquéalo para escribir.' });
 
     // Enviar por WhatsApp si es outbound (QR/Baileys o Cloud API, según la conexión)
     let envio = { ok: true };
@@ -1134,6 +1143,7 @@ router.post('/:id/messages/audio', plans.requireActive, audioUpload.single('audi
       .eq('id', req.params.id).eq('user_id', req.user.id).maybeSingle();
     if (convError) throw convError;
     if (!conv) return res.status(404).json({ error: 'Conversación no encontrada.' });
+    if (conv.is_blocked) return res.status(403).json({ code: 'CHAT_BLOCKED', error: 'Este chat está bloqueado. Desbloquéalo para escribir.' });
     const { phone_number_id, access_token } = conv.connections || {};
     if (!phone_number_id || !access_token) return res.status(400).json({ error: 'El envío de audio por ahora solo está disponible para conexiones de API Oficial.' });
 
@@ -1174,10 +1184,51 @@ router.post('/:id/quick-reply', plans.requireActive, async (req, res, next) => {
     const { data: conv } = await supabase.from('conversations').select('*, connections(*)')
       .eq('id', req.params.id).eq('user_id', req.user.id).single();
     if (!conv) return res.status(404).json({ error: 'Conversación no encontrada' });
+    if (conv.is_blocked) return res.status(403).json({ code: 'CHAT_BLOCKED', error: 'Este chat está bloqueado. Desbloquéalo para escribir.' });
 
     const resultados = await enviarPasos(conv, acciones);
     const enviados = resultados.filter(r => r.ok).length;
     res.status(enviados ? 200 : 502).json({ sent: enviados, total: acciones.length, results: resultados });
+  } catch (err) { next(err); }
+});
+
+// ── PATCH /api/conversations/:id/block ────────────────────────
+// Bloquear / desbloquear un chat. Bloqueado: el bot no responde, no se inician flujos
+// ni seguimientos, y tampoco se pueden enviar mensajes desde el panel. Lo que llegue se sigue guardando.
+router.patch('/:id/block', async (req, res, next) => {
+  try {
+    const raw = req.body?.blocked;
+    const blocked = typeof raw === 'boolean' ? raw : (typeof raw === 'string' ? raw.toLowerCase() === 'true' || raw === '1' : (typeof raw === 'number' ? raw === 1 : undefined));
+    if (blocked === undefined) return res.status(400).json({ error: 'El campo "blocked" (true/false) es requerido' });
+    const { data: conv } = await supabase.from('conversations').select('id').eq('id', req.params.id).eq('user_id', req.user.id).maybeSingle();
+    if (!conv) return res.status(404).json({ error: 'Conversación no encontrada' });
+    const cambios = { is_blocked: blocked };
+    if (blocked) { cambios.flow_active = false; }
+    const { data, error } = await supabase.from('conversations').update(cambios).eq('id', req.params.id).select('id, is_blocked, flow_active').single();
+    if (error) throw error;
+    if (blocked) {
+      const { cancelFollowups } = require('../services/flowEngine');
+      await cancelFollowups(req.params.id);
+    }
+    res.json({ data });
+  } catch (err) { next(err); }
+});
+
+// ── POST /api/conversations/:id/finish ────────────────────────
+// Finalizar la conversación: detiene el flujo en curso y cancela los seguimientos pendientes.
+// Si el cliente vuelve a escribir, la conversación se reabre sola (y un disparador puede iniciar un flujo nuevo).
+router.post('/:id/finish', async (req, res, next) => {
+  try {
+    const { data: conv } = await supabase.from('conversations').select('id').eq('id', req.params.id).eq('user_id', req.user.id).maybeSingle();
+    if (!conv) return res.status(404).json({ error: 'Conversación no encontrada' });
+    const ahora = new Date().toISOString();
+    const { data, error } = await supabase.from('conversations').update({
+      finished_at: ahora, flow_active: false, current_flow_id: null, current_node_id: null
+    }).eq('id', req.params.id).select('id, finished_at, flow_active, last_message_at').single();
+    if (error) throw error;
+    const { cancelFollowups } = require('../services/flowEngine');
+    await cancelFollowups(req.params.id);
+    res.json({ data: { ...data, finished: true } });
   } catch (err) { next(err); }
 });
 
@@ -1200,7 +1251,7 @@ router.get('/:id', async (req, res, next) => {
   try {
     if (!/^[0-9a-fA-F-]{36}$/.test(req.params.id)) return next();
     const { data, error } = await supabase.from('conversations')
-      .select(`id, contact_phone, contact_name, last_message, last_message_at, unread_count, status, connection_id, tag, manual_tags, profile_pic_url, flow_active, last_message_direction, bot_ever_responded, ever_replied,
+      .select(`id, contact_phone, contact_name, last_message, last_message_at, unread_count, status, connection_id, tag, manual_tags, profile_pic_url, flow_active, is_blocked, finished_at, last_message_direction, bot_ever_responded, ever_replied,
         is_sale, sale_amount, sale_method, sale_at, operation_code, meta_event_status, sale_closed_by, suggested_sale_amount, suggested_operation_code,
         current_flow_id, ad_id, ad_name, campaign_name, ctwa_clid, ad_source_url, ad_headline, ad_image_url, connections(name)`)
       .eq('id', req.params.id).eq('user_id', req.user.id).maybeSingle();
@@ -1208,6 +1259,7 @@ router.get('/:id', async (req, res, next) => {
     if (!data) return res.status(404).json({ error: 'Conversación no encontrada.' });
     const { data: origenes } = await supabase.from('trigger_executions').select('conversation_id, triggers(flows(name))').eq('conversation_id', data.id).limit(1);
     data.flow_name = origenes?.[0]?.triggers?.flows?.name || null;
+    data.finished = estaFinalizada(data);
     res.json({ data });
   } catch (err) { next(err); }
 });

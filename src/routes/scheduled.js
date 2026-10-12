@@ -128,6 +128,7 @@ async function procesarPendientes() {
         if (cuenta.suspended) throw new Error('Cuenta suspendida: renueva tu plan para enviar mensajes');
         const { data: conv } = await supabase.from('conversations').select('*, connections(*)').eq('id', item.conversation_id).maybeSingle();
         if (!conv) throw new Error('La conversación ya no existe');
+        if (conv.is_blocked) throw new Error('El chat está bloqueado');
         const resultados = await conversationsRouter.enviarPasos(conv, item.messages || []);
         const fallos = resultados.filter(r => !r.ok);
         if (fallos.length === resultados.length) { estado = 'failed'; error = fallos[0]?.error || 'No se pudo enviar'; }

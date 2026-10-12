@@ -324,6 +324,11 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
   // 3. Guardar mensaje entrante
   await saveMessage(conversation.id, userMessage, 'inbound');
 
+  // Chat bloqueado manualmente: el mensaje queda guardado, pero el bot no responde.
+  if (conversation.is_blocked) {
+    console.log(`[Webhook] 🚫 Chat bloqueado — sin respuesta del bot (${conversation.id})`);
+    return;
+  }
   // Cuenta suspendida (prueba terminada o plan vencido): el mensaje queda guardado, pero el bot no responde.
   if (!(await plans.botPermitido(userId))) {
     console.log(`[Webhook] ⏸ Cuenta suspendida — mensaje guardado sin respuesta del bot (user ${userId})`);
