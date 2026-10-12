@@ -197,6 +197,68 @@ async function marcarRol(userId, connectionId, rol) {
   return false;
 }
 
+// ── Facturas (historial de cobros) ───────────────────────────────
+function numeroFactura(n) { return 'AB-' + String(n || 0).padStart(6, '0'); }
+
+// Registra (una sola vez por pago) una factura pagada y actualiza los datos de cobro de la cuenta.
+async function registrarFactura({ userId = null, email = null, source, externalId, description, amount, currency = 'USD', amountUsd = null, plan = null, country = null, method = null, paidAt = null }) {
+  try {
+    if (!source || !externalId) return null;
+    const fila = {
+      user_id: userId, email: email ? String(email).toLowerCase() : null, source, external_id: String(externalId),
+      description: description || null, amount: amount ?? null, currency: currency || 'USD',
+      amount_usd: amountUsd ?? (String(currency).toUpperCase() === 'USD' ? amount : null),
+      status: 'paid', plan, paid_at: paidAt || new Date().toISOString()
+    };
+    const { data: previa } = await supabase.from('billing_invoices').select('id,status').eq('source', source).eq('external_id', String(externalId)).maybeSingle();
+    let r;
+    if (previa) {
+      // Un reembolso ya registrado no se vuelve a marcar como pagado si llega el aviso de aprobación repetido.
+      if (previa.status === 'refunded') return previa;
+      r = await supabase.from('billing_invoices').update(fila).eq('id', previa.id).select().maybeSingle();
+    } else {
+      r = await supabase.from('billing_invoices').insert(fila).select().maybeSingle();
+    }
+    if (r.error) throw r.error;
+    if (userId) {
+      const cambios = {};
+      if (country) cambios.billing_country = country;
+      if (method) cambios.payment_method = method;
+      const { data: u } = await supabase.from('users').select('subscription_started_at').eq('id', userId).maybeSingle();
+      if (u && !u.subscription_started_at) cambios.subscription_started_at = fila.paid_at;
+      if (Object.keys(cambios).length) await supabase.from('users').update(cambios).eq('id', userId);
+    }
+    return r.data;
+  } catch (e) { console.error('[Plans] registrarFactura:', e.message); return null; }
+}
+
+// Marca una factura como reembolsada. Devuelve la factura (o null si no existe).
+async function marcarReembolso(source, externalId) {
+  try {
+    const { data } = await supabase.from('billing_invoices').update({ status: 'refunded', refunded_at: new Date().toISOString() })
+      .eq('source', source).eq('external_id', String(externalId)).select().maybeSingle();
+    return data || null;
+  } catch (e) { console.error('[Plans] marcarReembolso:', e.message); return null; }
+}
+
+// Suspende la cuenta de inmediato (reembolso o contracargo): el plan vence ahora.
+async function suspenderCuenta(userId) {
+  await supabase.from('users').update({ subscription_expires_at: new Date().toISOString() }).eq('id', userId);
+  limpiarCache(userId);
+}
+
+// Une a la cuenta las facturas pagadas con su correo antes de registrarse.
+async function vincularFacturas(userId, email) {
+  try { if (email) await supabase.from('billing_invoices').update({ user_id: userId }).is('user_id', null).eq('email', String(email).toLowerCase()); } catch (_) { /* no bloquea */ }
+}
+
+async function facturasDe(userId, email) {
+  let q = supabase.from('billing_invoices').select('*').order('paid_at', { ascending: false }).limit(200);
+  q = email ? q.or(`user_id.eq.${userId},email.eq.${String(email).toLowerCase()}`) : q.eq('user_id', userId);
+  const { data } = await q;
+  return data || [];
+}
+
 async function enlacesHotmart(userId) {
   let mapa = {};
   try { mapa = JSON.parse(process.env.HOTMART_CHECKOUTS || '{}'); } catch { return {}; }
@@ -218,6 +280,16 @@ async function enlacesHotmart(userId) {
 async function billingParaFrontend(userId) {
   const e = await estadoCuenta(userId);
   const u = await uso(userId);
+  const { data: cu } = await supabase.from('users').select('email,billing_country,payment_method,subscription_started_at,subscription_expires_at').eq('id', userId).maybeSingle();
+  const filas = await facturasDe(userId, cu?.email);
+  const facturas = filas.map(f => ({
+    id: f.id, number: numeroFactura(f.number), date: f.paid_at, description: f.description,
+    amount: f.amount === null ? null : Number(f.amount), currency: f.currency || 'USD',
+    status: f.status === 'refunded' ? 'refunded' : (f.status === 'cancelled' ? 'cancelled' : (f.status === 'pending' ? 'pending' : 'paid'))
+  }));
+  // Importe = suma de lo pagado (en dólares) menos lo reembolsado
+  const totalPagado = filas.filter(f => f.status === 'paid').reduce((t, f) => t + (Number(f.amount_usd) || 0), 0);
+  const pagoAlgo = filas.some(f => f.status === 'paid' || f.status === 'refunded');
   const vacio = n => (e.unlimited ? null : n);
   // Avisos de vencimiento: la tarjeta de planes se oculta con un plan pagado y reaparece 3 días antes de vencer;
   // desde 7 días antes se muestra un recordatorio ("Te quedan N días…") cada vez que la persona entra.
@@ -238,13 +310,20 @@ async function billingParaFrontend(userId) {
       api_count: e.limits.api, suspended: e.suspended, reason: e.reason,
       trial_ends_at: e.trialEndsAt, expires_at: e.expiresAt, days_left: e.daysLeft,
       daily_new_clients_limit: e.limits.daily,
+      amount: pagoAlgo ? Math.round(totalPagado * 100) / 100 : null,
+      currency: 'USD',
+      recurrence: 'Cada 30 días',
+      payment_method: cu?.payment_method || null,
+      started_at: cu?.subscription_started_at || null,
+      current_period_end: e.status === 'active' || e.suspended ? (e.expiresAt || cu?.subscription_expires_at || null) : (e.trialEndsAt || null),
       channels: {
         api: { limit: vacio(e.limits.api), used: u.api },
         qr: { limit: vacio(e.limits.qr), used: u.qr },
         warmup: { limit: vacio(e.limits.warmup), used: u.warmup }
       }
     },
-    invoices: [],
+    country: cu?.billing_country || null,
+    invoices: facturas,
     // Enlaces de pago de Hotmart (exterior) por cantidad de API. Variable HOTMART_CHECKOUTS: {"1":"https://pay.hotmart.com/…","2":"…"}
     checkout_urls: await enlacesHotmart(userId),
     plans_url: process.env.BILLING_PLANS_URL || null,
@@ -256,5 +335,5 @@ async function billingParaFrontend(userId) {
 module.exports = {
   PLANES, planDesdeN, planDesdeClave, DIAS_PRUEBA, DIAS_PLAN,
   estadoCuenta, limpiarCache, uso, rolesDe, puedeConectar, requireActive, botPermitido,
-  esDeHoyLima, pasoTopeDiario, marcarRol, activarPlan, sumarExtra, billingParaFrontend, mensajeSuspension
+  esDeHoyLima, pasoTopeDiario, marcarRol, activarPlan, sumarExtra, billingParaFrontend, registrarFactura, marcarReembolso, suspenderCuenta, vincularFacturas, numeroFactura, mensajeSuspension
 };

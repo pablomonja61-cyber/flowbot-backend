@@ -25,6 +25,7 @@ async function aplicarOrden(orden, usuario) {
   const regla = ofertas()[orden.offer_code];
   if (!regla || !usuario) return false;
   const aprobada = orden.status === 'approved';
+  if (orden.status === 'cancelled') return false; // compra cancelada/vencida sin cobro: no cambia el acceso
   if (regla.plan) {
     if (aprobada) await plans.activarPlan(usuario.id, regla.plan);
     else {
@@ -44,9 +45,34 @@ async function aplicarOrden(orden, usuario) {
   return true;
 }
 
+// Guarda la factura de la compra (o la marca reembolsada) para el historial de Cobros.
+async function registrarFacturaHotmart(orden, usuario, data) {
+  try {
+    const regla = ofertas()[orden.offer_code] || {};
+    const compra = data?.purchase || {};
+    const precio = compra.price || compra.full_price || {};
+    const monto = Number(precio.value ?? compra.original_offer_price?.value);
+    const moneda = String(precio.currency_value || compra.original_offer_price?.currency_value || 'USD').toUpperCase();
+    const plan = regla.plan ? plans.planDesdeClave(regla.plan) : null;
+    const descripcion = plan ? `${plan.nombre} (30 días)` : (regla.extra ? `Extra: ${regla.extra}` : 'Compra Hotmart');
+    if (orden.status === 'approved') {
+      const pais = data?.buyer?.address?.country || data?.buyer?.address?.country_iso || null;
+      await plans.registrarFactura({
+        userId: usuario?.id || null, email: orden.email, source: 'hotmart', externalId: orden.transaction,
+        description: descripcion, amount: Number.isFinite(monto) ? monto : (plan ? plan.usd : null), currency: Number.isFinite(monto) ? moneda : 'USD',
+        amountUsd: plan ? plan.usd : (moneda === 'USD' && Number.isFinite(monto) ? monto : null),
+        plan: plan?.clave || null, country: pais, method: compra.payment?.type ? `Hotmart · ${compra.payment.type}` : 'Hotmart'
+      });
+    } else if (orden.status === 'refunded') {
+      await plans.marcarReembolso('hotmart', orden.transaction);
+    }
+  } catch (e) { console.error('[Hotmart] registrarFacturaHotmart:', e.message); }
+}
+
 // Aplica compras aprobadas que llegaron antes de que la persona se registrara.
 async function aplicarComprasPendientes(usuario) {
   try {
+    await plans.vincularFacturas(usuario.id, usuario.email);
     const { data } = await supabase.from('hotmart_orders').select('*').eq('email', usuario.email.toLowerCase()).eq('status', 'approved').is('applied_at', null);
     for (const o of data || []) await aplicarOrden(o, usuario);
   } catch (e) { console.error('[Hotmart] aplicarComprasPendientes:', e.message); }
@@ -77,11 +103,13 @@ router.post('/hotmart', async (req, res) => {
     }
 
     const eventosAprobados = ['PURCHASE_APPROVED', 'PURCHASE_COMPLETE'];
-    const eventosDesaprobados = ['PURCHASE_CANCELED', 'PURCHASE_REFUNDED', 'PURCHASE_CHARGEBACK', 'PURCHASE_EXPIRED', 'PURCHASE_PROTEST'];
+    const eventosReembolso = ['PURCHASE_REFUNDED', 'PURCHASE_CHARGEBACK'];
+    const eventosSinCobro = ['PURCHASE_CANCELED', 'PURCHASE_EXPIRED', 'PURCHASE_PROTEST'];
 
     let status = null;
     if (eventosAprobados.includes(event)) status = 'approved';
-    else if (eventosDesaprobados.includes(event)) status = 'refunded';
+    else if (eventosReembolso.includes(event)) status = 'refunded';
+    else if (eventosSinCobro.includes(event)) status = 'cancelled';
 
     if (!status) {
       console.log(`[Hotmart] Evento "${event}" ignorado (no afecta el acceso)`);
@@ -96,7 +124,7 @@ router.post('/hotmart', async (req, res) => {
 
     if (existing) {
       await supabase.from('hotmart_purchases').update({
-        status,
+        status: status === 'approved' ? 'approved' : 'refunded',
         event,
         transaction: data?.purchase?.transaction || null,
         updated_at: new Date().toISOString()
@@ -105,7 +133,7 @@ router.post('/hotmart', async (req, res) => {
       await supabase.from('hotmart_purchases').insert({
         id: uuidv4(),
         email,
-        status,
+        status: status === 'approved' ? 'approved' : 'refunded',
         event,
         transaction: data?.purchase?.transaction || null,
         product_id: data?.product?.id ? String(data.product.id) : null,
@@ -124,6 +152,7 @@ router.post('/hotmart', async (req, res) => {
         const orden = { transaction: transaccion, email, offer_code: oferta, status, kind: ofertas()[oferta]?.plan ? 'plan' : (ofertas()[oferta]?.extra ? 'extra' : null), detail: { event, recurrence: data?.purchase?.recurrence_number || null } };
         await supabase.from('hotmart_orders').upsert(orden, { onConflict: 'transaction' });
         const { data: usuario } = await supabase.from('users').select('id,email').eq('email', email).maybeSingle();
+        await registrarFacturaHotmart(orden, usuario, data);
         if (usuario) await aplicarOrden(orden, usuario);
         else if (oferta && !ofertas()[oferta]) console.warn(`[Hotmart] Oferta sin configurar en HOTMART_OFFERS: ${oferta}`);
       }

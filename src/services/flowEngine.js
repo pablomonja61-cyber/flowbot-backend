@@ -1812,6 +1812,7 @@ ${JSON.stringify(textos, null, 2)}`;
 
 module.exports = {
   configIAPorDefecto, usaClavePlataforma,
+  aplicarVariablesGlobales,
   executeFlow,
   saveMessage,
   sendWhatsAppMessage,

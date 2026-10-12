@@ -11,6 +11,94 @@ const {
 const metaSvc = require('../services/metaProfiles');
 const plans = require('../services/plans');
 
+// ── Envío manual por el canal correcto (compartido por mensajes y respuestas rápidas) ──
+// Devuelve { ok, error }: ya no se oculta si WhatsApp rechazó el envío.
+async function enviarManual(conv, { content, media_url, media_type, file_name }) {
+  const esMedia = !!media_url;
+  if (!conv.connections) return { ok: false, error: 'La conversación no tiene conexión' };
+  const esCloudAPI = !!(conv.connections.phone_number_id && conv.connections.access_token);
+  try {
+    if (esCloudAPI) {
+      const { phone_number_id: pnid, access_token: tok } = conv.connections;
+      // Los identificadores de privacidad de Meta (BSUID, "PE.1733311707727685") van en "recipient", nunca en "to".
+      const esBSUID = /^[A-Z]{2}\.[A-Za-z0-9]{1,128}$/.test(conv.contact_phone);
+      const destinatarioField = esBSUID ? { recipient: conv.contact_phone } : { to: conv.contact_phone };
+      if (esMedia) {
+        if (media_type === 'image') await sendWhatsAppImage(pnid, tok, conv.contact_phone, media_url, content || '', null);
+        else if (media_type === 'video') await sendWhatsAppVideo(pnid, tok, conv.contact_phone, media_url, content || '', null);
+        else if (media_type === 'audio') await sendWhatsAppAudio(pnid, tok, conv.contact_phone, media_url, null);
+        else if (media_type === 'document') await sendWhatsAppDocument(pnid, tok, conv.contact_phone, media_url, file_name || '', null);
+        else if (media_type === 'sticker') {
+          await axios.post(`https://graph.facebook.com/v26.0/${pnid}/messages`,
+            { messaging_product: 'whatsapp', ...destinatarioField, type: 'sticker', sticker: { link: media_url } },
+            { headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' } });
+        } else return { ok: false, error: `Tipo de archivo no soportado: ${media_type}` };
+      } else {
+        await axios.post(`https://graph.facebook.com/v26.0/${pnid}/messages`,
+          { messaging_product: 'whatsapp', ...destinatarioField, type: 'text', text: { body: content } },
+          { headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' } });
+      }
+      return { ok: true };
+    }
+    // Conexión QR (Baileys) — usa el jid exacto guardado (puede ser @lid)
+    const result = esMedia
+      ? await sendManualMediaBaileys(conv.connection_id, conv.contact_phone, media_type, media_url, { caption: content, fileName: file_name }, conv.last_jid)
+      : await sendManualTextBaileys(conv.connection_id, conv.contact_phone, content, conv.id, conv.last_jid);
+    if (!result.success) {
+      console.error('[Manual send error - QR]', result.error);
+      return { ok: false, error: result.error };
+    }
+    return { ok: true };
+  } catch (e) {
+    const detalle = e.response?.data?.error?.message || e.message;
+    console.error('[Manual send error]', e.response?.data || e.message);
+    return { ok: false, error: detalle };
+  }
+}
+
+// Envía una lista de pasos (texto/imagen/video/audio/documento/sticker) en orden. Devuelve [{index, ok, error?}]
+async function enviarPasos(conv, acciones) {
+    const tipos = { text: null, image: 'image', video: 'video', audio: 'audio', file: 'document', document: 'document', sticker: 'sticker' };
+    const { aplicarVariablesGlobales } = require('../services/flowEngine');
+    const resultados = [];
+    for (let i = 0; i < acciones.length; i++) {
+      const a = acciones[i] || {};
+      if (!(a.type in tipos)) { resultados.push({ index: i, ok: false, error: 'Tipo no válido' }); continue; }
+      const mediaType = tipos[a.type];
+      let texto = typeof a.text === 'string' ? a.text : '';
+      try { texto = await aplicarVariablesGlobales(conv.id, texto); } catch (_) { /* se envía tal cual */ }
+      let paso;
+      if (!mediaType) {
+        if (!texto.trim()) { resultados.push({ index: i, ok: false, error: 'Texto vacío' }); continue; }
+        paso = { content: texto };
+      } else {
+        let u; try { u = new URL(a.url); } catch (_) { u = null; }
+        if (!u || !['https:', 'http:'].includes(u.protocol)) { resultados.push({ index: i, ok: false, error: 'Falta el archivo' }); continue; }
+        // En audio y sticker WhatsApp no admite leyenda
+        paso = { content: ['audio', 'sticker'].includes(mediaType) ? '' : texto, media_url: u.href, media_type: mediaType, file_name: a.fileName || '' };
+      }
+      const envio = await enviarManual(conv, paso);
+      if (envio.ok) { await guardarSaliente(conv.id, paso); resultados.push({ index: i, ok: true }); }
+      else resultados.push({ index: i, ok: false, error: envio.error });
+      if (i < acciones.length - 1) await new Promise(r => setTimeout(r, 700));
+    }
+  return resultados;
+}
+
+async function guardarSaliente(convId, { content, media_url, media_type, file_name }) {
+  const esMedia = !!media_url;
+  const guardado = content || (media_type === 'document' ? `[Documento: ${file_name || 'archivo'}]` : `[${(media_type || 'Media').replace(/^\w/, c => c.toUpperCase())}]`);
+  const ahora = new Date().toISOString();
+  const { data: msg } = await supabase.from('messages').insert({
+    conversation_id: convId, content: guardado, direction: 'outbound',
+    msg_type: esMedia ? media_type : 'text', media_url: esMedia ? media_url : null, created_at: ahora
+  }).select().single();
+  await supabase.from('conversations').update({
+    last_message: guardado.slice(0, 100), last_message_at: ahora, last_message_direction: 'outbound', bot_ever_responded: true
+  }).eq('id', convId);
+  return msg;
+}
+
 // ── Conversión de moneda real para el Dashboard ─────────────────
 // Todos los montos de venta se guardan en Soles (PEN), la moneda del
 // negocio. Cuando el usuario elige ver el Dashboard en otra moneda,
@@ -130,49 +218,10 @@ router.post('/:id/messages', plans.requireActive, async (req, res, next) => {
       .single();
     if (!conv) return res.status(404).json({ error: 'Conversación no encontrada' });
 
-    // Enviar por WhatsApp si es outbound — detecta el TIPO de conexión
-    // (QR/Baileys vs WhatsApp Cloud API) y usa el canal correcto.
-    // Antes esto SIEMPRE intentaba mandar por Cloud API sin importar
-    // el tipo, así que para conexiones QR nunca llegaba de verdad,
-    // aunque el mensaje sí se guardaba como si hubiera funcionado.
+    // Enviar por WhatsApp si es outbound (QR/Baileys o Cloud API, según la conexión)
+    let envio = { ok: true };
     if (direction === 'outbound' && conv.connections) {
-      const esCloudAPI = !!(conv.connections.phone_number_id && conv.connections.access_token);
-
-      if (esCloudAPI) {
-        try {
-          // Los identificadores de privacidad de Meta (BSUID, formato
-          // "PE.1733311707727685") van en el campo "recipient", NUNCA
-          // en "to" — Meta rechaza el mensaje si se manda un BSUID en
-          // "to" (ese campo es solo para números de teléfono reales).
-          const esBSUID = /^[A-Z]{2}\.[A-Za-z0-9]{1,128}$/.test(conv.contact_phone);
-          const destinatarioField = esBSUID ? { recipient: conv.contact_phone } : { to: conv.contact_phone };
-
-          if (esMedia) {
-            const { phone_number_id: pnid, access_token: tok } = conv.connections;
-            if (media_type === 'image') await sendWhatsAppImage(pnid, tok, conv.contact_phone, media_url, content || '', null);
-            else if (media_type === 'video') await sendWhatsAppVideo(pnid, tok, conv.contact_phone, media_url, content || '', null);
-            else if (media_type === 'audio') await sendWhatsAppAudio(pnid, tok, conv.contact_phone, media_url, null);
-            else if (media_type === 'document') await sendWhatsAppDocument(pnid, tok, conv.contact_phone, media_url, file_name || '', null);
-          } else {
-            await axios.post(
-              `https://graph.facebook.com/v26.0/${conv.connections.phone_number_id}/messages`,
-              { messaging_product: 'whatsapp', ...destinatarioField, type: 'text', text: { body: content } },
-              { headers: { Authorization: `Bearer ${conv.connections.access_token}`, 'Content-Type': 'application/json' } }
-            );
-          }
-        } catch (e) {
-          console.error('[Manual send error - Cloud API]', e.response?.data || e.message);
-        }
-      } else {
-        // Conexión QR (Baileys) — usa el jid exacto guardado (puede ser
-        // @lid en vez de @s.whatsapp.net), si ya lo tenemos registrado.
-        const result = esMedia
-          ? await sendManualMediaBaileys(conv.connection_id, conv.contact_phone, media_type, media_url, { caption: content, fileName: file_name }, conv.last_jid)
-          : await sendManualTextBaileys(conv.connection_id, conv.contact_phone, content, req.params.id, conv.last_jid);
-        if (!result.success) {
-          console.error('[Manual send error - QR]', result.error);
-        }
-      }
+      envio = await enviarManual(conv, { content, media_url: esMedia ? media_url : null, media_type, file_name });
     }
 
     const contentGuardado = content || (media_type === 'document' ? `[Documento: ${file_name || 'archivo'}]` : `[${(media_type || 'Media').replace(/^\w/, c => c.toUpperCase())}]`);
@@ -198,7 +247,7 @@ router.post('/:id/messages', plans.requireActive, async (req, res, next) => {
       ...(direction === 'outbound' ? { bot_ever_responded: true } : {})
     }).eq('id', req.params.id);
 
-    res.status(201).json(msg);
+    res.status(201).json({ ...msg, delivered: envio.ok, ...(envio.ok ? {} : { delivery_error: envio.error }) });
   } catch (err) { next(err); }
 });
 
@@ -1114,6 +1163,24 @@ router.post('/:id/messages/audio', plans.requireActive, audioUpload.single('audi
 });
 
 // ── PUT /api/conversations/:id/tags (etiquetas manuales del chat) ──
+
+// ── POST /api/conversations/:id/quick-reply ───────────────────
+// Envía una respuesta rápida completa (texto, imagen, video, audio, documento, sticker) en orden.
+// Body: { actions: [{ type, text, url, fileName }] }
+router.post('/:id/quick-reply', plans.requireActive, async (req, res, next) => {
+  try {
+    const acciones = Array.isArray(req.body?.actions) ? req.body.actions.slice(0, 20) : [];
+    if (!acciones.length) return res.status(400).json({ error: 'La respuesta rápida no tiene pasos' });
+    const { data: conv } = await supabase.from('conversations').select('*, connections(*)')
+      .eq('id', req.params.id).eq('user_id', req.user.id).single();
+    if (!conv) return res.status(404).json({ error: 'Conversación no encontrada' });
+
+    const resultados = await enviarPasos(conv, acciones);
+    const enviados = resultados.filter(r => r.ok).length;
+    res.status(enviados ? 200 : 502).json({ sent: enviados, total: acciones.length, results: resultados });
+  } catch (err) { next(err); }
+});
+
 router.put('/:id/tags', async (req, res, next) => {
   try {
     const tags = req.body?.tags;
@@ -1145,4 +1212,5 @@ router.get('/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+router.enviarPasos = enviarPasos;
 module.exports = router;

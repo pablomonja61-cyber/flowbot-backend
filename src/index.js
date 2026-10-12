@@ -54,6 +54,7 @@ app.use(cors({
     'https://ariabot-octubre.iamblezts.chatgpt.site',
     'https://ariabot-pablo.k4el-ux.chatgpt.site',
     'https://ariabot-octubre-2026.iamblezts.chatgpt.site',
+    'https://ariabot-oct09.ariabot-app.chatgpt.site',
     'http://localhost:5173',
     'https://ventas-vista.lovable.app'
   ],
@@ -77,6 +78,8 @@ app.use('/api/triggers', triggerRoutes);
 app.use('/api/connections', connectionRoutes);
 app.use('/api/conversations', conversationRoutes);
 app.use('/api/yape', yapeRoutes);
+const scheduledRoutes = require('./routes/scheduled');
+app.use('/api/scheduled-messages', scheduledRoutes);
 app.use('/api/qr-connections', qrConnectionRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/ai-config', aiConfigRoutes);
@@ -112,6 +115,8 @@ app.use((err, req, res, next) => {
   });
 });
 setTimeout(() => restoreActiveSessions(), 3000);
+scheduledRoutes.iniciar();
+
 app.listen(PORT, () => {
   console.log(`🚀 Backend corriendo en puerto ${PORT}`);
   console.log(`📡 Webhook: POST /webhook/whatsapp`);

@@ -254,10 +254,55 @@ router.get('/me', authMiddleware, async (req, res, next) => {
       .eq('id', req.user.id)
       .single();
     const billing = await plans.billingParaFrontend(req.user.id).catch(() => null);
-    res.json({ ...profile, billing });
+    res.json({ ...profile, account_id: profile?.id ? 'AB-' + String(profile.id).replace(/-/g, '').slice(0, 8).toUpperCase() : undefined, billing });
   } catch (err) {
     next(err);
   }
+});
+
+// ── PUT /api/auth/me ─────────────────────────────────────────
+// Lo usa la pantalla "Mi perfil": datos personales (nombre, foto) o cambio de contraseña.
+router.put('/me', authMiddleware, async (req, res, next) => {
+  try {
+    const { name, avatar_url, email, current_password, new_password } = req.body || {};
+    const { data: actual } = await supabase.from('users').select('*').eq('id', req.user.id).single();
+    if (!actual) return res.status(404).json({ error: 'Usuario no encontrado' });
+
+    // Cambio de contraseña
+    if (new_password !== undefined || current_password !== undefined) {
+      if (!current_password || !new_password) return res.status(400).json({ error: 'Escribe tu contraseña actual y la nueva.' });
+      if (String(new_password).length < 6) return res.status(400).json({ error: 'La nueva contraseña debe tener al menos 6 caracteres.' });
+      const { error: signInError } = await supabase.auth.signInWithPassword({ email: actual.email, password: current_password });
+      if (signInError) return res.status(401).json({ error: 'La contraseña actual no es correcta.' });
+      const { error: updateError } = await supabase.auth.admin.updateUserById(req.user.id, { password: new_password });
+      if (updateError) throw updateError;
+      return res.json({ ...actual, message: 'Contraseña actualizada correctamente.' });
+    }
+
+    // El correo no se cambia desde aquí (está ligado a tus pagos y a tu acceso)
+    if (email !== undefined && String(email).trim().toLowerCase() !== String(actual.email || '').toLowerCase()) {
+      return res.status(400).json({ error: 'El correo de la cuenta no se puede cambiar. Escríbenos a soporte si necesitas cambiarlo.' });
+    }
+
+    const updates = {};
+    if (name !== undefined) {
+      const limpio = String(name).trim();
+      if (limpio.length < 2 || limpio.length > 100) return res.status(400).json({ error: 'Escribe tu nombre completo (2 a 100 caracteres).' });
+      updates.name = limpio;
+    }
+    if (avatar_url !== undefined) {
+      if (avatar_url !== null) {
+        try { const u = new URL(avatar_url); if (!['https:', 'http:'].includes(u.protocol)) throw 0; }
+        catch { return res.status(400).json({ error: 'La foto no es válida.' }); }
+      }
+      updates.avatar_url = avatar_url;
+    }
+    if (!Object.keys(updates).length) return res.json(actual);
+
+    const { data: profile, error } = await supabase.from('users').update(updates).eq('id', req.user.id).select().single();
+    if (error) throw error;
+    res.json(profile);
+  } catch (err) { next(err); }
 });
 
 // ── PATCH /api/auth/profile ──────────────────────────────────

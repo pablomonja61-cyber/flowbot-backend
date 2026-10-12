@@ -261,7 +261,15 @@ router.get('/admin/payments', auth, async (req, res) => {
 router.post('/admin/payments/:id/:accion', auth, async (req, res) => {
   if (!esAdmin(req)) return res.status(403).json({ error: 'Solo administrador' });
   const { id, accion } = req.params;
-  if (!['approve', 'reject'].includes(accion)) return res.status(400).json({ error: 'Acción inválida' });
+  if (!['approve', 'reject', 'refund'].includes(accion)) return res.status(400).json({ error: 'Acción inválida' });
+  if (accion === 'refund') {
+    // Reembolso manual: marca la factura como reembolsada y suspende la cuenta
+    const { data: p } = await supabase.from('yape_payments').select('id,user_id').eq('id', id).maybeSingle();
+    if (!p) return res.status(404).json({ error: 'No existe' });
+    await plans.marcarReembolso('yape', id);
+    await plans.suspenderCuenta(p.user_id);
+    return res.json({ ok: true, refunded: true });
+  }
   const { data: pago } = await supabase.from('yape_payments').select('*').eq('id', id).maybeSingle();
   if (!pago) return res.status(404).json({ error: 'No existe' });
   if (pago.status === 'approved' && accion === 'approve') return res.json(pago);
@@ -282,6 +290,13 @@ async function activarPlan(pago) {
   try {
     const cambios = await plans.activarPlan(pago.user_id, pago.plan, pago.extras || {});
     await supabase.from('yape_payments').update({ activated: true, applied_at: new Date().toISOString() }).eq('id', pago.id);
+    const pl = plans.planDesdeClave(pago.plan);
+    const { data: us } = await supabase.from('users').select('email').eq('id', pago.user_id).maybeSingle();
+    await plans.registrarFactura({
+      userId: pago.user_id, email: us?.email, source: 'yape', externalId: pago.id,
+      description: pl ? `${pl.nombre} (30 días)` : 'Pago por Yape', amount: Number(pago.expected_amount) || null, currency: 'PEN',
+      amountUsd: pl ? pl.usd : null, plan: pago.plan, country: 'Perú', method: 'Yape / Plin'
+    });
     console.log(`[Yape] Plan ${pago.plan} activado para ${pago.user_id} hasta ${cambios.subscription_expires_at}`);
   } catch (e) { console.error('[Yape] activarPlan falló:', e.message); }
 }

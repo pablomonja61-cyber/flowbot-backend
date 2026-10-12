@@ -2266,6 +2266,8 @@ async function sendManualMediaBaileys(connectionId, contactPhone, mediaType, url
       await sendAudioMsg(sock, jid, url, null, !!extra.asVoiceNote);
     } else if (mediaType === 'document') {
       await sendDocumentMsg(sock, jid, url, extra.fileName || '', null);
+    } else if (mediaType === 'sticker') {
+      await sock.sendMessage(jid, { sticker: { url } });
     } else {
       return { success: false, error: `Tipo de archivo no soportado: ${mediaType}` };
     }
