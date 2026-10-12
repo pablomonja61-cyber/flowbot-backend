@@ -280,7 +280,7 @@ async function enlacesHotmart(userId) {
 async function billingParaFrontend(userId) {
   const e = await estadoCuenta(userId);
   const u = await uso(userId);
-  const { data: cu } = await supabase.from('users').select('email,billing_country,payment_method,subscription_started_at,subscription_expires_at').eq('id', userId).maybeSingle();
+  const { data: cu } = await supabase.from('users').select('email,created_at,billing_country,payment_method,subscription_started_at,subscription_expires_at').eq('id', userId).maybeSingle();
   const filas = await facturasDe(userId, cu?.email);
   const facturas = filas.map(f => ({
     id: f.id, number: numeroFactura(f.number), date: f.paid_at, description: f.description,
@@ -310,11 +310,11 @@ async function billingParaFrontend(userId) {
       api_count: e.limits.api, suspended: e.suspended, reason: e.reason,
       trial_ends_at: e.trialEndsAt, expires_at: e.expiresAt, days_left: e.daysLeft,
       daily_new_clients_limit: e.limits.daily,
-      amount: pagoAlgo ? Math.round(totalPagado * 100) / 100 : null,
+      amount: Math.round(totalPagado * 100) / 100,
       currency: 'USD',
       recurrence: 'Cada 30 días',
-      payment_method: cu?.payment_method || null,
-      started_at: cu?.subscription_started_at || null,
+      payment_method: cu?.payment_method || (e.status === 'trialing' ? 'Prueba gratuita' : (pagoAlgo ? null : 'Plan otorgado sin pago')),
+      started_at: cu?.subscription_started_at || cu?.created_at || null,
       current_period_end: e.status === 'active' || e.suspended ? (e.expiresAt || cu?.subscription_expires_at || null) : (e.trialEndsAt || null),
       channels: {
         api: { limit: vacio(e.limits.api), used: u.api },
