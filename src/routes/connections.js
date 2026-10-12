@@ -5,6 +5,7 @@ const auth = require('../middleware/auth');
 const supabase = require('../models/supabase');
 const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
+const followupGuard = require('../services/followupGuard');
 
 router.use(auth);
 
@@ -13,10 +14,22 @@ router.get('/', async (req, res, next) => {
   try {
     const { data, error } = await supabase
       .from('connections')
-      .select('id, name, phone_number, waba_id, is_active, connection_type, qr_status, created_at')
+      .select('id, name, phone_number, waba_id, is_active, connection_type, qr_status, created_at, verify_free_before_blocking, calls_enabled, followup_regulation_enabled')
       .eq('user_id', req.user.id);
     if (error) throw error;
-    res.json(data);
+    // Datos de "Prevención de baneo" (solo conexiones de API)
+    const lista = await Promise.all((data || []).map(async con => {
+      if (con.connection_type === 'qr') return con;
+      try {
+        const s = await followupGuard.estadisticas(con.id);
+        return {
+          ...con,
+          protected_mode: followupGuard.enModoProtegido(con),
+          followups_sent: s.sent, followups_answered: s.answered, followup_response_rate: s.rate
+        };
+      } catch (_) { return con; }
+    }));
+    res.json(lista);
   } catch (err) { next(err); }
 });
 
@@ -101,6 +114,52 @@ router.put('/:id', async (req, res, next) => {
       .select('id, name, phone_number, waba_id, is_active, created_at')
       .single();
 
+    if (error) throw error;
+    res.json(data);
+  } catch (err) { next(err); }
+});
+
+// ── PATCH /api/connections/:id/options ────────────────────────
+// Interruptores de la conexión (pantalla de detalle de la API):
+//   verify_free_before_blocking, followup_regulation_enabled, calls_enabled  (true/false)
+// "Llamadas" se aplica de verdad en Meta (WhatsApp Calling API); si Meta lo rechaza, no se guarda.
+router.patch('/:id/options', async (req, res, next) => {
+  try {
+    const { data: con } = await supabase.from('connections')
+      .select('id, phone_number_id, access_token, connection_type, calls_enabled')
+      .eq('id', req.params.id).eq('user_id', req.user.id).maybeSingle();
+    if (!con) return res.status(404).json({ error: 'Conexión no encontrada' });
+
+    const aBool = v => typeof v === 'boolean' ? v : (typeof v === 'string' ? (v === 'true' ? true : v === 'false' ? false : undefined) : undefined);
+    const cambios = {};
+    for (const k of ['verify_free_before_blocking', 'followup_regulation_enabled']) {
+      const v = aBool(req.body?.[k]);
+      if (req.body?.[k] !== undefined) {
+        if (v === undefined) return res.status(400).json({ error: `"${k}" debe ser true o false` });
+        cambios[k] = v;
+      }
+    }
+    if (req.body?.calls_enabled !== undefined) {
+      const v = aBool(req.body.calls_enabled);
+      if (v === undefined) return res.status(400).json({ error: '"calls_enabled" debe ser true o false' });
+      if (!con.phone_number_id || !con.access_token || con.connection_type === 'qr') {
+        return res.status(400).json({ error: 'Las llamadas solo están disponibles en conexiones de API oficial.' });
+      }
+      try {
+        await axios.post(`https://graph.facebook.com/v26.0/${con.phone_number_id}/settings`,
+          { calling: { status: v ? 'ENABLED' : 'DISABLED' } },
+          { headers: { Authorization: `Bearer ${con.access_token}`, 'Content-Type': 'application/json' } });
+      } catch (e) {
+        const detalle = e.response?.data?.error?.error_user_msg || e.response?.data?.error?.message || e.message;
+        return res.status(502).json({ error: `Meta no permitió cambiar las llamadas: ${detalle}` });
+      }
+      cambios.calls_enabled = v;
+    }
+    if (!Object.keys(cambios).length) return res.status(400).json({ error: 'Nada para actualizar' });
+
+    const { data, error } = await supabase.from('connections').update(cambios)
+      .eq('id', req.params.id).eq('user_id', req.user.id)
+      .select('id, verify_free_before_blocking, calls_enabled, followup_regulation_enabled').single();
     if (error) throw error;
     res.json(data);
   } catch (err) { next(err); }

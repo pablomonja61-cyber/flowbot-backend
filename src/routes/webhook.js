@@ -58,6 +58,27 @@ router.get('/whatsapp', (req, res) => {
   res.status(403).send('Forbidden');
 });
 
+// ════════════════════════════════════════════════════════════
+// "Verificar gratuidad antes de bloquear"
+// Meta informa en el estado de cada mensaje si lo cobra (pricing.billable). Si una respuesta libre
+// (categoría "service", que debería ser gratis) llega marcada como cobrable y la conexión tiene
+// activada la opción, el bot se detiene en esa conversación para no seguir generando cobros.
+// Las plantillas y difusiones (marketing/utility) se cobran por diseño y NO se bloquean.
+// ════════════════════════════════════════════════════════════
+async function manejarEstadoMensaje(phoneNumberId, st) {
+  const p = st?.pricing;
+  if (!p || p.billable !== true || String(p.category || '') !== 'service') return;
+  const { data: con } = await supabase.from('connections').select('id, verify_free_before_blocking').eq('phone_number_id', phoneNumberId).maybeSingle();
+  if (!con || con.verify_free_before_blocking === false) return;
+  const destino = st.recipient_id || st.recipient_user_id;
+  if (!destino) return;
+  const { data: conv } = await supabase.from('conversations').select('id, flow_active').eq('connection_id', con.id).eq('contact_phone', destino).maybeSingle();
+  if (!conv) return;
+  await supabase.from('conversations').update({ flow_active: false, paid_blocked_at: new Date().toISOString() }).eq('id', conv.id);
+  await cancelFollowups(conv.id);
+  console.log(`[Webhook] 💲 Meta marcó como cobrable una respuesta de servicio — bot detenido en ${conv.id}`);
+}
+
 // ── POST /webhook/whatsapp — mensajes entrantes ──────────────
 router.post('/whatsapp', async (req, res) => {
   // Responder 200 inmediatamente a Meta (requiere <5s)
@@ -80,6 +101,11 @@ router.post('/whatsapp', async (req, res) => {
         const value = change.value;
         const phoneNumberId = value.metadata?.phone_number_id;
         if (!phoneNumberId) continue;
+
+        // Estados de los mensajes enviados (incluyen si Meta los cobra)
+        for (const st of value.statuses || []) {
+          manejarEstadoMensaje(phoneNumberId, st).catch(e => console.error('[Webhook] Error en estado de mensaje:', e.message));
+        }
 
         for (const msg of value.messages || []) {
           // Desde el 31 de marzo de 2026, si el cliente activó "nombres

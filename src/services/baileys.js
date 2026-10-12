@@ -6,6 +6,7 @@ const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
 const crypto = require('crypto');
 const plans = require('../services/plans');
+const followupGuard = require('../services/followupGuard');
 const path = require('path');
 const fs = require('fs');
 const { cancelFollowups, sendFollowupContentCloud, sendPurchaseEventToMeta } = require('../services/flowEngine');
@@ -1150,6 +1151,13 @@ async function processScheduledFollowups() {
           await supabase.from('scheduled_followups').update({ status: 'failed' }).eq('id', item.id);
           continue;
         }
+      }
+      // Prevención de baneo: regulación automática de seguimientos
+      const guarda = await followupGuard.permitir(item);
+      if (!guarda.ok) {
+        await supabase.from('scheduled_followups').update({ status: 'cancelled' }).eq('id', item.id);
+        console.log(`[Followups] ⛔ Seguimiento ${item.id} omitido — ${guarda.reason}`);
+        continue;
       }
       const sock = item.connection_id ? activeSessions[item.connection_id] : null;
 
