@@ -498,6 +498,25 @@ async function sendPurchaseEventToMeta(userId, conversation, saleAmount) {
 // antes de responder, envolviendo ese pensamiento en <think>...</think>
 // — eso NUNCA debe llegarle al cliente por WhatsApp, solo la respuesta
 // final. Esta función lo quita, sin importar qué modelo se use.
+// Normaliza nombres de modelo (alias cortos -> ID real de la API) y
+// decide qué parámetro de tokens usa cada modelo de OpenAI.
+function normalizarModelo(prov, model) {
+  if (!model) return model;
+  const m = String(model).trim();
+  const alias = {
+    'claude-haiku-4-5': 'claude-haiku-4-5-20251001', 'claude-haiku-4.5': 'claude-haiku-4-5-20251001',
+    'claude-sonnet-5': 'claude-sonnet-5-5', 'claude-sonnet-5.5': 'claude-sonnet-5-5',
+    'claude-opus-5': 'claude-opus-5-5', 'claude-opus-5.5': 'claude-opus-5-5',
+    'claude-fable-5': 'claude-fable-5-1', 'claude-fable-5.1': 'claude-fable-5-1',
+    'gpt-5.6 luna': 'gpt-5.6-luna', 'gpt-5.6 terra': 'gpt-5.6-terra'
+  };
+  return alias[m.toLowerCase()] || m;
+}
+function tokensParam(prov, model, n) {
+  const nuevo = prov === 'openai' && /^(gpt-5|o\d)/i.test(String(model || ''));
+  return nuevo ? { max_completion_tokens: n } : { max_tokens: n };
+}
+
 function limpiarRazonamiento(texto) {
   if (!texto) return texto;
   let limpio = texto.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
@@ -571,7 +590,7 @@ async function callAIProvider(provider, apiKey, model, systemPrompt, conversatio
     const response = await axios.post(
       'https://api.anthropic.com/v1/messages',
       {
-        model: model || 'claude-sonnet-4-6',
+        model: normalizarModelo(prov, model) || 'claude-sonnet-4-6',
         max_tokens: maxTokens,
         system: systemPrompt,
         messages: conversationMessages
@@ -614,8 +633,8 @@ async function callAIProvider(provider, apiKey, model, systemPrompt, conversatio
   const response = await axios.post(
     baseUrl,
     {
-      model: model || defaultModel,
-      max_tokens: maxTokens,
+      model: normalizarModelo(prov, model) || defaultModel,
+      ...tokensParam(prov, normalizarModelo(prov, model) || defaultModel, maxTokens),
       messages: [{ role: 'system', content: systemPrompt }, ...conversationMessages]
     },
     { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 15000 }
@@ -1181,7 +1200,7 @@ async function callVisionAI(provider, apiKey, promptText, base64Image, mimeType,
     baseUrl,
     {
       model: visionModel,
-      max_tokens: maxTokens,
+      ...tokensParam(prov, visionModel, maxTokens),
       messages: [{
         role: 'user',
         content: [
