@@ -78,6 +78,11 @@ app.use('/api/triggers', triggerRoutes);
 app.use('/api/connections', connectionRoutes);
 app.use('/api/conversations', conversationRoutes);
 app.use('/api/capi-business', require('./routes/capiProjects'));
+// Yape está desactivado (solo se cobra por Hotmart). El panel aún consulta estas rutas:
+// se responde vacío para que no salga el error 404 al entrar.
+app.get('/api/yape/payments', (req, res) => res.json([]));
+app.get('/api/yape/prices', (req, res) => res.json([]));
+app.all('/api/yape/*', (req, res) => res.status(410).json({ error: 'Los pagos por Yape ya no están disponibles.' }));
 app.use('/api/capi-metrics', require('./routes/capiStats'));
 const scheduledRoutes = require('./routes/scheduled');
 app.use('/api/scheduled-messages', scheduledRoutes);
