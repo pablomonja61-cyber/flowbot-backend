@@ -589,7 +589,7 @@ async function callAIProvider(provider, apiKey, model, systemPrompt, conversatio
   }
 
   if (prov === 'gemini' || prov === 'google') {
-    const geminiModel = model || 'gemini-2.0-flash';
+    const geminiModel = model || 'gemini-2.5-flash-lite';
     const contents = conversationMessages.map(m => ({
       role: m.role === 'assistant' ? 'model' : 'user',
       parts: [{ text: m.content }]
@@ -1132,7 +1132,7 @@ async function resolvePaidPathNode(conversation) {
 // ── Llama a la IA con una imagen (análisis de comprobantes de pago).
 // Cada proveedor tiene su propio formato para mandar imágenes — esta
 // función lo unifica, igual que callAIProvider unifica el texto.
-async function callVisionAI(provider, apiKey, promptText, base64Image, mimeType, maxTokens = 400) {
+async function callVisionAI(provider, apiKey, promptText, base64Image, mimeType, maxTokens = 400, model = null) {
   const prov = (provider || 'openai').toLowerCase();
 
   if (prov === 'claude' || prov === 'anthropic') {
@@ -1156,7 +1156,7 @@ async function callVisionAI(provider, apiKey, promptText, base64Image, mimeType,
 
   if (prov === 'gemini' || prov === 'google') {
     const response = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${model || 'gemini-2.5-flash-lite'}:generateContent?key=${apiKey}`,
       {
         contents: [{
           role: 'user',
@@ -1291,7 +1291,7 @@ ${validarExtra ? `- cumple_validacion_extra: true/false según si cumple: "${val
 Responde SOLO en formato JSON exacto:
 {"es_comprobante": true/false, "monto": numero_o_null, "titular_destino": "nombre_o_null", "numero_operacion": "texto_o_null", "fecha_es_hoy": true/false/null, "estado_pago": "confirmado/pendiente/desconocido"${validarExtra ? ', "cumple_validacion_extra": true/false' : ''}}`;
 
-    const rawText = await callVisionAI(providerPago, apiKey, promptText, base64Image, mimeType, 400);
+    const rawText = await callVisionAI(providerPago, apiKey, promptText, base64Image, mimeType, 400, aiConfigPago?.model || null);
     const jsonMatch = rawText.match(/\{[\s\S]*\}/);
     if (jsonMatch) analysisResult = JSON.parse(jsonMatch[0]);
   } catch (err) {
