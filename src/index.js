@@ -78,6 +78,7 @@ app.use('/api/triggers', triggerRoutes);
 app.use('/api/connections', connectionRoutes);
 app.use('/api/conversations', conversationRoutes);
 app.use('/api/capi-business', require('./routes/capiProjects'));
+app.use('/api/capi-metrics', require('./routes/capiStats'));
 const scheduledRoutes = require('./routes/scheduled');
 app.use('/api/scheduled-messages', scheduledRoutes);
 app.use('/api/qr-connections', qrConnectionRoutes);

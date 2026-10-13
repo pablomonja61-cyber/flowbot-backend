@@ -1122,7 +1122,7 @@ router.post('/:id/send-purchase-event', async (req, res, next) => {
     if (error) throw error;
     if (!conv) return res.status(404).json({ error: 'Conversación no encontrada.' });
     if (!conv.is_sale) return res.status(400).json({ error: 'Esta conversación todavía no tiene una venta registrada.' });
-    await sendPurchaseEventToMeta(req.user.id, conv, conv.sale_amount || 0);
+    await sendPurchaseEventToMeta(req.user.id, conv, conv.sale_amount || 0, { reenvio: true });
     const { data: despues } = await supabase.from('conversations').select('meta_event_status').eq('id', conv.id).maybeSingle();
     res.json({ success: true, meta_event_status: despues?.meta_event_status || null });
   } catch (err) { next(err); }

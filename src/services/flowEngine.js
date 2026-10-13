@@ -405,7 +405,19 @@ async function isCountryBlocked(userId, contactPhone) {
 // CONVERSIONS API DE META — manda el evento de venta real para
 // que Meta pueda optimizar la entrega de anuncios hacia ventas.
 // ════════════════════════════════════════════════════════════
-async function sendPurchaseEventToMeta(userId, conversation, saleAmount) {
+async function sendPurchaseEventToMeta(userId, conversation, saleAmount, opts = {}) {
+  // Guarda la venta para las métricas de CAPI (por número) y luego anota cómo respondió Meta.
+  const metricas = require('./capiMetrics');
+  let eventoId = null;
+  if (!opts.reenvio) {
+    eventoId = await metricas.registrar(userId, conversation, saleAmount);
+    await supabase.from('conversations').update({ meta_event_status: null }).eq('id', conversation.id);
+  }
+  try { await enviarCompraInterno(userId, conversation, saleAmount); }
+  finally { await metricas.cerrar(eventoId, conversation.id); }
+}
+
+async function enviarCompraInterno(userId, conversation, saleAmount) {
   try {
     // Proyecto "Meta CAPI Business" (conexiones QR): si la conexión pertenece a uno, se envía por ahí.
     if (await require('./capiBusiness').enviarCompra(userId, conversation, saleAmount)) return;
