@@ -407,6 +407,8 @@ async function isCountryBlocked(userId, contactPhone) {
 // ════════════════════════════════════════════════════════════
 async function sendPurchaseEventToMeta(userId, conversation, saleAmount) {
   try {
+    // Proyecto "Meta CAPI Business" (conexiones QR): si la conexión pertenece a uno, se envía por ahí.
+    if (await require('./capiBusiness').enviarCompra(userId, conversation, saleAmount)) return;
     // Primero intenta con la integración real "Meta CAPI Cloud" (un
     // Dataset distinto por cada WhatsApp conectado) — la que el
     // usuario configuró de verdad en Integraciones.

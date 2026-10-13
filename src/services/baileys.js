@@ -1865,6 +1865,20 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
   if (!conversation) return;
   if (conversation.is_blocked) return;
 
+  // Anuncio "Enviar mensaje" (Click to WhatsApp): guarda de qué anuncio vino (para Meta CAPI Business)
+  try {
+    const ctx = rawMsg?.message?.extendedTextMessage?.contextInfo || rawMsg?.message?.conversation?.contextInfo || null;
+    const ad = ctx?.externalAdReply;
+    if (ad && !conversation.ctwa_clid && (ad.ctwaClid || ad.sourceId)) {
+      const datosAd = {
+        ctwa_clid: ad.ctwaClid || null, ad_id: ad.sourceId || null, ad_source_url: ad.sourceUrl || null,
+        ad_headline: ad.title || null, ad_image_url: ad.thumbnailUrl || null
+      };
+      await supabase.from('conversations').update(datosAd).eq('id', conversation.id);
+      conversation = { ...conversation, ...datosAd };
+    }
+  } catch (e) { console.error('[Baileys] No se pudo guardar el origen del anuncio:', e.message); }
+
   // Guarda el jid exacto (puede ser @s.whatsapp.net o @lid) para que
   // el envío manual desde "Chat en Vivo" y otras funciones puedan
   // usar el identificador correcto más adelante, en vez de reconstruirlo
