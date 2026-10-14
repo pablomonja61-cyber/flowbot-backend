@@ -1232,6 +1232,102 @@ router.post('/:id/finish', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── POST /api/conversations/new ────────────────────────────────
+// Botón "Nuevo" del Chat en vivo: abre un chat con un número nuevo, desde cero.
+// Body: { connection_id, phone, name?, message?, template_name?, template_language?, template_components? }
+//  - QR: se puede enviar un mensaje de texto directo.
+//  - API oficial: WhatsApp solo deja iniciar un chat con una PLANTILLA aprobada (texto libre solo dentro de las 24 h
+//    después de que el cliente escribe). Si se manda "message" y WhatsApp lo rechaza, el chat igual se crea.
+router.post('/new', plans.requireActive, async (req, res, next) => {
+  try {
+    const { connection_id, phone, name, message, template_name, template_language, template_components } = req.body || {};
+    if (!connection_id) return res.status(400).json({ error: 'Elige el WhatsApp desde el que escribirás.' });
+    const digits = String(phone || '').replace(/\D/g, '');
+    if (digits.length < 8 || digits.length > 15) {
+      return res.status(400).json({ error: 'Escribe el número con código de país y solo dígitos (por ejemplo 51900123456).' });
+    }
+
+    const { data: con } = await supabase.from('connections').select('*').eq('id', connection_id).eq('user_id', req.user.id).maybeSingle();
+    if (!con) return res.status(404).json({ error: 'Ese WhatsApp no existe en tu cuenta.' });
+    const esQr = con.connection_type === 'qr';
+    if (!esQr && (!con.phone_number_id || !con.access_token)) {
+      return res.status(400).json({ error: 'Este WhatsApp API todavía no está configurado por completo.' });
+    }
+
+    // QR: la sesión debe estar activa y el número debe tener WhatsApp
+    let jid = null;
+    if (esQr) {
+      const sock = activeSessions[con.id];
+      if (!sock) return res.status(409).json({ code: 'SESSION_OFFLINE', error: 'Este WhatsApp QR no está conectado ahora. Vuelve a escanear el QR en Conexiones.' });
+      try {
+        const r = await sock.onWhatsApp(`${digits}@s.whatsapp.net`);
+        if (r && r[0]) {
+          if (!r[0].exists) return res.status(422).json({ code: 'NOT_ON_WHATSAPP', error: 'Ese número no tiene WhatsApp.' });
+          jid = r[0].jid || null;
+        }
+      } catch (e) { /* si no se puede comprobar, se intenta igual */ }
+    }
+
+    // ¿Ya existe el chat con ese número en ese WhatsApp?
+    let { data: conv } = await supabase.from('conversations').select('*')
+      .eq('user_id', req.user.id).eq('connection_id', con.id).eq('contact_phone', digits).maybeSingle();
+    const yaExistia = !!conv;
+    if (!conv) {
+      const nombre = String(name || '').trim().slice(0, 100) || digits;
+      const { data: nueva, error: insErr } = await supabase.from('conversations').insert({
+        id: crypto.randomUUID(), user_id: req.user.id, connection_id: con.id,
+        contact_phone: digits, contact_name: nombre, status: 'active',
+        unread_count: 0, flow_active: false, last_message_at: new Date().toISOString(),
+        ...(jid ? { last_jid: jid } : {})
+      }).select().single();
+      if (insErr) throw insErr;
+      conv = nueva;
+      supabase.from('contacts').upsert(
+        { user_id: req.user.id, phone: digits, name: nombre, origin: 'WhatsApp' },
+        { onConflict: 'user_id,phone', ignoreDuplicates: false }
+      ).then(() => {}, () => {});
+    } else if (name && String(name).trim() && (!conv.contact_name || conv.contact_name === conv.contact_phone)) {
+      await supabase.from('conversations').update({ contact_name: String(name).trim().slice(0, 100) }).eq('id', conv.id);
+      conv.contact_name = String(name).trim().slice(0, 100);
+    }
+
+    const respuesta = { conversation: conv, created: !yaExistia, sent: false };
+    const texto = typeof message === 'string' ? message.trim() : '';
+
+    if ((texto || template_name) && conv.is_blocked) {
+      return res.status(403).json({ code: 'CHAT_BLOCKED', error: 'Este chat está bloqueado. Desbloquéalo para escribir.', conversation: conv });
+    }
+
+    // Primer mensaje (opcional)
+    const convParaEnvio = { ...conv, connections: con, last_jid: conv.last_jid || jid };
+    if (template_name && !esQr) {
+      try {
+        await axios.post(`https://graph.facebook.com/v26.0/${con.phone_number_id}/messages`, {
+          messaging_product: 'whatsapp', to: digits, type: 'template',
+          template: {
+            name: String(template_name), language: { code: String(template_language || 'es') },
+            ...(Array.isArray(template_components) && template_components.length ? { components: template_components } : {})
+          }
+        }, { headers: { Authorization: `Bearer ${con.access_token}`, 'Content-Type': 'application/json' }, timeout: 15000 });
+        await guardarSaliente(conv.id, { content: `[Plantilla: ${template_name}]` });
+        respuesta.sent = true;
+      } catch (e) {
+        respuesta.delivery_error = e.response?.data?.error?.message || e.message;
+      }
+    } else if (texto) {
+      const envio = await enviarManual(convParaEnvio, { content: texto });
+      if (envio.ok) { await guardarSaliente(conv.id, { content: texto }); respuesta.sent = true; }
+      else {
+        respuesta.delivery_error = envio.error;
+        if (!esQr) respuesta.code = 'NEEDS_TEMPLATE';
+        if (!esQr) respuesta.delivery_error = 'WhatsApp API solo permite iniciar una conversación nueva con una plantilla aprobada. El chat quedó creado: elige una plantilla para enviar el primer mensaje.';
+      }
+    }
+
+    res.status(201).json(respuesta);
+  } catch (err) { next(err); }
+});
+
 router.put('/:id/tags', async (req, res, next) => {
   try {
     const tags = req.body?.tags;
