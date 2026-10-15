@@ -16,7 +16,7 @@ async function proyectoDeConexion(userId, connectionId) {
 }
 
 // Devuelve true si la conexión pertenece a un proyecto Business (y por tanto ya se atendió aquí).
-async function enviarCompra(userId, conversation, saleAmount) {
+async function enviarCompra(userId, conversation, saleAmount, monedaVenta) {
   if (!conversation?.connection_id) return false;
   const proyecto = await proyectoDeConexion(userId, conversation.connection_id);
   if (!proyecto) return false;
@@ -34,7 +34,7 @@ async function enviarCompra(userId, conversation, saleAmount) {
       return true;
     }
     const { data: cfg } = await supabase.from('ads_config').select('currency').eq('user_id', userId).maybeSingle();
-    const currency = cfg?.currency || 'PEN';
+    const currency = (monedaVenta ? String(monedaVenta).toUpperCase() : null) || cfg?.currency || 'PEN';
     const evento = {
       event_name: 'Purchase',
       event_time: Math.floor(Date.now() / 1000),

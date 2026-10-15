@@ -149,8 +149,42 @@ async function convertirASoles(monto, monedaOrigen) {
   if (!rates || !rates[monedaOrigen]) return monto; // sin tasa disponible, devuelve el original sin convertir
   return monto / rates[monedaOrigen];
 }
+// Convierte un monto de cualquier moneda a Soles. A diferencia de convertirASoles, si no hay
+// tasa de cambio devuelve null (para no guardar una venta con un valor equivocado).
+async function aSolesEstricto(monto, moneda) {
+  if (!moneda || moneda === 'PEN') return monto;
+  const rates = await obtenerTasasCambio();
+  if (!rates || !rates[moneda]) return null;
+  return monto / rates[moneda];
+}
+
+function nombreMoneda(code) {
+  try { return new Intl.DisplayNames(['es'], { type: 'currency' }).of(code) || code; } catch (_) { return code; }
+}
+
 router.use(auth);
 // ── GET /api/conversations ────────────────────────────────────
+// ── GET /api/conversations/currencies ─────────────────────────
+// Lista de monedas disponibles para la venta manual (con su valor en Soles).
+router.get('/currencies', async (req, res, next) => {
+  try {
+    const rates = await obtenerTasasCambio();
+    const principales = ['PEN', 'USD', 'EUR', 'MXN', 'COP', 'CLP', 'ARS', 'BRL', 'BOB', 'UYU', 'PYG', 'VES', 'CRC', 'GTQ', 'HNL', 'NIO', 'PAB', 'DOP', 'GBP', 'CAD'];
+    const codigos = rates ? Object.keys(rates).filter(c => /^[A-Z]{3}$/.test(c)) : principales;
+    const lista = codigos.map(code => ({
+      code,
+      name: nombreMoneda(code),
+      pen_per_unit: rates && rates[code] ? Number((1 / rates[code]).toFixed(6)) : null,
+      popular: principales.includes(code)
+    })).sort((a, b) => {
+      const ia = principales.indexOf(a.code), ib = principales.indexOf(b.code);
+      if (ia !== -1 || ib !== -1) return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
+      return a.code.localeCompare(b.code);
+    });
+    res.json({ base: 'PEN', updated: rates ? true : false, currencies: lista });
+  } catch (err) { next(err); }
+});
+
 router.get('/', async (req, res, next) => {
   try {
     const { page = 1, is_sale, search, payments } = req.query;
@@ -161,7 +195,7 @@ router.get('/', async (req, res, next) => {
       .select(`
         id, contact_phone, contact_name, last_message,
         last_message_at, unread_count, status, connection_id, tag, manual_tags, profile_pic_url, flow_active, is_blocked, finished_at, last_message_direction, bot_ever_responded, ever_replied,
-        is_sale, sale_amount, sale_method, sale_at, operation_code, meta_event_status, sale_closed_by,
+        is_sale, sale_amount, sale_amount_original, sale_currency, sale_method, sale_at, operation_code, meta_event_status, sale_closed_by,
         payment_status, payment_reason, payment_status_at, payment_resolved_from, suggested_sale_amount, suggested_operation_code, pending_payment_method,
         current_flow_id, ad_id, ad_name, campaign_name, ctwa_clid, ad_source_url, ad_headline, ad_image_url,
         connections(name)
@@ -643,9 +677,22 @@ router.get('/dashboard/stats', async (req, res, next) => {
 router.patch('/:id/sale', async (req, res, next) => {
   try {
     const { is_sale, sale_amount, sale_method, operation_code } = req.body;
+    // Moneda de la venta (por defecto Soles). El monto se guarda en Soles para que todos los totales sigan funcionando,
+    // y además se conserva el monto original y su moneda.
+    const moneda = String(req.body.currency || req.body.sale_currency || 'PEN').trim().toUpperCase();
+    if (!/^[A-Z]{3}$/.test(moneda)) return res.status(400).json({ error: 'Moneda no válida.' });
+    const montoOriginal = Number(sale_amount) || 0;
+    let montoSoles = montoOriginal;
+    if ((is_sale ?? true) && moneda !== 'PEN' && montoOriginal > 0) {
+      const conv = await aSolesEstricto(montoOriginal, moneda);
+      if (conv === null) return res.status(400).json({ error: `No se pudo obtener el tipo de cambio de ${moneda}. Inténtalo de nuevo en unos minutos.` });
+      montoSoles = Number(conv.toFixed(2));
+    }
     const updates = {
       is_sale: is_sale ?? true,
-      sale_amount: sale_amount || 0,
+      sale_amount: montoSoles,
+      sale_amount_original: (is_sale ?? true) ? montoOriginal : null,
+      sale_currency: (is_sale ?? true) ? moneda : null,
       sale_at: is_sale ? new Date().toISOString() : null
     };
     if (is_sale ?? true) {
@@ -665,7 +712,7 @@ router.patch('/:id/sale', async (req, res, next) => {
     // Si se marcó como venta y la conexión es WhatsApp API, avisarle
     // a Meta (Conversions API) para que pueda optimizar los anuncios.
     if (is_sale && data) {
-      sendPurchaseEventToMeta(req.user.id, data, sale_amount || 0).catch(e => console.error('[Meta Conversions API] Error inesperado:', e.message));
+      sendPurchaseEventToMeta(req.user.id, data, montoOriginal, { currency: moneda, amountPen: montoSoles }).catch(e => console.error('[Meta Conversions API] Error inesperado:', e.message));
       // Notificación push: pausada por ahora (ver conversación anterior).
       // Cuando se retome, volver a agregar el require de pushService y
       // descomentar esto.
@@ -676,7 +723,7 @@ router.patch('/:id/sale', async (req, res, next) => {
       // WhatsApp conectado, este número nunca baja, solo suma).
       (async () => {
         try {
-          const montoEnDolares = await convertirDesdeSoles(sale_amount || 0, 'USD');
+          const montoEnDolares = await convertirDesdeSoles(montoSoles || 0, 'USD');
           const { data: userActual } = await supabase.from('users').select('lifetime_revenue_usd').eq('id', req.user.id).single();
           const nuevoTotal = (userActual?.lifetime_revenue_usd || 0) + montoEnDolares;
           await supabase.from('users').update({ lifetime_revenue_usd: nuevoTotal }).eq('id', req.user.id);
@@ -1122,7 +1169,7 @@ router.post('/:id/send-purchase-event', async (req, res, next) => {
     if (error) throw error;
     if (!conv) return res.status(404).json({ error: 'Conversación no encontrada.' });
     if (!conv.is_sale) return res.status(400).json({ error: 'Esta conversación todavía no tiene una venta registrada.' });
-    await sendPurchaseEventToMeta(req.user.id, conv, conv.sale_amount || 0, { reenvio: true });
+    await sendPurchaseEventToMeta(req.user.id, conv, conv.sale_amount_original ?? conv.sale_amount ?? 0, { reenvio: true, currency: conv.sale_currency || undefined });
     const { data: despues } = await supabase.from('conversations').select('meta_event_status').eq('id', conv.id).maybeSingle();
     res.json({ success: true, meta_event_status: despues?.meta_event_status || null });
   } catch (err) { next(err); }
@@ -1348,7 +1395,7 @@ router.get('/:id', async (req, res, next) => {
     if (!/^[0-9a-fA-F-]{36}$/.test(req.params.id)) return next();
     const { data, error } = await supabase.from('conversations')
       .select(`id, contact_phone, contact_name, last_message, last_message_at, unread_count, status, connection_id, tag, manual_tags, profile_pic_url, flow_active, is_blocked, finished_at, last_message_direction, bot_ever_responded, ever_replied,
-        is_sale, sale_amount, sale_method, sale_at, operation_code, meta_event_status, sale_closed_by, suggested_sale_amount, suggested_operation_code,
+        is_sale, sale_amount, sale_amount_original, sale_currency, sale_method, sale_at, operation_code, meta_event_status, sale_closed_by, suggested_sale_amount, suggested_operation_code,
         current_flow_id, ad_id, ad_name, campaign_name, ctwa_clid, ad_source_url, ad_headline, ad_image_url, connections(name)`)
       .eq('id', req.params.id).eq('user_id', req.user.id).maybeSingle();
     if (error) throw error;

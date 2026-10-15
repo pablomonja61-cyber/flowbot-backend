@@ -15,12 +15,12 @@ function resultadoMeta(estado, tieneClid) {
 }
 
 // Guarda la venta ANTES de enviarla a Meta. Devuelve el id del registro.
-async function registrar(userId, conversation, monto, canal) {
+async function registrar(userId, conversation, monto, canal, opts = {}) {
   try {
     const { count } = await supabase.from('purchase_events').select('id', { count: 'exact', head: true }).eq('conversation_id', conversation.id);
     const { data } = await supabase.from('purchase_events').insert({
       user_id: userId, connection_id: conversation.connection_id || null, conversation_id: conversation.id,
-      amount: parseFloat(monto) || 0, ctwa_clid: conversation.ctwa_clid || null, is_first: !count,
+      amount: parseFloat(opts.amountPen ?? monto) || 0, currency_original: opts.currency || null, amount_original: opts.currency ? (parseFloat(monto) || 0) : null, ctwa_clid: conversation.ctwa_clid || null, is_first: !count,
       arrived_at: conversation.created_at || null, purchased_at: new Date().toISOString(),
       channel: canal || null, meta_status: conversation.ctwa_clid ? 'pending' : 'omitted'
     }).select('id').single();

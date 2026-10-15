@@ -410,17 +410,17 @@ async function sendPurchaseEventToMeta(userId, conversation, saleAmount, opts = 
   const metricas = require('./capiMetrics');
   let eventoId = null;
   if (!opts.reenvio) {
-    eventoId = await metricas.registrar(userId, conversation, saleAmount);
+    eventoId = await metricas.registrar(userId, conversation, saleAmount, null, opts);
     await supabase.from('conversations').update({ meta_event_status: null }).eq('id', conversation.id);
   }
-  try { await enviarCompraInterno(userId, conversation, saleAmount); }
+  try { await enviarCompraInterno(userId, conversation, saleAmount, opts); }
   finally { await metricas.cerrar(eventoId, conversation.id); }
 }
 
-async function enviarCompraInterno(userId, conversation, saleAmount) {
+async function enviarCompraInterno(userId, conversation, saleAmount, opts = {}) {
   try {
     // Proyecto "Meta CAPI Business" (conexiones QR): si la conexión pertenece a uno, se envía por ahí.
-    if (await require('./capiBusiness').enviarCompra(userId, conversation, saleAmount)) return;
+    if (await require('./capiBusiness').enviarCompra(userId, conversation, saleAmount, opts.currency)) return;
     // Primero intenta con la integración real "Meta CAPI Cloud" (un
     // Dataset distinto por cada WhatsApp conectado) — la que el
     // usuario configuró de verdad en Integraciones.
@@ -466,6 +466,7 @@ async function enviarCompraInterno(userId, conversation, saleAmount) {
       currency = config.currency || 'PEN';
     }
 
+    if (opts.currency) currency = String(opts.currency).toUpperCase(); // moneda real de la venta (venta manual en otra moneda)
     const crypto = require('crypto');
     const cleanPhone = (conversation.contact_phone || '').replace(/\D/g, '');
     const hashedPhone = crypto.createHash('sha256').update(cleanPhone).digest('hex');
