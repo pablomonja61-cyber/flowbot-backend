@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
-const { metricasPorNumero } = require('../services/capiMetrics');
+const { metricasPorNumero, eventosDeNumero } = require('../services/capiMetrics');
 
 router.use(auth);
 
@@ -9,6 +9,16 @@ router.use(auth);
 // Devuelve todos los números (API y QR) con sus métricas, y el total.
 router.get('/', async (req, res, next) => {
   try { res.json(await metricasPorNumero(req.user.id, req.query)); } catch (err) { next(err); }
+});
+
+// GET /api/capi-metrics/:connectionId/events?page=1&limit=25&status=all|sent|rejected|pending|no_click
+// "Eventos enviados" de ese pixel: tarjetas (hoy / 7 días / 30 días / total), gráfico de 30 días y tabla de ventas.
+router.get('/:connectionId/events', async (req, res, next) => {
+  try {
+    const r = await eventosDeNumero(req.user.id, req.params.connectionId, req.query);
+    if (!r) return res.status(404).json({ error: 'Conexión no encontrada.' });
+    res.json(r);
+  } catch (err) { next(err); }
 });
 
 // GET /api/capi-metrics/:connectionId?range=...  → solo ese número

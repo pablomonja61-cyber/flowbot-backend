@@ -140,4 +140,126 @@ async function metricasPorNumero(userId, query) {
   return { range, from: from.toISOString(), to: to.toISOString(), numbers: numeros, total: calcular(validos, from, to) };
 }
 
-module.exports = { registrar, cerrar, metricasPorNumero, rangoDe, calcular, resultadoMeta };
+
+// ════════════════════════════════════════════════════════════
+// "Eventos enviados" de un número/pixel: tarjetas por período, gráfico de 30 días y tabla.
+// ════════════════════════════════════════════════════════════
+const ESTADOS = {
+  accepted: { codigo: 'sent', etiqueta: 'Enviado' },
+  rejected: { codigo: 'rejected', etiqueta: 'Rechazado' },
+  pending: { codigo: 'pending', etiqueta: 'Pendiente' },
+  omitted: { codigo: 'no_click', etiqueta: 'Sin clic en anuncio' }
+};
+
+async function idsVigentes(ids) {
+  const vigentes = new Set();
+  const lotes = [];
+  for (let i = 0; i < ids.length; i += 200) lotes.push(ids.slice(i, i + 200));
+  await Promise.all(lotes.map(async lote => {
+    const { data } = await supabase.from('conversations').select('id').in('id', lote).eq('is_sale', true);
+    (data || []).forEach(c => vigentes.add(c.id));
+  }));
+  return vigentes;
+}
+
+function tarjeta(eventos) {
+  const t = { detectados: eventos.length, enviados_a_meta: 0, rechazados: 0, pendientes: 0, sin_clic: 0, monto: 0 };
+  for (const e of eventos) {
+    t.monto += Number(e.amount) || 0;
+    if (!e.ctwa_clid) t.sin_clic++;
+    else if (e.meta_status === 'accepted') t.enviados_a_meta++;
+    else if (e.meta_status === 'rejected') t.rechazados++;
+    else t.pendientes++;
+  }
+  t.monto = Number(t.monto.toFixed(2));
+  return t;
+}
+
+const dia = ms => new Date(ms + TZ_OFFSET_H * 3600e3).toISOString().slice(0, 10); // día en hora de Lima
+
+async function eventosDeNumero(userId, connectionId, query = {}) {
+  const { data: con } = await supabase.from('connections').select('id, name, phone_number, connection_type').eq('id', connectionId).eq('user_id', userId).maybeSingle();
+  if (!con) return null;
+
+  const { data: todos } = await supabase.from('purchase_events')
+    .select('id, conversation_id, amount, currency_original, amount_original, ctwa_clid, is_first, purchased_at, meta_status, meta_detail')
+    .eq('user_id', userId).eq('connection_id', connectionId)
+    .order('purchased_at', { ascending: false }).limit(50000);
+  const lista = todos || [];
+  const vigentes = await idsVigentes([...new Set(lista.map(e => e.conversation_id))]);
+  const eventos = lista.filter(e => vigentes.has(e.conversation_id));
+
+  const hoy = rangoDe({ range: 'today' }).from.getTime();
+  const dentro = desde => eventos.filter(e => new Date(e.purchased_at).getTime() >= desde);
+  const periodos = {
+    hoy: tarjeta(dentro(hoy)),
+    ultimos_7_dias: tarjeta(dentro(hoy - 6 * 86400e3)),
+    ultimos_30_dias: tarjeta(dentro(hoy - 29 * 86400e3)),
+    total_historico: tarjeta(eventos)
+  };
+
+  // Gráfico: últimos 30 días (incluye los días sin ventas)
+  const serie = [];
+  const mapa = {};
+  for (let i = 29; i >= 0; i--) { const d = dia(hoy - i * 86400e3); mapa[d] = { fecha: d, detectados: 0, enviados: 0, sin_clic: 0, monto: 0 }; serie.push(mapa[d]); }
+  for (const e of dentro(hoy - 29 * 86400e3)) {
+    const d = dia(new Date(e.purchased_at).getTime());
+    const f = mapa[d]; if (!f) continue;
+    f.detectados++; f.monto += Number(e.amount) || 0;
+    if (!e.ctwa_clid) f.sin_clic++; else if (e.meta_status === 'accepted') f.enviados++;
+  }
+  serie.forEach(f => { f.monto = Number(f.monto.toFixed(2)); });
+
+  // Tabla paginada
+  const limite = Math.min(Math.max(parseInt(query.limit) || 25, 1), 100);
+  const pagina = Math.max(parseInt(query.page) || 1, 1);
+  const filtro = String(query.status || '').toLowerCase();
+  let filas = eventos;
+  if (filtro === 'sent') filas = filas.filter(e => e.ctwa_clid && e.meta_status === 'accepted');
+  else if (filtro === 'rejected') filas = filas.filter(e => e.ctwa_clid && e.meta_status === 'rejected');
+  else if (filtro === 'pending') filas = filas.filter(e => e.ctwa_clid && e.meta_status === 'pending');
+  else if (filtro === 'no_click') filas = filas.filter(e => !e.ctwa_clid);
+  const total = filas.length;
+  const pag = filas.slice((pagina - 1) * limite, pagina * limite);
+
+  const convIds = [...new Set(pag.map(e => e.conversation_id))];
+  const convs = {};
+  if (convIds.length) {
+    const { data } = await supabase.from('conversations')
+      .select('id, contact_name, contact_phone, ad_name, campaign_name, ad_headline, operation_code, sale_method').in('id', convIds);
+    (data || []).forEach(c => { convs[c.id] = c; });
+  }
+  const tipoConexion = con.connection_type === 'qr' ? 'WhatsApp QR' : 'WhatsApp API';
+  const rows = pag.map(e => {
+    const c = convs[e.conversation_id] || {};
+    const est = !e.ctwa_clid ? ESTADOS.omitted : (ESTADOS[e.meta_status] || ESTADOS.pending);
+    const origenAnuncio = e.ctwa_clid ? (c.ad_name || c.ad_headline || c.campaign_name || 'Anuncio de Meta') : 'Sin anuncio (orgánico)';
+    return {
+      id: e.id,
+      conversation_id: e.conversation_id,
+      fecha: e.purchased_at,
+      estado: est.codigo,
+      estado_label: est.etiqueta,
+      estado_detalle: e.meta_status === 'rejected' ? (e.meta_detail || null) : null,
+      origen: origenAnuncio,
+      campana: c.campaign_name || null,
+      canal: tipoConexion,
+      contacto: c.contact_name || c.contact_phone || '—',
+      telefono: c.contact_phone || null,
+      monto: Number(e.amount_original ?? e.amount) || 0,
+      moneda: e.currency_original || 'PEN',
+      monto_soles: Number(e.amount) || 0,
+      tipo: e.is_first ? 'Venta principal' : 'Compra adicional',
+      ctwa_clid: e.ctwa_clid || null,
+      ticket: c.operation_code || ('T-' + String(e.id).replace(/-/g, '').slice(0, 8).toUpperCase())
+    };
+  });
+
+  return {
+    connection: { id: con.id, name: con.name, phone_number: con.phone_number, type: con.connection_type === 'qr' ? 'qr' : 'api' },
+    periodos, serie_30_dias: serie,
+    tabla: { page: pagina, limit: limite, total, pages: Math.max(Math.ceil(total / limite), 1), rows }
+  };
+}
+
+module.exports = { eventosDeNumero, registrar, cerrar, metricasPorNumero, rangoDe, calcular, resultadoMeta };
