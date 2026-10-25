@@ -187,11 +187,12 @@ oauthRouter.post('/authorize', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-async function emitirTokens(clientId, userId) {
+async function emitirTokens(clientId, userId, ultimoUso = null) {
   const access = rand('ariaat_'), refresh = rand('ariart_');
   const { error } = await supabase.from('oauth_tokens').insert({
     access_token: sha256(access), refresh_token: sha256(refresh), client_id: clientId, user_id: userId,
-    expires_at: new Date(Date.now() + ACCESS_TTL_MS).toISOString()
+    expires_at: new Date(Date.now() + ACCESS_TTL_MS).toISOString(),
+    last_used_at: ultimoUso
   });
   if (error) throw error;
   return { access_token: access, token_type: 'Bearer', expires_in: ACCESS_TTL_MS / 1000, refresh_token: refresh, scope: 'mcp' };
@@ -238,7 +239,7 @@ oauthRouter.post('/token', async (req, res, next) => {
       if (fila.revoked || vencido) return oauthError(res, 400, 'invalid_grant', 'Refresh token revocado o vencido.');
       // Rotación: el refresh token anterior deja de servir.
       await supabase.from('oauth_tokens').update({ revoked: true }).eq('refresh_token', hash);
-      return res.json(await emitirTokens(cliente.client_id, fila.user_id));
+      return res.json(await emitirTokens(cliente.client_id, fila.user_id, fila.last_used_at || null));
     }
 
     oauthError(res, 400, 'unsupported_grant_type', 'Usa authorization_code o refresh_token.');
@@ -261,8 +262,12 @@ oauthRouter.post('/revoke', async (req, res, next) => {
 async function userIdDesdeAccessToken(token) {
   if (!token || !token.startsWith('ariaat_')) return null;
   const hash = sha256(token);
-  const { data } = await supabase.from('oauth_tokens').select('user_id, expires_at, revoked, client_id').eq('access_token', hash).maybeSingle();
+  const { data } = await supabase.from('oauth_tokens').select('user_id, expires_at, revoked, client_id, last_used_at').eq('access_token', hash).maybeSingle();
   if (!data || data.revoked || new Date(data.expires_at) < new Date()) return null;
+  // "Último uso" real (máximo una escritura por minuto)
+  if (!data.last_used_at || Date.now() - new Date(data.last_used_at).getTime() > 60000) {
+    supabase.from('oauth_tokens').update({ last_used_at: new Date().toISOString() }).eq('access_token', hash).then(() => {});
+  }
   return { userId: data.user_id, clientId: data.client_id };
 }
 

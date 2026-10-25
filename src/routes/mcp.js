@@ -52,13 +52,17 @@ async function authByToken(req, res, next) {
 
   const { data, error } = await supabase
     .from('api_tokens')
-    .select('id, user_id, revoked')
+    .select('id, user_id, revoked, expires_at, last_used_at')
     .eq('token_hash', hashToken(token))
     .maybeSingle();
 
   if (error || !data || data.revoked) return noAutorizado(res, 'Token inválido o revocado.');
+  if (data.expires_at && new Date(data.expires_at) < new Date()) return noAutorizado(res, 'El token venció. Crea uno nuevo en Integraciones.');
 
-  supabase.from('api_tokens').update({ last_used_at: new Date().toISOString() }).eq('id', data.id).then(() => {});
+  // "Último uso": se actualiza como máximo una vez por minuto para no saturar la base de datos
+  if (!data.last_used_at || Date.now() - new Date(data.last_used_at).getTime() > 60000) {
+    supabase.from('api_tokens').update({ last_used_at: new Date().toISOString() }).eq('id', data.id).then(() => {});
+  }
   req.mcpUserId = data.user_id;
   next();
 }
