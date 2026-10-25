@@ -1,4 +1,5 @@
 const supabase = require('../models/supabase');
+const { traerTodo } = require('./dbPaginado');
 
 // ════════════════════════════════════════════════════════════
 // Métricas de Meta CAPI (WhatsApp API y QR) — por cada número/pixel.
@@ -107,9 +108,9 @@ async function metricasPorNumero(userId, query) {
     supabase.from('capi_connections').select('waba_id, dataset_id, event_token').eq('user_id', userId),
     supabase.from('capi_business_projects').select('id, dataset_id, access_token, connection_ids').eq('user_id', userId)
   ]);
-  const { data: eventos } = await supabase.from('purchase_events')
+  const eventos = await traerTodo(() => supabase.from('purchase_events')
     .select('connection_id, conversation_id, amount, ctwa_clid, is_first, arrived_at, meta_status')
-    .eq('user_id', userId).gte('purchased_at', from.toISOString()).lt('purchased_at', to.toISOString()).limit(20000);
+    .eq('user_id', userId).gte('purchased_at', from.toISOString()).lt('purchased_at', to.toISOString()).order('id'));
 
   // Ignorar ventas que después se rechazaron (is_sale=false)
   const ids = [...new Set((eventos || []).map(e => e.conversation_id))];
@@ -181,11 +182,10 @@ async function eventosDeNumero(userId, connectionId, query = {}) {
   const { data: con } = await supabase.from('connections').select('id, name, phone_number, connection_type').eq('id', connectionId).eq('user_id', userId).maybeSingle();
   if (!con) return null;
 
-  const { data: todos } = await supabase.from('purchase_events')
+  const lista = (await traerTodo(() => supabase.from('purchase_events')
     .select('id, conversation_id, amount, currency_original, amount_original, ctwa_clid, is_first, purchased_at, meta_status, meta_detail')
     .eq('user_id', userId).eq('connection_id', connectionId)
-    .order('purchased_at', { ascending: false }).limit(50000);
-  const lista = todos || [];
+    .order('purchased_at', { ascending: false }).order('id'))).sort((a, b) => new Date(b.purchased_at) - new Date(a.purchased_at));
   const vigentes = await idsVigentes([...new Set(lista.map(e => e.conversation_id))]);
   const eventos = lista.filter(e => vigentes.has(e.conversation_id));
 

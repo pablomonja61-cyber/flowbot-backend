@@ -10,6 +10,7 @@ const {
 } = require('../services/flowEngine');
 const metaSvc = require('../services/metaProfiles');
 const plans = require('../services/plans');
+const { traerTodo } = require('../services/dbPaginado');
 
 // Una conversación está "finalizada" hasta que alguien vuelve a escribir (el cliente o tú).
 function estaFinalizada(c) {
@@ -681,6 +682,7 @@ router.patch('/:id/sale', async (req, res, next) => {
     // y además se conserva el monto original y su moneda.
     const moneda = String(req.body.currency || req.body.sale_currency || 'PEN').trim().toUpperCase();
     if (!/^[A-Z]{3}$/.test(moneda)) return res.status(400).json({ error: 'Moneda no válida.' });
+    const productoVenta = typeof req.body.product === 'string' ? req.body.product.trim().slice(0, 120) : undefined;
     const montoOriginal = Number(sale_amount) || 0;
     let montoSoles = montoOriginal;
     if ((is_sale ?? true) && moneda !== 'PEN' && montoOriginal > 0) {
@@ -693,6 +695,7 @@ router.patch('/:id/sale', async (req, res, next) => {
       sale_amount: montoSoles,
       sale_amount_original: (is_sale ?? true) ? montoOriginal : null,
       sale_currency: (is_sale ?? true) ? moneda : null,
+      ...(productoVenta !== undefined ? { sale_product: productoVenta || null } : {}),
       sale_at: is_sale ? new Date().toISOString() : null
     };
     if (is_sale ?? true) {
@@ -926,6 +929,163 @@ router.post('/:id/activate-flow', plans.requireActive, async (req, res, next) =>
     }
 
     res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// ════════════════════════════════════════════════════════════
+// DASHBOARD — detalle de ventas
+// Ventas por instancia · Facturación por instancia · Ventas por estado ·
+// Distribución geográfica · Historial de ventas · Rendimiento de productos
+// GET /api/conversations/dashboard/sales-detail?range=today|yesterday|7d|30d|all|custom&from=&to=&currency=PEN
+//     &page=1&limit=25&q=texto&connection_id=
+// ════════════════════════════════════════════════════════════
+const PAISES_DASH = [
+  ['593', 'Ecuador', 'EC'], ['591', 'Bolivia', 'BO'], ['595', 'Paraguay', 'PY'], ['598', 'Uruguay', 'UY'],
+  ['506', 'Costa Rica', 'CR'], ['502', 'Guatemala', 'GT'], ['503', 'El Salvador', 'SV'], ['504', 'Honduras', 'HN'],
+  ['505', 'Nicaragua', 'NI'], ['507', 'Panamá', 'PA'], ['809', 'República Dominicana', 'DO'],
+  ['51', 'Perú', 'PE'], ['57', 'Colombia', 'CO'], ['52', 'México', 'MX'], ['54', 'Argentina', 'AR'],
+  ['56', 'Chile', 'CL'], ['58', 'Venezuela', 'VE'], ['55', 'Brasil', 'BR'], ['34', 'España', 'ES'], ['1', 'Estados Unidos/Canadá', 'US']
+];
+function paisDashboard(phone) {
+  if (!phone) return { pais: 'Desconocido', iso: null };
+  const b = /^([A-Z]{2})\./.exec(phone);
+  if (b) { const p = PAISES_DASH.find(x => x[2] === b[1]); return { pais: p ? p[1] : b[1], iso: b[1] }; }
+  const d = String(phone).replace(/\D/g, '');
+  for (const [cod, nombre, iso] of PAISES_DASH) if (d.startsWith(cod)) return { pais: nombre, iso };
+  return { pais: 'Otro', iso: null };
+}
+
+const ESTADOS_VENTA = {
+  confirmada: 'Confirmadas', revision: 'En revisión', pendiente: 'Pago pendiente', rechazada: 'Rechazadas / fraude'
+};
+
+router.get('/dashboard/sales-detail', async (req, res, next) => {
+  try {
+    const { range = 'today', from, to } = req.query;
+    const { desde, hasta } = calcularRangoFechas(range, from, to);
+    const moneda = String(req.query.currency || 'PEN').toUpperCase();
+    const factor = moneda === 'PEN' ? 1 : (await convertirDesdeSoles(1, moneda));
+    const conv = n => Number(((Number(n) || 0) * factor).toFixed(2));
+    const pct = (parte, total) => total > 0 ? Number(((parte / total) * 100).toFixed(1)) : 0;
+    const iDesde = desde.toISOString(), iHasta = hasta.toISOString();
+
+    const [{ data: conexiones }, { data: ventas }, { data: otros }, { data: ajustes }, { data: reglas }] = await Promise.all([
+      supabase.from('connections').select('id, name, phone_number, connection_type, is_active').eq('user_id', req.user.id),
+      traerTodo(() => supabase.from('conversations')
+        .select('id, connection_id, contact_name, contact_phone, sale_amount, sale_amount_original, sale_currency, sale_product, operation_code, payment_status, sale_method, sale_at')
+        .eq('user_id', req.user.id).eq('is_sale', true).gte('sale_at', iDesde).lt('sale_at', iHasta)
+        .order('sale_at', { ascending: false }).order('id')).then(data => ({ data })),
+      // Estados que NO son venta confirmada (rechazadas, en revisión, pago pedido sin confirmar)
+      traerTodo(() => supabase.from('conversations')
+        .select('id, sale_amount, suggested_sale_amount, payment_status, payment_status_at, payment_requested_at')
+        .eq('user_id', req.user.id).eq('is_sale', false)
+        .or(`and(payment_status_at.gte.${iDesde},payment_status_at.lt.${iHasta}),and(payment_requested_at.gte.${iDesde},payment_requested_at.lt.${iHasta})`)
+        .order('id')).then(data => ({ data })),
+      supabase.from('user_settings').select('data').eq('user_id', req.user.id).maybeSingle(),
+      supabase.from('payment_rules').select('amount, context_keywords').eq('user_id', req.user.id).eq('is_active', true)
+    ]);
+
+    // ── Producto de cada venta: el guardado, o el que coincide por precio con tus productos / reglas de pago
+    const productosCfg = Array.isArray(ajustes?.data?.products) ? ajustes.data.products : [];
+    const porPrecio = new Map();
+    for (const p of productosCfg) {
+      const nombre = p?.name || p?.title, precio = Number(p?.price ?? p?.amount);
+      if (nombre && Number.isFinite(precio) && !porPrecio.has(precio)) porPrecio.set(precio, String(nombre));
+    }
+    for (const r of reglas || []) {
+      const precio = Number(r.amount), nombre = String(r.context_keywords || '').split(',')[0].trim();
+      if (nombre && Number.isFinite(precio) && !porPrecio.has(precio)) porPrecio.set(precio, nombre.charAt(0).toUpperCase() + nombre.slice(1));
+    }
+    const productoDe = v => v.sale_product || porPrecio.get(Number(v.sale_amount_original ?? v.sale_amount)) || porPrecio.get(Number(v.sale_amount)) || 'Sin producto';
+
+    const lista = ventas || [];
+    const totalPen = lista.reduce((a, v) => a + (Number(v.sale_amount) || 0), 0);
+    const mapaCon = new Map((conexiones || []).map(c => [c.id, c]));
+
+    // ── Ventas / facturación por instancia (todas las conexiones activas, aunque tengan 0)
+    const porInst = new Map((conexiones || []).filter(c => c.is_active !== false).map(c => [c.id, { connection_id: c.id, instancia: c.name, numero: c.phone_number, tipo: c.connection_type === 'qr' ? 'qr' : 'api', operaciones: 0, facturacion_pen: 0 }]));
+    for (const v of lista) {
+      const c = mapaCon.get(v.connection_id);
+      if (!porInst.has(v.connection_id)) porInst.set(v.connection_id, { connection_id: v.connection_id, instancia: c?.name || 'Conexión eliminada', numero: c?.phone_number || null, tipo: c?.connection_type === 'qr' ? 'qr' : 'api', operaciones: 0, facturacion_pen: 0 });
+      const f = porInst.get(v.connection_id); f.operaciones++; f.facturacion_pen += Number(v.sale_amount) || 0;
+    }
+    const por_instancia = [...porInst.values()].map(f => ({
+      connection_id: f.connection_id, instancia: f.instancia, numero: f.numero, tipo: f.tipo,
+      operaciones: f.operaciones, facturacion: conv(f.facturacion_pen),
+      porcentaje_operaciones: pct(f.operaciones, lista.length), porcentaje_facturacion: pct(f.facturacion_pen, totalPen)
+    })).sort((a, b) => b.facturacion - a.facturacion);
+
+    // ── Ventas por estado
+    const est = { confirmada: { n: 0, m: 0 }, revision: { n: 0, m: 0 }, pendiente: { n: 0, m: 0 }, rechazada: { n: 0, m: 0 } };
+    for (const v of lista) { est.confirmada.n++; est.confirmada.m += Number(v.sale_amount) || 0; }
+    for (const o of otros || []) {
+      const monto = Number(o.sale_amount ?? o.suggested_sale_amount) || 0;
+      let k = null;
+      if (o.payment_status === 'rejected') k = 'rechazada';
+      else if (o.payment_status === 'review' || o.payment_status === 'pending') k = 'revision';
+      else if (o.payment_requested_at && !o.payment_status) k = 'pendiente';
+      if (k) { est[k].n++; est[k].m += monto; }
+    }
+    const totalEst = Object.values(est).reduce((a, e) => a + e.n, 0);
+    const por_estado = Object.entries(est).map(([clave, e]) => ({ estado: clave, etiqueta: ESTADOS_VENTA[clave], cantidad: e.n, monto: conv(e.m), porcentaje: pct(e.n, totalEst) }));
+
+    // ── Distribución geográfica
+    const paises = new Map();
+    for (const v of lista) {
+      const { pais, iso } = paisDashboard(v.contact_phone);
+      if (!paises.has(pais)) paises.set(pais, { pais, iso, ventas: 0, ingresos_pen: 0 });
+      const p = paises.get(pais); p.ventas++; p.ingresos_pen += Number(v.sale_amount) || 0;
+    }
+    const por_pais = [...paises.values()].map(p => ({ pais: p.pais, iso: p.iso, ventas: p.ventas, ingresos: conv(p.ingresos_pen), porcentaje_ventas: pct(p.ventas, lista.length), porcentaje_ingresos: pct(p.ingresos_pen, totalPen) }))
+      .sort((a, b) => b.ingresos - a.ingresos);
+
+    // ── Rendimiento de productos + participación en el total
+    const prods = new Map();
+    for (const v of lista) {
+      const n = productoDe(v);
+      if (!prods.has(n)) prods.set(n, { producto: n, ventas: 0, ingresos_pen: 0 });
+      const p = prods.get(n); p.ventas++; p.ingresos_pen += Number(v.sale_amount) || 0;
+    }
+    const productos = [...prods.values()].map(p => ({
+      producto: p.producto, ventas: p.ventas, ingresos: conv(p.ingresos_pen),
+      ticket_promedio: conv(p.ventas ? p.ingresos_pen / p.ventas : 0),
+      participacion: pct(p.ingresos_pen, totalPen), participacion_ventas: pct(p.ventas, lista.length)
+    })).sort((a, b) => b.ingresos - a.ingresos);
+
+    // ── Historial: pagos confirmados del período (tabla paginada)
+    const q = String(req.query.q || '').trim().toLowerCase();
+    const filtroCon = req.query.connection_id ? String(req.query.connection_id) : null;
+    let filas = lista;
+    if (filtroCon) filas = filas.filter(v => v.connection_id === filtroCon);
+    const nombreMon = v => v.sale_currency || 'PEN';
+    if (q) {
+      filas = filas.filter(v => {
+        const c = mapaCon.get(v.connection_id);
+        return [v.contact_name, v.contact_phone, productoDe(v), v.operation_code, v.id, c?.name, c?.phone_number].some(x => String(x || '').toLowerCase().includes(q));
+      });
+    }
+    const limite = Math.min(Math.max(parseInt(req.query.limit) || 25, 1), 200);
+    const pagina = Math.max(parseInt(req.query.page) || 1, 1);
+    const pagFilas = filas.slice((pagina - 1) * limite, pagina * limite).map(v => {
+      const c = mapaCon.get(v.connection_id);
+      const valor = Number(v.sale_amount_original ?? v.sale_amount) || 0;
+      return {
+        conversation_id: v.id, connection_id: v.connection_id,
+        instancia: c?.name || 'Conexión eliminada', numero_instancia: c?.phone_number || null,
+        numero_lead: v.contact_phone, cliente: v.contact_name || v.contact_phone || '—',
+        producto: productoDe(v), id: v.operation_code || ('V-' + String(v.id).replace(/-/g, '').slice(0, 8).toUpperCase()),
+        valor, moneda: nombreMon(v), valor_en_moneda_dashboard: conv(v.sale_amount), metodo: v.sale_method || null,
+        fecha: v.sale_at,
+        acciones: { ver_chat: true, reenviar_a_meta: true }
+      };
+    });
+
+    res.json({
+      range, desde: iDesde, hasta: iHasta, currency: moneda,
+      resumen: { ventas: lista.length, ingresos: conv(totalPen), ticket_promedio: conv(lista.length ? totalPen / lista.length : 0) },
+      por_instancia, por_estado, por_pais, productos,
+      historial: { page: pagina, limit: limite, total: filas.length, pages: Math.max(Math.ceil(filas.length / limite), 1), rows: pagFilas }
+    });
   } catch (err) { next(err); }
 });
 
