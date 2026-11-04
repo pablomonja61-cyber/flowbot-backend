@@ -1089,6 +1089,60 @@ router.get('/dashboard/sales-detail', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ════════════════════════════════════════════════════════════
+// DASHBOARD — Funnel de conversión (WhatsApp)
+// Leads → Clics (en anuncio) → Respondieron → Ventas
+// GET /api/conversations/dashboard/funnel?range=today|yesterday|7d|30d|all|custom&from=&to=&connection_id=
+// Grupo (cohorte): los chats que NACIERON en el período. Cada etapa cuenta cuántos de
+// ellos llegaron ahí, así los porcentajes nunca pasan de 100 %.
+//   leads        = chats nuevos
+//   clics        = chats que llegaron desde un anuncio (tienen ctwa_clid)
+//   respondieron = chats donde el cliente contestó al menos una vez
+//   ventas       = chats que terminaron en venta confirmada
+// ════════════════════════════════════════════════════════════
+router.get('/dashboard/funnel', async (req, res, next) => {
+  try {
+    const { range = 'today', from, to, connection_id } = req.query;
+    const { desde, hasta } = calcularRangoFechas(range, from, to);
+    const iDesde = desde.toISOString(), iHasta = hasta.toISOString();
+    const pct = (parte, total) => total > 0 ? Number(((parte / total) * 100).toFixed(1)) : 0;
+
+    const filas = await traerTodo(() => {
+      let q = supabase.from('conversations')
+        .select('id, ctwa_clid, ever_replied, is_sale')
+        .eq('user_id', req.user.id)
+        .gte('created_at', iDesde).lt('created_at', iHasta)
+        .order('id');
+      if (connection_id) q = q.eq('connection_id', connection_id);
+      return q;
+    });
+
+    let ventasPeriodoQ = supabase.from('conversations')
+      .select('*', { count: 'exact', head: true })
+      .eq('user_id', req.user.id).eq('is_sale', true)
+      .gte('sale_at', iDesde).lt('sale_at', iHasta);
+    if (connection_id) ventasPeriodoQ = ventasPeriodoQ.eq('connection_id', connection_id);
+    const { count: ventasPeriodo } = await ventasPeriodoQ;
+
+    const leads = filas.length;
+    const clics = filas.filter(f => !!f.ctwa_clid).length;
+    const respondieron = filas.filter(f => f.ever_replied === true).length;
+    const ventas = filas.filter(f => f.is_sale === true).length;
+
+    res.json({
+      range, desde: iDesde, hasta: iHasta,
+      etapas: [
+        { clave: 'leads',        nombre: 'Leads',        valor: leads,        pct_leads: leads ? 100 : 0, pct_anterior: leads ? 100 : 0 },
+        { clave: 'clics',        nombre: 'Clics',        valor: clics,        pct_leads: pct(clics, leads),        pct_anterior: pct(clics, leads) },
+        { clave: 'respondieron', nombre: 'Respondieron', valor: respondieron, pct_leads: pct(respondieron, leads), pct_anterior: pct(respondieron, leads) },
+        { clave: 'ventas',       nombre: 'Ventas',       valor: ventas,       pct_leads: pct(ventas, leads),       pct_anterior: pct(ventas, respondieron) }
+      ],
+      conversion_total: pct(ventas, leads),
+      ventas_del_periodo: ventasPeriodo || 0
+    });
+  } catch (err) { next(err); }
+});
+
 // ── GET /api/conversations/dashboard/sales-by-flow ─────────────
 // Cuántas ventas (y cuánto ingreso) generó cada flujo — para el
 // gráfico de barras "¿Qué flujo vende más?" del Dashboard.
