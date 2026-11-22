@@ -125,6 +125,9 @@ app.use((err, req, res, next) => {
   });
 });
 setTimeout(() => restoreActiveSessions(), 3000);
+
+// Los envíos masivos programados: se van mandando uno a uno.
+require('./services/enviosMasivos').arrancar();
 scheduledRoutes.iniciar();
 
 app.listen(PORT, () => {
