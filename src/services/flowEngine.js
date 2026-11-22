@@ -2,6 +2,7 @@ const axios = require('axios');
 const plans = require('./plans');
 const crypto = require('crypto');
 const supabase = require('../models/supabase');
+const disparadores = require('./triggerMatch');
 const { v4: uuidv4 } = require('uuid');
 
 const { avisarSiNumeroBloqueado } = require('./connectionStatus');
@@ -1806,17 +1807,7 @@ async function checkOtherFlowTrigger(userId, connectionId, contactPhone, userMes
 
   const { data: triggers } = await supabase.from('triggers').select('*').eq('user_id', userId).eq('connection_id', connectionId).eq('is_active', true);
 
-  const matched = (triggers || []).find(t => {
-    const kw = (t.keyword || '').toLowerCase().trim();
-    return kw && (normalizedMsg === kw || normalizedMsg.includes(kw));
-  });
-  if (!matched) return null;
-
-  if (!matched.is_repeatable) {
-    const { count } = await supabase.from('trigger_executions').select('*', { count: 'exact', head: true }).eq('trigger_id', matched.id).eq('contact_phone', contactPhone);
-    if (count > 0) return null;
-  }
-  return matched;
+  return await disparadores.buscarDisparador(triggers, userMessage, contactPhone);
 }
 
 // ── Cancelar seguimientos pendientes ──────────────────────────

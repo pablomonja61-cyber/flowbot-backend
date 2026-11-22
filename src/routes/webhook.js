@@ -9,6 +9,7 @@ const { estaBloqueado: estaEnListaNegra } = require('./globalBlacklist');
 const { manejarAlertaDeMeta } = require('../services/connectionStatus');
 const { v4: uuidv4 } = require('uuid');
 const plans = require('../services/plans');
+const disparadores = require('../services/triggerMatch');
 
 // Crea (o actualiza el nombre de) el contacto en el CRM cada vez que
 // alguien nuevo escribe — así "Contactos" se llena sola, sin que el
@@ -379,10 +380,9 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
     .eq('connection_id', connection.id)
     .eq('is_active', true);
 
-  let earlyMatch = (allActiveTriggersEarly || []).find(t => {
-    const kw = (t.keyword || '').toLowerCase().trim();
-    return kw && (normalizedMsgEarly === kw || normalizedMsgEarly.includes(kw));
-  });
+  let earlyMatch = (allActiveTriggersEarly || []).find(t =>
+    !disparadores.esComodin(t) && disparadores.coincide(t, userMessage)
+  );
 
   // Lista Negra Global — si este usuario activó la protección y el
   // número está reportado por fraude (por cualquier cuenta de
@@ -403,15 +403,7 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
     // este contacto — de ser así, NO es un evento de "activar el flujo",
     // es solo texto que coincide de casualidad, así que lo dejamos caer
     // al flujo normal de abajo (que sí respeta el apagado de IA y la pausa).
-    let alreadyExecuted = false;
-    if (!earlyMatch.is_repeatable) {
-      const { count } = await supabase
-        .from('trigger_executions')
-        .select('*', { count: 'exact', head: true })
-        .eq('trigger_id', earlyMatch.id)
-        .eq('contact_phone', contactPhone);
-      alreadyExecuted = count > 0;
-    }
+    const alreadyExecuted = !(await disparadores.puedeDispararse(earlyMatch, contactPhone));
 
     if (!alreadyExecuted) {
       console.log(`[Webhook] Trigger "${earlyMatch.keyword}" coincide — reactiva el flujo, sin importar IA apagada o pausa activa`);
@@ -518,7 +510,7 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
     return;
   }
 
-  const defaultTrigger = allTriggersForDefault.find(t => t.keyword === '*' || t.keyword === 'default');
+  const defaultTrigger = await disparadores.buscarComodin(allTriggersForDefault, contactPhone);
   if (!defaultTrigger) {
     console.log(`[Webhook] Sin coincidencia para: "${normalizedMsgEarly}"`);
     return;

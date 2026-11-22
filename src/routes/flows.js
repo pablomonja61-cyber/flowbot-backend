@@ -294,4 +294,80 @@ Responde SOLO con un array JSON de ${n} strings, sin explicación ni texto adici
   }
 });
 
+
+// ── GET /api/flows/:id/trigger ───────────────────────────────
+// Devuelve cómo está configurado el bloque Inicio de este flujo.
+router.get('/:id/trigger', async (req, res, next) => {
+  try {
+    const { data: flow } = await supabase.from('flows').select('id').eq('id', req.params.id).eq('user_id', req.user.id).single();
+    if (!flow) return res.status(404).json({ error: 'Flujo no encontrado' });
+    const { data: lista } = await supabase.from('triggers').select('*').eq('flow_id', req.params.id).eq('user_id', req.user.id);
+    const filas = lista || [];
+    if (!filas.length) return res.json(null);
+    const base = filas[0];
+    res.json({
+      name: base.name,
+      phrases: Array.isArray(base.phrases) && base.phrases.length ? base.phrases : (base.keyword ? [base.keyword] : []),
+      match_type: base.match_type || 'contains',
+      case_sensitive: base.case_sensitive === true,
+      is_active: base.is_active !== false,
+      is_repeatable: base.is_repeatable !== false,
+      cooldown_seconds: Number(base.cooldown_seconds) || 0,
+      tag: base.tag || null,
+      connection_ids: filas.map(t => t.connection_id)
+    });
+  } catch (err) { next(err); }
+});
+
+// ── PUT /api/flows/:id/trigger ───────────────────────────────
+// Reemplaza los disparadores del flujo por los que manda el editor.
+// Se crea uno por cada conexión elegida (la tabla guarda una por fila).
+router.put('/:id/trigger', async (req, res, next) => {
+  try {
+    const { data: flow } = await supabase.from('flows').select('id').eq('id', req.params.id).eq('user_id', req.user.id).single();
+    if (!flow) return res.status(404).json({ error: 'Flujo no encontrado' });
+
+    const {
+      name, phrases = [], match_type = 'contains', case_sensitive = false,
+      is_active = true, is_repeatable = true, cooldown_seconds = 0, tag = null,
+      connection_ids
+    } = req.body || {};
+
+    if (!name || !String(name).trim()) return res.status(400).json({ error: 'El activador necesita un nombre' });
+    const frases = (Array.isArray(phrases) ? phrases : []).map(f => String(f).trim()).filter(Boolean);
+    if (match_type !== 'any' && !frases.length) {
+      return res.status(400).json({ error: 'Agrega al menos una frase que active el flujo' });
+    }
+
+    // Si no eligió conexiones, vale para todas las del usuario.
+    let conexiones = Array.isArray(connection_ids) ? connection_ids.filter(Boolean) : [];
+    if (!conexiones.length) {
+      const { data: todas } = await supabase.from('connections').select('id').eq('user_id', req.user.id);
+      conexiones = (todas || []).map(c => c.id);
+    }
+    if (!conexiones.length) return res.status(400).json({ error: 'Primero conecta un número de WhatsApp' });
+
+    await supabase.from('triggers').delete().eq('flow_id', req.params.id).eq('user_id', req.user.id);
+
+    const filas = conexiones.map(connection_id => ({
+      id: uuidv4(),
+      user_id: req.user.id,
+      name: String(name).trim(),
+      keyword: match_type === 'any' ? '*' : frases[0].toLowerCase(),
+      phrases: match_type === 'any' ? null : frases,
+      match_type,
+      case_sensitive: case_sensitive === true,
+      cooldown_seconds: Number(cooldown_seconds) || 0,
+      flow_id: req.params.id,
+      connection_id,
+      is_repeatable: is_repeatable !== false,
+      is_active: is_active !== false,
+      tag: tag || null
+    }));
+    const { data, error } = await supabase.from('triggers').insert(filas).select();
+    if (error) throw error;
+    res.json({ ok: true, creados: (data || []).length });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

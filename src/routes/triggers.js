@@ -95,7 +95,8 @@ router.get('/stats', async (req, res, next) => {
 // Body: { name, keyword, flow_id, connection_id, is_repeatable, tag }
 router.post('/', async (req, res, next) => {
   try {
-    const { name, keyword, flow_id, connection_id, is_repeatable = true, tag } = req.body;
+    const { name, keyword, flow_id, connection_id, is_repeatable = true, tag,
+      phrases, match_type, case_sensitive, cooldown_seconds } = req.body;
     if (!name || !keyword || !flow_id || !connection_id) {
       return res.status(400).json({ error: 'name, keyword, flow_id y connection_id son requeridos' });
     }
@@ -118,7 +119,11 @@ router.post('/', async (req, res, next) => {
         connection_id,
         is_repeatable,
         is_active: true,
-        tag: tag || null
+        tag: tag || null,
+        phrases: Array.isArray(phrases) ? phrases : null,
+        match_type: match_type || 'contains',
+        case_sensitive: case_sensitive === true,
+        cooldown_seconds: Number(cooldown_seconds) || 0
       })
       .select()
       .single();
@@ -129,9 +134,14 @@ router.post('/', async (req, res, next) => {
 // ── PUT /api/triggers/:id ────────────────────────────────────
 router.put('/:id', async (req, res, next) => {
   try {
-    const { name, keyword, flow_id, is_active, is_repeatable, tag, connection_id } = req.body;
+    const { name, keyword, flow_id, is_active, is_repeatable, tag, connection_id,
+      phrases, match_type, case_sensitive, cooldown_seconds } = req.body;
     const updates = { updated_at: new Date().toISOString() };
     if (name !== undefined) updates.name = name;
+    if (phrases !== undefined) updates.phrases = Array.isArray(phrases) ? phrases : null;
+    if (match_type !== undefined) updates.match_type = match_type || 'contains';
+    if (case_sensitive !== undefined) updates.case_sensitive = case_sensitive === true;
+    if (cooldown_seconds !== undefined) updates.cooldown_seconds = Number(cooldown_seconds) || 0;
     if (keyword !== undefined) updates.keyword = keyword.toLowerCase().trim();
     if (flow_id !== undefined) updates.flow_id = flow_id;
     if (is_active !== undefined) updates.is_active = is_active;
