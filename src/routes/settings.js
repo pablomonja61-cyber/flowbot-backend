@@ -62,6 +62,26 @@ async function save(userId, revision, data) {
   if (result.error) throw result.error;
   return result.data.revision;
 }
+// ── GET /api/settings/ai-usage ───────────────────────────────
+// Cuántas respuestas de IA se usaron cada mes: las que paga la
+// plataforma (Nubify AI) y las que van con la clave del propio
+// usuario. Es lo que enseña "Uso de Nubify AI" en Configuración.
+router.get('/ai-usage', async (req, res, next) => {
+  try {
+    const { data, error } = await supabase
+      .from('ai_usage')
+      .select('month, platform_replies, own_replies, updated_at')
+      .eq('user_id', req.user.id)
+      .order('month', { ascending: false })
+      .limit(12);
+    if (error) throw error;
+    const limite = Number(process.env.PLATFORM_AI_MONTHLY_LIMIT || 0) || null;
+    const mes = new Date().toISOString().slice(0, 7);
+    const actual = (data || []).find(f => f.month === mes) || { month: mes, platform_replies: 0, own_replies: 0 };
+    res.json({ limite_mensual: limite, mes_actual: actual, meses: data || [] });
+  } catch (err) { next(err); }
+});
+
 router.get('/', async (req, res, next) => {
   try {
     const [row, account] = await Promise.all([read(req.user.id), supabase.from('users').select('*').eq('id', req.user.id).maybeSingle()]);
