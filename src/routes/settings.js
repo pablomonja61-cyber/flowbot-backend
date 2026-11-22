@@ -8,7 +8,7 @@ router.use(auth);
 router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 const fail = (message, status = 400) => { throw Object.assign(new Error(message), { status }); };
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
-const allowed = ['defaultFlows', 'products', 'templates', 'variables', 'customFields', 'companies', 'selectedCompany', 'company', 'departments', 'workHours', 'labelStyles', 'translations', 'credentials', 'mcpUrl', 'invitations', 'broadcasts', 'team', 'supportAccess', 'kanban', 'connectionRoles', 'billingReceipts'];
+const allowed = ['defaultFlows', 'products', 'templates', 'variables', 'customFields', 'companies', 'selectedCompany', 'company', 'departments', 'workHours', 'labelStyles', 'translations', 'credentials', 'mcpUrl', 'invitations', 'broadcasts', 'team', 'supportAccess', 'kanban', 'connectionRoles', 'billingReceipts', 'panel'];
 const conflict = () => fail('La configuración cambió en otra pestaña. Recarga la página antes de guardar.', 409);
 function validate(input) {
   if (!object(input) || !object(input.settingsData) || !Array.isArray(input.quickReplies) || !Array.isArray(input.labels)) fail('La configuración no tiene un formato válido.');
@@ -19,7 +19,7 @@ function validate(input) {
   for (const key of ['companies', 'departments', 'translations', 'invitations', 'broadcasts', 'team', 'credentials', 'supportAccess', 'products', 'templates', 'variables', 'customFields']) {
     if (settingsData[key] !== undefined && (!Array.isArray(settingsData[key]) || settingsData[key].length > 2000 || settingsData[key].some(row => !object(row) || typeof row.id !== 'string'))) fail('Revisa la lista de ' + key + '.');
   }
-  for (const key of ['company', 'workHours', 'labelStyles', 'kanban', 'defaultFlows']) if (settingsData[key] !== undefined && !object(settingsData[key])) fail('Revisa la configuración de ' + key + '.');
+  for (const key of ['company', 'workHours', 'labelStyles', 'kanban', 'defaultFlows', 'panel']) if (settingsData[key] !== undefined && !object(settingsData[key])) fail('Revisa la configuración de ' + key + '.');
   if (settingsData.kanban?.labels !== undefined && (!Array.isArray(settingsData.kanban.labels) || settingsData.kanban.labels.length > 200)) fail('Revisa las etiquetas del Kanban.');
   if (settingsData.variables) {
     const names = new Set();

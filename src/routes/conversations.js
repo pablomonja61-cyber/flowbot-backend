@@ -986,7 +986,8 @@ router.get('/dashboard/sales-detail', async (req, res, next) => {
     ]);
 
     // ── Producto de cada venta: el guardado, o el que coincide por precio con tus productos / reglas de pago
-    const productosCfg = Array.isArray(ajustes?.data?.products) ? ajustes.data.products : [];
+    const productosCfg = Array.isArray(ajustes?.data?.settingsData?.products) ? ajustes.data.settingsData.products
+      : Array.isArray(ajustes?.data?.products) ? ajustes.data.products : [];
     const porPrecio = new Map();
     for (const p of productosCfg) {
       const nombre = p?.name || p?.title, precio = Number(p?.price ?? p?.amount);
