@@ -112,14 +112,15 @@ function elegirTextoConVariacion(item, textoOriginal) {
 async function saveMsg(conversationId, content, direction, msgType = 'text', mediaUrl = null) {
   if (!conversationId || !content) return;
   try {
-    await supabase.from('messages').insert({
+    const { data: filaGuardada } = await supabase.from('messages').insert({
       conversation_id: conversationId,
       content,
       direction,
       msg_type: msgType,
       media_url: mediaUrl,
       created_at: new Date().toISOString()
-    });
+    }).select('id').single();
+    var idGuardado = filaGuardada && filaGuardada.id;
     // Guardamos también quién mandó el último mensaje (cliente o
     // negocio/bot) — esto es lo que usa el filtro "Respondieron" /
     // "Sin Respuesta" del Chat en Vivo.
@@ -148,6 +149,7 @@ async function saveMsg(conversationId, content, direction, msgType = 'text', med
     }
 
     await supabase.from('conversations').update(updateData).eq('id', conversationId);
+    return idGuardado;
   } catch (e) {
     console.error('[Baileys] Error guardando mensaje:', e.message);
   }
@@ -1436,6 +1438,87 @@ async function callVisionAI(provider, apiKey, promptText, base64Image, mimeType,
 // Equivalente a processIncomingImage() de webhook.js, adaptado
 // para descargar el archivo con Baileys en vez de la Graph API.
 // ════════════════════════════════════════════════════════════
+// ── Audio, video, documento y sticker que manda el cliente (QR) ──
+// Antes estos mensajes se perdían por completo: como no traen texto,
+// el bot los descartaba y en Chat en Vivo no aparecía nada. Ahora se
+// descargan, se suben a Storage y se guardan en la conversación para
+// que se puedan ver, escuchar o abrir desde el panel. No activan el
+// flujo ni responden nada: solo quedan registrados.
+const MEDIA_ENTRANTE_QR = {
+  audioMessage: { tipo: 'audio', etiqueta: '[Audio]' },
+  videoMessage: { tipo: 'video', etiqueta: '[Video]' },
+  documentMessage: { tipo: 'document', etiqueta: '[Documento]' },
+  stickerMessage: { tipo: 'sticker', etiqueta: '[Sticker]' }
+};
+
+/** ¿Este mensaje es audio, video, documento o sticker? */
+function tipoDeMediaQR(innerMessage) {
+  for (const clave of Object.keys(MEDIA_ENTRANTE_QR)) {
+    if (innerMessage && innerMessage[clave]) return { clave, ...MEDIA_ENTRANTE_QR[clave] };
+  }
+  return null;
+}
+
+/** Sube un archivo a Storage y devuelve su enlace público (o null). */
+async function subirMediaAStorage(buffer, mimeType, userId, conversationId, tipo) {
+  if (!buffer) return null;
+  try {
+    const ext = String(mimeType || '').split('/')[1]?.split(';')[0] || tipo || 'bin';
+    const filePath = `${userId}/${conversationId}/${Date.now()}.${ext}`;
+    const { error } = await supabase.storage.from('media').upload(filePath, buffer, { contentType: mimeType || 'application/octet-stream', upsert: false });
+    if (error) { console.error('[Baileys Media] Error subiendo a Storage:', error.message); return null; }
+    const { data } = supabase.storage.from('media').getPublicUrl(filePath);
+    return data?.publicUrl || null;
+  } catch (err) {
+    console.error('[Baileys Media] Error subiendo a Storage:', err.message);
+    return null;
+  }
+}
+
+async function processIncomingMediaBaileys(connectionId, userId, contactPhone, rawMsg, info, contactName) {
+  if (await isCountryBlocked(userId, contactPhone)) return;
+
+  let { data: conversation } = await supabase
+    .from('conversations')
+    .select('id, is_blocked')
+    .eq('user_id', userId)
+    .eq('contact_phone', contactPhone)
+    .eq('connection_id', connectionId)
+    .single();
+
+  if (!conversation) {
+    const { data: nueva } = await supabase
+      .from('conversations')
+      .insert({
+        id: uuidv4(), user_id: userId, connection_id: connectionId,
+        contact_phone: contactPhone, contact_name: contactName || contactPhone,
+        status: 'active', unread_count: 1, flow_active: false,
+        last_message: info.etiqueta, last_message_at: new Date().toISOString()
+      })
+      .select('id, is_blocked')
+      .single();
+    conversation = nueva;
+  }
+  if (!conversation || conversation.is_blocked) return;
+
+  const contenido = rawMsg?.message?.documentMessage?.fileName
+    ? `[Documento: ${rawMsg.message.documentMessage.fileName}]`
+    : info.etiqueta;
+
+  // Se guarda primero el mensaje (rápido) y la descarga va aparte: si el
+  // archivo falla, al menos queda el registro de que el cliente lo mandó.
+  const idMensaje = await saveMsg(conversation.id, contenido, 'inbound', info.tipo, null);
+
+  try {
+    const buffer = await downloadMediaMessage(rawMsg, 'buffer', {}, { logger: pino({ level: 'silent' }) });
+    const mime = rawMsg?.message?.[info.clave]?.mimetype || null;
+    const url = await subirMediaAStorage(buffer, mime, userId, conversation.id, info.tipo);
+    if (url && idMensaje) await supabase.from('messages').update({ media_url: url }).eq('id', idMensaje);
+  } catch (err) {
+    console.error(`[Baileys Media] No se pudo guardar el ${info.tipo}:`, err.message);
+  }
+}
+
 async function processIncomingImageBaileys(connectionId, userId, sock, contactPhone, rawMsg, rawJid, contactName) {
   const jid = rawJid || `${contactPhone}@s.whatsapp.net`;
 
@@ -2208,8 +2291,16 @@ async function startQRSession(connectionId, userId) {
 
         const queueKey = `${connectionId}:${contactPhone}`;
 
+        const infoMedia = isImage ? null : tipoDeMediaQR(innerMessage);
+
         try {
-          if (isImage) {
+          if (infoMedia) {
+            // Audio, video, documento o sticker: se guarda para que se
+            // pueda ver en Chat en Vivo, sin activar el flujo.
+            await enqueueForContact(queueKey, () =>
+              processIncomingMediaBaileys(connectionId, userId, contactPhone, normalizedMsg, infoMedia, contactName)
+            );
+          } else if (isImage) {
             // Las imágenes se procesan como posible comprobante de
             // pago, sin importar el estado del trigger/flujo actual.
             await enqueueForContact(queueKey, () =>
