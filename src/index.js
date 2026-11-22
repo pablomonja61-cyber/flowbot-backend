@@ -55,6 +55,9 @@ app.use(cors({
     'https://ariabot-octubre-2026.iamblezts.chatgpt.site',
     'https://ariabot-oct09.ariabot-app.chatgpt.site',
     'https://ariabot-oct12.skoolpablo77.chatgpt.site',
+    // Panel nuevo de Nubify
+    'https://nubify-panel-pablo-ads-skool.vercel.app',
+    'https://nubify-panel-git-nubify-panel-pablo-ads-skool.vercel.app',
     'http://localhost:5173',
     'https://ventas-vista.lovable.app'
   ],
