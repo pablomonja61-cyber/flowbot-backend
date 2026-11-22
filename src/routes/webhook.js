@@ -10,6 +10,7 @@ const { manejarAlertaDeMeta } = require('../services/connectionStatus');
 const { v4: uuidv4 } = require('uuid');
 const plans = require('../services/plans');
 const disparadores = require('../services/triggerMatch');
+const flujosEstandar = require('../services/flujosEstandar');
 
 // Crea (o actualiza el nombre de) el contacto en el CRM cada vez que
 // alguien nuevo escribe — así "Contactos" se llena sola, sin que el
@@ -497,7 +498,16 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
     return;
   }
 
-  // 5. Ningún trigger específico coincidió — buscar flujo default (catch-all)
+  // 5. Flujos estándar (Configuración → Flujos estándar). Fuera del
+  // horario de atención gana incluso al comodín: para eso se configura.
+  const estandar = await flujosEstandar.resolver(userId, connection.id, conversation.id);
+  if (estandar && estandar.motivo === 'fuera_de_horario') {
+    console.log(`[Webhook] Fuera del horario de atención — flujo estándar ${estandar.flowId}`);
+    await executeFlow(estandar.flowId, contactPhone, userMessage, connection, conversation.id);
+    return;
+  }
+
+  // 6. Ningún trigger específico coincidió — buscar flujo default (catch-all)
   const { data: allTriggersForDefault } = await supabase
     .from('triggers')
     .select('*, flows(id, nodes, edges, is_active)')
@@ -505,18 +515,22 @@ async function processIncomingMessage(phoneNumberId, contactPhone, userMessage, 
     .eq('connection_id', connection.id)
     .eq('is_active', true);
 
-  if (!allTriggersForDefault?.length) {
-    console.log(`[Webhook] No hay triggers activos para user ${userId}`);
-    return;
-  }
+  const defaultTrigger = allTriggersForDefault?.length
+    ? await disparadores.buscarComodin(allTriggersForDefault, contactPhone)
+    : null;
 
-  const defaultTrigger = await disparadores.buscarComodin(allTriggersForDefault, contactPhone);
+  // Sin comodín, todavía puede tocar un flujo estándar.
   if (!defaultTrigger) {
+    if (estandar) {
+      console.log(`[Webhook] Flujo estándar (${estandar.motivo}) ${estandar.flowId}`);
+      await executeFlow(estandar.flowId, contactPhone, userMessage, connection, conversation.id);
+      return;
+    }
     console.log(`[Webhook] Sin coincidencia para: "${normalizedMsgEarly}"`);
     return;
   }
 
-  // 6. Ejecutar flujo default
+  // 7. Ejecutar flujo default
   await executeFlow(
     defaultTrigger.flow_id,
     contactPhone,

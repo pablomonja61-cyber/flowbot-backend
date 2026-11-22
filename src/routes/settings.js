@@ -3,6 +3,7 @@ const router = express.Router();
 const auth = require('../middleware/auth');
 const supabase = require('../models/supabase');
 const plans = require('../services/plans');
+const flujosEstandar = require('../services/flujosEstandar');
 
 router.use(auth);
 router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
@@ -113,6 +114,9 @@ router.put('/', async (req, res, next) => {
     if ((current?.revision ?? 0) !== revision) conflict();
     const nextRevision = await save(req.user.id, revision, { ...input, organization: current?.data?.organization || [] });
     if (nextRevision === null) conflict();
+    // Los flujos estándar y el horario se guardan aquí: el bot tiene que
+    // ver el cambio ya, no dentro de un minuto.
+    flujosEstandar.limpiarCache(req.user.id);
     res.json({ ok: true, revision: nextRevision });
   } catch (error) { next(error); }
 });

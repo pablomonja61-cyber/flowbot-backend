@@ -6,6 +6,7 @@ const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
 const crypto = require('crypto');
 const plans = require('../services/plans');
+const flujosEstandar = require('./flujosEstandar');
 const followupGuard = require('../services/followupGuard');
 const path = require('path');
 const fs = require('fs');
@@ -2130,7 +2131,17 @@ async function processBaileysMessage(connectionId, userId, sock, contactPhone, u
     return;
   }
 
-  // Caso 2: NO coincide con ningún trigger.
+  // Caso 2: NO coincide con ningún trigger. Antes de callarse, se mira
+  // si hay un flujo estándar configurado para esta conexión
+  // (Configuración → Flujos estándar).
+  const estandar = await flujosEstandar.resolver(userId, connectionId, conversation.id);
+  if (estandar) {
+    console.log(`[Baileys] Flujo estándar (${estandar.motivo}) ${estandar.flowId}`);
+    await supabase.from('conversations').update({ flow_active: true }).eq('id', conversation.id);
+    await executeFlowBaileys(estandar.flowId, sock, jid, contactPhone, userMessage, conversation.id);
+    return;
+  }
+
   // Solo respondemos con IA si esta conversación YA activó un
   // flujo antes (dijo la palabra clave en algún mensaje previo).
   // Si nunca la dijo, el bot se queda en silencio — no responde nada.
