@@ -854,6 +854,24 @@ async function scheduleAttachedFollowups(flow, nodeId, connection, phoneNumberId
   }
 }
 
+
+// Solo deja salir a direcciones públicas: evita que un bloque de
+// Integración apunte al propio servidor o a la red interna.
+function urlExternaPermitida(url) {
+  if (!url) return false;
+  let u;
+  try { u = new URL(url); } catch { return false; }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return false;
+  const host = u.hostname.toLowerCase();
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.internal') || host.endsWith('.local')) return false;
+  if (/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(host)) {
+    const [a, b] = host.split('.').map(Number);
+    if (a === 127 || a === 0 || a === 10 || a === 169 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)) return false;
+  }
+  if (host === '::1' || host.startsWith('fd') || host.startsWith('fe80')) return false;
+  return true;
+}
+
 async function executeFlow(flowId, contactPhone, userMessage, connection, conversationId, startNodeId = null) {
   const { data: flow } = await supabase.from('flows').select('*').eq('id', flowId).single();
   if (!flow || !flow.nodes?.length) return;
@@ -1089,6 +1107,122 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
       }
 
       // ── Fin del flujo ──────────────────────────────────────
+      // ══════════════════════════════════════════════════════
+      // Bloques nuevos del panel de Nubify.
+      // Son tipos propios: no tocan el comportamiento de los flujos
+      // que ya existen, que siguen usando los tipos de siempre.
+      // ══════════════════════════════════════════════════════
+
+      // ── Esperar respuesta: deja el flujo parado hasta que el
+      //    cliente escriba. Al escribir, se retoma desde aquí.
+      case 'wait': {
+        await supabase.from('conversations').update({
+          current_flow_id: flowId, current_node_id: node.id, flow_active: true
+        }).eq('id', conversationId);
+        shouldPause = true;
+        break;
+      }
+
+      // ── Controlador de chat: mueve la conversación entre
+      //    En espera / En atención / Resuelto.
+      case 'chat_status': {
+        const pedido = String(node.data?.status || '').toLowerCase();
+        const mapa = { espera: 'open', waiting: 'open', atencion: 'active', active: 'active', resuelto: 'closed', closed: 'closed' };
+        const estado = mapa[pedido];
+        if (estado) {
+          const cambios = { status: estado };
+          if (estado === 'closed') cambios.finished_at = new Date().toISOString();
+          await supabase.from('conversations').update(cambios).eq('id', conversationId);
+          console.log(`[Flow] Chat movido a "${estado}"`);
+        }
+        break;
+      }
+
+      // ── Kanban: mueve el lead a una columna del tablero.
+      case 'kanban': {
+        const columna = node.data?.columnId || node.data?.column;
+        const tablero = node.data?.boardId || null;
+        if (columna) {
+          try {
+            const { data: fila } = await supabase.from('user_settings').select('data, revision').eq('user_id', connection.user_id).maybeSingle();
+            const datos = fila?.data || {};
+            const sd = datos.settingsData || {};
+            const kanban = sd.kanban || {};
+            if (tablero && Array.isArray(kanban.boards)) {
+              kanban.boards = kanban.boards.map(b => b.id === tablero
+                ? { ...b, assignments: { ...(b.assignments || {}), [conversationId]: columna } }
+                : b);
+            } else {
+              kanban.assignments = { ...(kanban.assignments || {}), [conversationId]: columna };
+            }
+            kanban.updatedAt = Date.now();
+            await supabase.from('user_settings')
+              .update({ data: { ...datos, settingsData: { ...sd, kanban } } })
+              .eq('user_id', connection.user_id);
+            console.log(`[Flow] Lead movido a la columna ${columna}`);
+          } catch (e) { console.error('[Flow] No se pudo mover en el Kanban:', e.message); }
+        }
+        break;
+      }
+
+      // ── Venta aprobada: la registra en el panel.
+      case 'sale': {
+        const monto = Number(node.data?.amount ?? node.data?.monto) || 0;
+        const cambios = {
+          is_sale: true,
+          sale_at: new Date().toISOString(),
+          sale_closed_by: 'flow'
+        };
+        if (monto > 0) cambios.sale_amount = monto;
+        if (node.data?.currency) cambios.sale_currency = node.data.currency;
+        if (node.data?.product) cambios.sale_product = node.data.product;
+        await supabase.from('conversations').update(cambios).eq('id', conversationId);
+        console.log('[Flow] Venta registrada desde el flujo');
+        break;
+      }
+
+      // ── Integración: llama a una URL externa (webhook / API).
+      case 'http': {
+        const url = String(node.data?.url || '').trim();
+        if (!urlExternaPermitida(url)) {
+          console.warn('[Flow] URL no permitida en el bloque Integración:', url);
+          break;
+        }
+        try {
+          const metodo = String(node.data?.method || 'POST').toUpperCase();
+          const cabeceras = { 'Content-Type': 'application/json', ...(node.data?.headers || {}) };
+          const cuerpo = node.data?.body === undefined ? { phone: contactPhone, message: userMessage, conversation_id: conversationId } : node.data.body;
+          const r = await axios({
+            method: metodo,
+            url,
+            headers: cabeceras,
+            data: metodo === 'GET' ? undefined : cuerpo,
+            params: metodo === 'GET' ? cuerpo : undefined,
+            timeout: 10000,
+            maxRedirects: 0,
+            validateStatus: () => true
+          });
+          console.log(`[Flow] Integración ${metodo} ${url} → ${r.status}`);
+        } catch (e) { console.error('[Flow] Falló la integración:', e.message); }
+        break;
+      }
+
+      // ── Distribuidor: reparte los leads entre varias salidas.
+      case 'split': {
+        const salidas = (flow.edges || []).filter(e => e.source === currentNodeId);
+        if (!salidas.length) { currentNodeId = null; continue; }
+        const pesos = node.data?.weights || {};
+        const total = salidas.reduce((a, e) => a + (Number(pesos[e.sourceHandle || e.id]) || 1), 0);
+        let tirada = Math.random() * total;
+        let elegida = salidas[salidas.length - 1];
+        for (const e of salidas) {
+          tirada -= (Number(pesos[e.sourceHandle || e.id]) || 1);
+          if (tirada <= 0) { elegida = e; break; }
+        }
+        currentNodeId = elegida.target || null;
+        continue;
+      }
+
       case 'end':
         currentNodeId = null;
         continue;
