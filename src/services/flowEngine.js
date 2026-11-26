@@ -6,6 +6,7 @@ const disparadores = require('./triggerMatch');
 const { v4: uuidv4 } = require('uuid');
 
 const { avisarSiNumeroBloqueado } = require('./connectionStatus');
+const bloques = require('./bloquesFlujo');
 const GRAPH_VERSION = 'v26.0';
 
 // ── Detectar automáticamente si un mensaje del bot está pidiendo el
@@ -231,6 +232,50 @@ async function sendWhatsAppButtons(phoneNumberId, accessToken, to, bodyText, but
     const text = bodyText + '\n\n' + buttons.map((b, i) => `${i + 1}. ${b}`).join('\n');
     await sendWhatsAppMessage(phoneNumberId, accessToken, to, text, conversationId);
   }
+}
+
+// ── Lista interactiva (el bloque Menú con más de 3 opciones) ──
+// Meta permite hasta 10 filas en una sola sección.
+async function sendWhatsAppList(phoneNumberId, accessToken, to, bodyText, botonTexto, opciones, conversationId, footerText = null) {
+  bodyText = await aplicarVariablesGlobales(conversationId, bodyText);
+  const filas = opciones.slice(0, 10).map((o, i) => ({
+    id: String(o.id || 'op_' + i).slice(0, 200),
+    title: String(o.title || '').slice(0, 24),
+    ...(o.description ? { description: String(o.description).slice(0, 72) } : {})
+  }));
+  try {
+    const interactive = {
+      type: 'list',
+      body: { text: bodyText },
+      action: { button: String(botonTexto || 'Ver opciones').slice(0, 20), sections: [{ title: 'Opciones', rows: filas }] }
+    };
+    if (footerText) interactive.footer = { text: String(footerText).slice(0, 60) };
+    await axios.post(
+      `https://graph.facebook.com/${GRAPH_VERSION}/${phoneNumberId}/messages`,
+      { messaging_product: 'whatsapp', ...destinatarioFields(to), type: 'interactive', interactive },
+      { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
+    );
+    if (conversationId) {
+      await saveMessage(conversationId, bodyText + '\n\n' + filas.map((f, i) => `${i + 1}. ${f.title}`).join('\n'), 'outbound', 'text');
+    }
+    console.log('[CloudAPI] ✓ Lista enviada');
+  } catch (err) {
+    avisarSiNumeroBloqueado(phoneNumberId, err);
+    console.error('[WhatsApp list error]', err.response?.data || err.message);
+    // Si Meta la rechaza, al menos que el cliente vea las opciones.
+    await sendWhatsAppMessage(phoneNumberId, accessToken, to, bodyText + '\n\n' + filas.map((f, i) => `${i + 1}. ${f.title}`).join('\n'), conversationId);
+  }
+}
+
+// ── Plantilla aprobada por Meta (bloque Template WhatsApp) ──
+async function sendWhatsAppTemplate(phoneNumberId, accessToken, to, nombre, idioma, conversationId) {
+  await axios.post(
+    `https://graph.facebook.com/${GRAPH_VERSION}/${phoneNumberId}/messages`,
+    { messaging_product: 'whatsapp', ...destinatarioFields(to), type: 'template', template: { name: nombre, language: { code: idioma || 'es' } } },
+    { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }, timeout: 20000 }
+  );
+  if (conversationId) await saveMessage(conversationId, `[Plantilla: ${nombre}]`, 'outbound', 'text');
+  console.log(`[CloudAPI] ✓ Plantilla "${nombre}" enviada`);
 }
 
 async function sendWhatsAppImage(phoneNumberId, accessToken, to, url, caption, conversationId) {
@@ -873,6 +918,22 @@ function urlExternaPermitida(url) {
   return true;
 }
 
+// Lo que bloquesFlujo.js necesita para hablar por la API oficial.
+function canalOficial(phoneNumberId, accessToken, to, conversationId) {
+  return {
+    nombre: 'oficial',
+    texto: t => sendWhatsAppMessage(phoneNumberId, accessToken, to, t, conversationId),
+    imagen: (u, c) => sendWhatsAppImage(phoneNumberId, accessToken, to, u, c || '', conversationId),
+    video: (u, c) => sendWhatsAppVideo(phoneNumberId, accessToken, to, u, c || '', conversationId),
+    audio: u => sendWhatsAppAudio(phoneNumberId, accessToken, to, u, conversationId),
+    documento: (u, n) => sendWhatsAppDocument(phoneNumberId, accessToken, to, u, n || '', conversationId),
+    botones: (body, btns, o = {}) => sendWhatsAppButtons(phoneNumberId, accessToken, to, body, btns, conversationId, o.header || null, o.footer || null),
+    lista: (body, boton, ops, o = {}) => sendWhatsAppList(phoneNumberId, accessToken, to, body, boton, ops, conversationId, o.footer || null),
+    plantilla: (nombre, idioma) => sendWhatsAppTemplate(phoneNumberId, accessToken, to, nombre, idioma, conversationId),
+    variables: t => aplicarVariablesGlobales(conversationId, t)
+  };
+}
+
 async function executeFlow(flowId, contactPhone, userMessage, connection, conversationId, startNodeId = null) {
   const { data: flow } = await supabase.from('flows').select('*').eq('id', flowId).single();
   if (!flow || !flow.nodes?.length) return;
@@ -1034,26 +1095,6 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
       }
 
       // ── Condición / bifurcación ────────────────────────────
-      case 'condition': {
-        const variable = node.data?.variable || 'message';
-        const operator = node.data?.operator || 'contains';
-        const value = (node.data?.value || '').toLowerCase();
-        const checkText = (userMessage || '').toLowerCase();
-
-        let conditionMet = false;
-        if (operator === 'contains') conditionMet = checkText.includes(value);
-        else if (operator === 'equals') conditionMet = checkText === value;
-        else if (operator === 'starts_with') conditionMet = checkText.startsWith(value);
-        else if (operator === 'not_contains') conditionMet = !checkText.includes(value);
-
-        const edges = (flow.edges || []).filter(e => e.source === currentNodeId);
-        const yesEdge = edges.find(e => e.sourceHandle === 'yes' || e.label === 'sí');
-        const noEdge = edges.find(e => e.sourceHandle === 'no' || e.label === 'no');
-        const nextEdge = conditionMet ? yesEdge : noEdge;
-        currentNodeId = nextEdge?.target || null;
-        continue;
-      }
-
       // ── Delay / espera ────────────────────────────────────
       case 'delay': {
         const seconds = node.data?.seconds || 3;
@@ -1065,18 +1106,6 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
       case 'followup':
       case 'delay_followup': {
         await scheduleSeguimientos(node, connection, phoneNumberId, accessToken, to, contactPhone, conversationId);
-        break;
-      }
-
-      // ── Etiqueta (tag al contacto) ─────────────────────────
-      case 'tag':
-      case 'label': {
-        const tag = node.data?.tag || '';
-        if (tag) {
-          const { data: convData } = await supabase.from('conversations').select('tags').eq('id', conversationId).single();
-          const currentTags = convData?.tags || [];
-          await supabase.from('conversations').update({ tags: [...currentTags, tag] }).eq('id', conversationId);
-        }
         break;
       }
 
@@ -1107,126 +1136,30 @@ async function executeFlow(flowId, contactPhone, userMessage, connection, conver
         continue;
       }
 
-      // ── Fin del flujo ──────────────────────────────────────
       // ══════════════════════════════════════════════════════
-      // Bloques nuevos del panel de Nubify.
-      // Son tipos propios: no tocan el comportamiento de los flujos
-      // que ya existen, que siguen usando los tipos de siempre.
+      // Los demás bloques (Menú, Template, Carrusel, Etiquetas,
+      // Condicional, Kanban, Venta, Integración, Distribuidor,
+      // Departamento, Manipulador, PIX…) viven en bloquesFlujo.js,
+      // compartidos con el motor de QR para que se comporten igual
+      // por los dos canales. Ver el `default` de abajo.
       // ══════════════════════════════════════════════════════
-
-      // ── Esperar respuesta: deja el flujo parado hasta que el
-      //    cliente escriba. Al escribir, se retoma desde aquí.
-      case 'wait': {
-        await supabase.from('conversations').update({
-          current_flow_id: flowId, current_node_id: node.id, flow_active: true
-        }).eq('id', conversationId);
-        shouldPause = true;
-        break;
-      }
-
-      // ── Controlador de chat: mueve la conversación entre
-      //    En espera / En atención / Resuelto.
-      case 'chat_status': {
-        const pedido = String(node.data?.status || '').toLowerCase();
-        const mapa = { espera: 'open', waiting: 'open', atencion: 'active', active: 'active', resuelto: 'closed', closed: 'closed' };
-        const estado = mapa[pedido];
-        if (estado) {
-          const cambios = { status: estado };
-          if (estado === 'closed') cambios.finished_at = new Date().toISOString();
-          await supabase.from('conversations').update(cambios).eq('id', conversationId);
-          console.log(`[Flow] Chat movido a "${estado}"`);
-        }
-        break;
-      }
-
-      // ── Kanban: mueve el lead a una columna del tablero.
-      case 'kanban': {
-        const columna = node.data?.columnId || node.data?.column;
-        const tablero = node.data?.boardId || null;
-        if (columna) {
-          try {
-            const { data: fila } = await supabase.from('user_settings').select('data, revision').eq('user_id', connection.user_id).maybeSingle();
-            const datos = fila?.data || {};
-            const sd = datos.settingsData || {};
-            const kanban = sd.kanban || {};
-            if (tablero && Array.isArray(kanban.boards)) {
-              kanban.boards = kanban.boards.map(b => b.id === tablero
-                ? { ...b, assignments: { ...(b.assignments || {}), [conversationId]: columna } }
-                : b);
-            } else {
-              kanban.assignments = { ...(kanban.assignments || {}), [conversationId]: columna };
-            }
-            kanban.updatedAt = Date.now();
-            await supabase.from('user_settings')
-              .update({ data: { ...datos, settingsData: { ...sd, kanban } } })
-              .eq('user_id', connection.user_id);
-            console.log(`[Flow] Lead movido a la columna ${columna}`);
-          } catch (e) { console.error('[Flow] No se pudo mover en el Kanban:', e.message); }
-        }
-        break;
-      }
-
-      // ── Venta aprobada: la registra en el panel.
-      case 'sale': {
-        const monto = Number(node.data?.amount ?? node.data?.monto) || 0;
-        const cambios = {
-          is_sale: true,
-          sale_at: new Date().toISOString(),
-          sale_closed_by: 'flow'
-        };
-        if (monto > 0) cambios.sale_amount = monto;
-        if (node.data?.currency) cambios.sale_currency = node.data.currency;
-        if (node.data?.product) cambios.sale_product = node.data.product;
-        await supabase.from('conversations').update(cambios).eq('id', conversationId);
-        console.log('[Flow] Venta registrada desde el flujo');
-        break;
-      }
-
-      // ── Integración: llama a una URL externa (webhook / API).
-      case 'http': {
-        const url = String(node.data?.url || '').trim();
-        if (!urlExternaPermitida(url)) {
-          console.warn('[Flow] URL no permitida en el bloque Integración:', url);
-          break;
-        }
-        try {
-          const metodo = String(node.data?.method || 'POST').toUpperCase();
-          const cabeceras = { 'Content-Type': 'application/json', ...(node.data?.headers || {}) };
-          const cuerpo = node.data?.body === undefined ? { phone: contactPhone, message: userMessage, conversation_id: conversationId } : node.data.body;
-          const r = await axios({
-            method: metodo,
-            url,
-            headers: cabeceras,
-            data: metodo === 'GET' ? undefined : cuerpo,
-            params: metodo === 'GET' ? cuerpo : undefined,
-            timeout: 10000,
-            maxRedirects: 0,
-            validateStatus: () => true
-          });
-          console.log(`[Flow] Integración ${metodo} ${url} → ${r.status}`);
-        } catch (e) { console.error('[Flow] Falló la integración:', e.message); }
-        break;
-      }
-
-      // ── Distribuidor: reparte los leads entre varias salidas.
-      case 'split': {
-        const salidas = (flow.edges || []).filter(e => e.source === currentNodeId);
-        if (!salidas.length) { currentNodeId = null; continue; }
-        const pesos = node.data?.weights || {};
-        const total = salidas.reduce((a, e) => a + (Number(pesos[e.sourceHandle || e.id]) || 1), 0);
-        let tirada = Math.random() * total;
-        let elegida = salidas[salidas.length - 1];
-        for (const e of salidas) {
-          tirada -= (Number(pesos[e.sourceHandle || e.id]) || 1);
-          if (tirada <= 0) { elegida = e; break; }
-        }
-        currentNodeId = elegida.target || null;
-        continue;
-      }
 
       case 'end':
         currentNodeId = null;
         continue;
+
+      default: {
+        const r = await bloques.ejecutarBloque(node, {
+          userId: connection.user_id, conversationId, contactPhone,
+          userMessage, flow, flowId
+        }, canalOficial(phoneNumberId, accessToken, to, conversationId));
+        if (!r.hecho) break;
+        if (r.fin) { currentNodeId = null; continue; }
+        if (r.pausar) { shouldPause = true; break; }
+        if (r.destino !== undefined) { currentNodeId = r.destino; continue; }
+        if (r.handle) { currentNodeId = bloques.siguientePorSalida(flow, node.id, r.handle); continue; }
+        break;
+      }
     }
 
     if (shouldPause) break;
@@ -1709,6 +1642,25 @@ async function continueFlowFromButton(flowId, pausedNodeId, userResponse, connec
     if (paths.length > 0) {
       return await resolveAIPath(flow, pausedNode, paths, userResponse, connection, contactPhone, conversationId);
     }
+  }
+
+  // Menú, Template, Carrusel y Esperar respuesta eligen su salida
+  // según lo que escribió el cliente.
+  const salida = bloques.salidaAlReanudar(pausedNode, userResponse);
+  if (salida) {
+    const destino = bloques.siguientePorSalida(flow, pausedNodeId, salida);
+    if (!destino) {
+      console.log(`[Flow] La salida "${salida}" de ${pausedNode.type} no está conectada en el editor`);
+      return false;
+    }
+    await supabase.from('conversations').update({ current_node_id: null, current_flow_id: null }).eq('id', conversationId);
+    try { await cancelFollowups(conversationId); } catch (e) { console.error('[Flow] Error cancelando seguimientos:', e.message); }
+    await executeFlow(flowId, contactPhone, userResponse, connection, conversationId, destino);
+    return true;
+  }
+  if (pausedNode.type === 'menu') {
+    console.log('[Flow] El cliente respondió algo que no es una opción del menú');
+    return false;
   }
 
   if (pausedNode.type !== 'buttons' && pausedNode.type !== 'api_message' && pausedNode.type !== 'api') {

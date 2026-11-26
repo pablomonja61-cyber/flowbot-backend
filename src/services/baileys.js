@@ -7,10 +7,11 @@ const axios = require('axios');
 const crypto = require('crypto');
 const plans = require('../services/plans');
 const flujosEstandar = require('./flujosEstandar');
+const bloques = require('./bloquesFlujo');
 const followupGuard = require('../services/followupGuard');
 const path = require('path');
 const fs = require('fs');
-const { cancelFollowups, sendFollowupContentCloud, sendPurchaseEventToMeta } = require('../services/flowEngine');
+const { cancelFollowups, sendFollowupContentCloud, sendPurchaseEventToMeta, aplicarVariablesGlobales } = require('../services/flowEngine');
 
 const activeSessions = {};
 const connectingLocks = {};
@@ -243,6 +244,32 @@ async function sendText(sock, jid, text, conversationId) {
   } catch (e) {
     console.error('[Baileys] Error enviando texto:', e.message);
   }
+}
+
+// ── Lo que bloquesFlujo.js necesita para hablar por QR ───────
+// Por QR no hay listas ni botones nativos de WhatsApp, así que las
+// opciones se mandan numeradas y el cliente responde con el número.
+function canalQR(sock, jid, conversationId) {
+  const vars = t => aplicarVariablesGlobales(conversationId, t);
+  return {
+    nombre: 'qr',
+    texto: async t => sendText(sock, jid, await vars(t), conversationId),
+    imagen: async (u, c) => sendImage(sock, jid, u, await vars(c || ''), conversationId),
+    video: async (u, c) => sendVideoMsg(sock, jid, u, await vars(c || ''), conversationId),
+    audio: u => sendAudioMsg(sock, jid, u, conversationId),
+    documento: (u, n) => sendDocumentMsg(sock, jid, u, n || '', conversationId),
+    botones: async (body, btns, o = {}) => {
+      if (o.header && o.header.type === 'image' && o.header.url) {
+        await sendImage(sock, jid, o.header.url, '', conversationId);
+        await sleep(800);
+      }
+      const texto = (await vars(body || '')) + '\n\n' + btns.map((b, i) => `${i + 1}. ${b}`).join('\n') + (o.footer ? '\n\n' + o.footer : '');
+      await sendText(sock, jid, texto, conversationId);
+    },
+    lista: null,
+    plantilla: null,
+    variables: vars
+  };
 }
 
 // ── Enviar imagen ────────────────────────────────────────────
@@ -851,6 +878,28 @@ async function executeFlowBaileys(flowId, sock, jid, contactPhone, userMessage, 
         console.log('[Baileys Flow] Fin del flujo');
         currentNodeId = null;
         continue;
+
+      // Todos los demás bloques (Menú, Etiquetas, Condicional, Esperar,
+      // Controlador de chat, Kanban, Venta, Integración, Distribuidor,
+      // Departamento, Manipulador, PIX, Carrusel…) los ejecuta el módulo
+      // compartido, el mismo que usa la API oficial.
+      default: {
+        const { data: convUsuario } = await supabase.from('conversations').select('user_id').eq('id', conversationId).maybeSingle();
+        const r = await bloques.ejecutarBloque(node, {
+          userId: convUsuario?.user_id, conversationId, contactPhone,
+          userMessage, flow, flowId
+        }, canalQR(sock, jid, conversationId));
+        if (!r.hecho) break;
+        if (r.fin) { currentNodeId = null; continue; }
+        if (r.pausar) {
+          await scheduleAttachedFollowups(flow, node.id, sock, jid, contactPhone, conversationId);
+          shouldPause = true;
+          break;
+        }
+        if (r.destino !== undefined) { currentNodeId = r.destino; continue; }
+        if (r.handle) { currentNodeId = bloques.siguientePorSalida(flow, node.id, r.handle); continue; }
+        break;
+      }
     }
 
     if (shouldPause) break;
@@ -1025,6 +1074,26 @@ async function continueFlowFromButtonBaileys(flowId, pausedNodeId, userResponse,
       );
       return handled;
     }
+  }
+
+  // Menú, Template, Carrusel y Esperar respuesta eligen su salida según
+  // lo que escribió el cliente (misma regla que en la API oficial).
+  const salida = bloques.salidaAlReanudar(pausedNode, userResponse);
+  if (salida) {
+    const destino = bloques.siguientePorSalida(flow, pausedNodeId, salida);
+    if (!destino) {
+      console.log(`[Baileys Flow] La salida "${salida}" de ${pausedNode.type} no está conectada en el editor`);
+      return false;
+    }
+    await supabase.from('conversations').update({ current_node_id: null, current_flow_id: null }).eq('id', conversationId);
+    try { await cancelFollowups(conversationId); } catch (e) { console.error('[Baileys Flow] Error cancelando seguimientos:', e.message); }
+    console.log(`[Baileys Flow] ▶ Continuando por "${salida}" → ${destino}`);
+    await executeFlowBaileys(flowId, sock, jid, contactPhone, userResponse, conversationId, destino);
+    return true;
+  }
+  if (pausedNode.type === 'menu') {
+    console.log('[Baileys Flow] El cliente respondió algo que no es una opción del menú');
+    return false;
   }
 
   // Si el nodo pausado es de texto normal (no botones API), simplemente

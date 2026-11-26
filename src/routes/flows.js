@@ -88,7 +88,9 @@ router.post('/', async (req, res, next) => {
         description,
         nodes: finalNodes,
         edges: finalEdges,
-        is_active: true
+        // Un flujo recién creado nace pausado: se activa cuando el
+        // usuario lo decide, no antes de tener nada dentro.
+        is_active: req.body.is_active === true
       })
       .select()
       .single();

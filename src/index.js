@@ -128,6 +128,7 @@ setTimeout(() => restoreActiveSessions(), 3000);
 
 // Los envíos masivos programados: se van mandando uno a uno.
 require('./services/enviosMasivos').arrancar();
+require('./services/tiemposDeEspera').arrancar();
 scheduledRoutes.iniciar();
 
 app.listen(PORT, () => {
